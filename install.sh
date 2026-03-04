@@ -152,6 +152,15 @@ else
     info "Config already exists at $CONFIG_FILE (not overwritten)"
 fi
 
+# Ensure PATH includes common binary locations (needed for launchd/systemd)
+if ! grep -q '^PATH=' "$CONFIG_FILE" 2>/dev/null; then
+    if [ "$OS" = "Darwin" ]; then
+        echo "PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin" >> "$CONFIG_FILE"
+    else
+        echo "PATH=/usr/local/bin:/usr/bin:/bin" >> "$CONFIG_FILE"
+    fi
+fi
+
 # ── Wrapper script ───────────────────────────────────────────────────
 
 mkdir -p "$BIN_DIR"
