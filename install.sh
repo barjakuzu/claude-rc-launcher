@@ -20,14 +20,17 @@ ok()    { printf '\033[1;32m=>\033[0m %s\n' "$*"; }
 warn()  { printf '\033[1;33m=>\033[0m %s\n' "$*"; }
 err()   { printf '\033[1;31m=>\033[0m %s\n' "$*" >&2; exit 1; }
 
+# Save stdin fd for prompts — needed when subcommands consume stdin
+exec 3<&0
+
 prompt_yn() {
     local answer
     if [ -e /dev/tty ]; then
         printf '\033[1;36m??\033[0m %s ' "$1" > /dev/tty
         read -r answer < /dev/tty
     else
-        printf '\033[1;36m??\033[0m %s ' "$1"
-        read -r answer || true
+        printf '\033[1;36m??\033[0m %s ' "$1" >&2
+        read -r answer <&3 || true
     fi
     answer="${answer:-$2}"
     [[ "$answer" =~ ^[Yy] ]]
@@ -40,8 +43,8 @@ prompt_value() {
         printf '\033[1;36m??\033[0m %s ' "$1" > /dev/tty
         read -r value < /dev/tty
     else
-        printf '\033[1;36m??\033[0m %s ' "$1"
-        read -r value || true
+        printf '\033[1;36m??\033[0m %s ' "$1" >&2
+        read -r value <&3 || true
     fi
     echo "${value:-$2}"
 }
@@ -98,7 +101,7 @@ if ! command -v cloudflared > /dev/null 2>&1; then
             esac
             CF_URL="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${CF_ARCH}"
             mkdir -p "$BIN_DIR"
-            curl -fsSL "$CF_URL" -o "$BIN_DIR/cloudflared"
+            curl -fsSL "$CF_URL" -o "$BIN_DIR/cloudflared" < /dev/null
             chmod +x "$BIN_DIR/cloudflared"
         elif [ "$OS" = "Darwin" ]; then
             if command -v brew > /dev/null 2>&1; then
@@ -115,17 +118,17 @@ fi
 
 if [ -d "$APP_DIR/.git" ]; then
     info "Existing installation found — updating..."
-    git -C "$APP_DIR" pull --ff-only
+    git -C "$APP_DIR" pull --ff-only < /dev/null
     ok "Updated to latest"
 else
     info "Cloning repository..."
     mkdir -p "$(dirname "$APP_DIR")"
-    if git clone https://github.com/barjakuzu/claude-rc-launcher.git "$APP_DIR" 2>/dev/null; then
+    if git clone https://github.com/barjakuzu/claude-rc-launcher.git "$APP_DIR" < /dev/null 2>/dev/null; then
         ok "Cloned to $APP_DIR"
     else
         warn "git clone failed — downloading as tarball..."
         TMP_TAR="$(mktemp -d)"
-        curl -fsSL "https://api.github.com/repos/barjakuzu/claude-rc-launcher/tarball/main" | tar xz -C "$TMP_TAR" --strip-components=1
+        curl -fsSL "https://api.github.com/repos/barjakuzu/claude-rc-launcher/tarball/main" < /dev/null | tar xz -C "$TMP_TAR" --strip-components=1
         mv "$TMP_TAR" "$APP_DIR"
         ok "Downloaded to $APP_DIR"
     fi
