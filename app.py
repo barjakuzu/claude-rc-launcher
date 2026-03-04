@@ -60,10 +60,11 @@ def _start_tunnel():
     def _read_stderr():
         global _tunnel_url
         for line in proc.stderr:
-            text = line.decode("utf-8", errors="replace")
+            text = line.decode("utf-8", errors="replace").strip()
             m = re.search(r'(https://[a-z0-9-]+\.trycloudflare\.com)', text)
             if m:
                 _tunnel_url = m.group(1)
+                print(f"  Tunnel URL: {_tunnel_url}")
 
     t = threading.Thread(target=_read_stderr, daemon=True)
     t.start()
@@ -179,20 +180,26 @@ def _setup_session(session_name, display_name, mode):
     """Send /remote-control, wait for URL, then /rename."""
     time.sleep(3)
     if not _session_exists(session_name):
+        print(f"  {session_name}: session died before setup")
         return
+    print(f"  {session_name}: sending /remote-control")
     subprocess.run(["tmux", "send-keys", "-t", session_name, "-l", "/remote-control"], capture_output=True)
     time.sleep(0.5)
     subprocess.run(["tmux", "send-keys", "-t", session_name, "Enter"], capture_output=True)
-    for _ in range(30):
+    for i in range(30):
         time.sleep(2)
         if not _session_exists(session_name):
+            print(f"  {session_name}: session died while waiting for URL")
             return
-        if _get_url(session_name):
+        url = _get_url(session_name)
+        if url:
+            print(f"  {session_name}: got URL → {url}")
             time.sleep(1)
             subprocess.run(["tmux", "send-keys", "-t", session_name, "-l", f"/rename {display_name}"], capture_output=True)
             time.sleep(0.5)
             subprocess.run(["tmux", "send-keys", "-t", session_name, "Enter"], capture_output=True)
             return
+    print(f"  {session_name}: timed out waiting for URL")
 
 
 def _stop_session(name):
@@ -718,17 +725,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
             # Start interactive claude session with appropriate flags
             claude_flags = RC_FLAGS[mode]
-            subprocess.run(
-                [
-                    "tmux", "new-session", "-d", "-s", name,
-                    "-c", session_dir,
-                    "-e", f"RC_MODE={mode}",
-                    "-e", f"RC_WORKDIR={session_dir}",
-                    SHELL_BIN, "-lc",
-                    f"unset CLAUDE_CODE_SSE_PORT CLAUDECODE HTTP_PROXY HTTPS_PROXY http_proxy https_proxy; {CLAUDE_BIN} {claude_flags}",
-                ],
-                capture_output=True,
-            )
+            cmd = [
+                "tmux", "new-session", "-d", "-s", name,
+                "-c", session_dir,
+                "-e", f"RC_MODE={mode}",
+                "-e", f"RC_WORKDIR={session_dir}",
+                SHELL_BIN, "-lc",
+                f"unset CLAUDE_CODE_SSE_PORT CLAUDECODE HTTP_PROXY HTTPS_PROXY http_proxy https_proxy; {CLAUDE_BIN} {claude_flags}",
+            ]
+            print(f"  Starting session: {name} (mode={mode}, dir={session_dir})")
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode != 0:
+                print(f"  ERROR: tmux failed: {result.stderr.strip()}")
+            else:
+                print(f"  Session {name} created")
             # Background: send /remote-control, wait for URL, then /rename
             threading.Thread(
                 target=_setup_session, args=(name, name, mode), daemon=True
@@ -766,8 +776,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
         else:
             self.send_error(404)
 
-    def log_message(self, format, *args):
-        pass
+    def log_message(self, fmt, *args):
+        # Log non-polling requests (skip noisy status/session polls)
+        path = self.path.split("?")[0]
+        if path in ("/rc/sessions", "/rc/tunnel/status", "/rc/projects"):
+            return
+        print(f"  {self.command} {self.path} → {args[1] if len(args) > 1 else ''}")
 
 
 if __name__ == "__main__":
