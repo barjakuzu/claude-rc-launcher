@@ -1,0 +1,17 @@
+services:
+  rc-launcher:
+    build: .
+    ports:
+      - "${RC_PORT:-8200}:8200"
+    env_file:
+      - .env
+    volumes:
+      # Mount Claude CLI binary from host
+      - ${CLAUDE_BIN_HOST:-/usr/local/bin/claude}:/usr/local/bin/claude:ro
+      # Mount Claude config (run `claude login` on host first)
+      - ${HOME}/.claude:/root/.claude
+      # Mount project directory as working dir
+      - ${RC_WORKING_DIR:-.}:/workspace
+    environment:
+      - RC_WORKING_DIR=/workspace
+    restart: unless-stopped

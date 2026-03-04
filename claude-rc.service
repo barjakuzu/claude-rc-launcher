@@ -1,0 +1,13 @@
+[Unit]
+Description=Claude RC Launcher
+After=network.target
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/claude-rc/env
+ExecStart=/usr/bin/env python3 %h/.local/share/claude-rc/app.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
