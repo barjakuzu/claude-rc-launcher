@@ -380,6 +380,29 @@ HTML_PAGE = r"""<!DOCTYPE html>
   @keyframes spin { to { transform: rotate(360deg); } }
 
   #custom-path-wrap { display: none; margin-top: 0.5rem; }
+
+  /* Directory browser */
+  .dir-browser-wrap { position: relative; }
+  .dir-browser-input { width: 100%; padding: 0.6rem 0.8rem; border: 1px solid #262626; border-radius: 10px; background: #0a0a0a; color: #e2e8f0; font-size: 0.9rem; cursor: pointer; transition: all 0.2s; }
+  .dir-browser-input:hover { border-color: #333; }
+  .dir-browser-input:focus { outline: none; border-color: #525252; box-shadow: 0 0 0 3px rgba(82,82,82,0.15); }
+  .dir-browser { display: none; position: absolute; top: 100%; left: 0; right: 0; z-index: 50; margin-top: 4px; background: #141414; border: 1px solid #262626; border-radius: 10px; overflow: hidden; box-shadow: 0 8px 24px rgba(0,0,0,0.5); }
+  .dir-browser.open { display: block; }
+  .dir-breadcrumb { display: flex; flex-wrap: wrap; align-items: center; gap: 2px; padding: 0.5rem 0.75rem; border-bottom: 1px solid #1e1e1e; font-size: 0.75rem; font-family: 'SF Mono', 'Fira Code', monospace; }
+  .dir-breadcrumb-seg { color: #64748b; cursor: pointer; padding: 1px 3px; border-radius: 3px; transition: color 0.15s, background 0.15s; }
+  .dir-breadcrumb-seg:hover { color: #e2e8f0; background: rgba(255,255,255,0.06); }
+  .dir-breadcrumb-sep { color: #333; margin: 0 1px; user-select: none; }
+  .dir-list { max-height: 200px; overflow-y: auto; padding: 0.25rem 0; }
+  .dir-list::-webkit-scrollbar { width: 6px; }
+  .dir-list::-webkit-scrollbar-track { background: transparent; }
+  .dir-list::-webkit-scrollbar-thumb { background: #333; border-radius: 3px; }
+  .dir-item { display: flex; align-items: center; gap: 0.5rem; padding: 0.4rem 0.75rem; cursor: pointer; font-size: 0.82rem; color: #cbd5e1; transition: background 0.12s; }
+  .dir-item:hover { background: rgba(255,255,255,0.06); }
+  .dir-item svg { width: 14px; height: 14px; flex-shrink: 0; color: #475569; }
+  .dir-empty { padding: 0.75rem; text-align: center; color: #475569; font-size: 0.78rem; font-style: italic; }
+  .dir-select-btn { display: block; width: calc(100% - 1rem); margin: 0.35rem 0.5rem 0.5rem; padding: 0.45rem; border: 1px solid #333; border-radius: 8px; background: linear-gradient(135deg, #262626, #1a1a1a); color: #e5e5e5; font-size: 0.8rem; font-weight: 600; cursor: pointer; text-align: center; transition: all 0.2s; }
+  .dir-select-btn:hover { border-color: #444; }
+
   .version { text-align: center; color: #1e293b; font-size: 0.65rem; margin-top: 1.5rem; }
 </style>
 </head>
@@ -397,13 +420,18 @@ HTML_PAGE = r"""<!DOCTYPE html>
 
   <div class="card">
     <div class="form-group" id="project-group">
-      <label for="project-select">Working Directory</label>
-      <div class="select-wrap">
+      <label>Working Directory</label>
+      <div id="project-select-wrap" class="select-wrap" style="display:none;">
         <select id="project-select" class="custom-select" onchange="onProjectChange()"></select>
         <span class="select-arrow"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg></span>
       </div>
-      <div id="custom-path-wrap">
-        <input type="text" id="custom-path" placeholder="/path/to/project" />
+      <div id="dir-browser-wrap" class="dir-browser-wrap" style="display:none;">
+        <input type="text" id="dir-browser-input" class="dir-browser-input" readonly onclick="toggleBrowser()" />
+        <div id="dir-browser" class="dir-browser">
+          <div id="dir-breadcrumb" class="dir-breadcrumb"></div>
+          <div id="dir-list" class="dir-list"></div>
+          <button class="dir-select-btn" onclick="selectDir(currentBrowsePath)">Use this folder</button>
+        </div>
       </div>
     </div>
 
@@ -498,24 +526,42 @@ async function api(method, path, body) {
   return r.json();
 }
 
+let currentBrowsePath = null;
+let selectedWorkdir = null;
+let browserOpen = false;
+let hasProjects = false;
+
 function onProjectChange() {
   const sel = document.getElementById('project-select');
-  document.getElementById('custom-path-wrap').style.display = sel.value === '__custom__' ? 'block' : 'none';
+  const browserWrap = document.getElementById('dir-browser-wrap');
+  if (sel.value === '__browse__') {
+    browserWrap.style.display = 'block';
+    selectedWorkdir = null;
+    browseTo(currentBrowsePath || selectedWorkdir);
+  } else {
+    browserWrap.style.display = 'none';
+    closeBrowser();
+  }
 }
 
 async function loadProjects() {
   try {
     const data = await api('GET', '/projects');
     const projects = data.projects || [];
-    const selWrap = document.querySelector('#project-group .select-wrap');
-    const customWrap = document.getElementById('custom-path-wrap');
-    const customInput = document.getElementById('custom-path');
+    const selWrap = document.getElementById('project-select-wrap');
+    const browserWrap = document.getElementById('dir-browser-wrap');
+    selectedWorkdir = null;
+    currentBrowsePath = data.default || '/';
     if (projects.length === 0) {
+      hasProjects = false;
       selWrap.style.display = 'none';
-      customWrap.style.display = 'block';
-      customInput.placeholder = data.default || '/path/to/project';
+      browserWrap.style.display = 'block';
+      document.getElementById('dir-browser-input').value = data.default || '/';
+      browseTo(data.default || '/');
     } else {
+      hasProjects = true;
       selWrap.style.display = '';
+      browserWrap.style.display = 'none';
       const sel = document.getElementById('project-select');
       sel.innerHTML = '<option value="">Default (' + escHtml(data.default_name) + ')</option>';
       projects.forEach(p => {
@@ -526,13 +572,74 @@ async function loadProjects() {
         if (!p.exists) opt.disabled = true;
         sel.appendChild(opt);
       });
-      const custom = document.createElement('option');
-      custom.value = '__custom__';
-      custom.textContent = 'Custom path\u2026';
-      sel.appendChild(custom);
+      const browse = document.createElement('option');
+      browse.value = '__browse__';
+      browse.textContent = 'Browse\u2026';
+      sel.appendChild(browse);
     }
   } catch(e) {}
 }
+
+function toggleBrowser() {
+  const panel = document.getElementById('dir-browser');
+  if (browserOpen) {
+    closeBrowser();
+  } else {
+    panel.classList.add('open');
+    browserOpen = true;
+    browseTo(currentBrowsePath || selectedWorkdir || '/');
+  }
+}
+
+function closeBrowser() {
+  document.getElementById('dir-browser').classList.remove('open');
+  browserOpen = false;
+}
+
+async function browseTo(path) {
+  if (!path) path = '/';
+  currentBrowsePath = path;
+  const listEl = document.getElementById('dir-list');
+  const crumbEl = document.getElementById('dir-breadcrumb');
+  listEl.innerHTML = '<div class="dir-empty">Loading\u2026</div>';
+  try {
+    const data = await api('GET', '/browse?path=' + encodeURIComponent(path));
+    currentBrowsePath = data.path;
+    // Render breadcrumb
+    const parts = data.path.split('/').filter(Boolean);
+    let crumbHtml = '<span class="dir-breadcrumb-seg" onclick="browseTo(\'/\')">/</span>';
+    let accumulated = '';
+    parts.forEach((part, i) => {
+      accumulated += '/' + part;
+      const p = accumulated;
+      crumbHtml += '<span class="dir-breadcrumb-sep">/</span><span class="dir-breadcrumb-seg" onclick="browseTo(\'' + escHtml(p.replace(/'/g, "\\\\'")) + '\')">' + escHtml(part) + '</span>';
+    });
+    crumbEl.innerHTML = crumbHtml;
+    // Render dirs
+    if (data.dirs.length === 0) {
+      listEl.innerHTML = '<div class="dir-empty">No subfolders</div>';
+    } else {
+      listEl.innerHTML = data.dirs.map(d => {
+        const full = (data.path === '/' ? '/' : data.path + '/') + d;
+        return '<div class="dir-item" onclick="browseTo(\'' + escHtml(full.replace(/'/g, "\\\\'")) + '\')">' + ICN.folder + ' ' + escHtml(d) + '</div>';
+      }).join('');
+    }
+  } catch(e) {
+    listEl.innerHTML = '<div class="dir-empty">Error loading directory</div>';
+  }
+}
+
+function selectDir(path) {
+  selectedWorkdir = path || currentBrowsePath;
+  document.getElementById('dir-browser-input').value = selectedWorkdir;
+  closeBrowser();
+}
+
+document.addEventListener('click', function(e) {
+  if (!browserOpen) return;
+  const wrap = document.getElementById('dir-browser-wrap');
+  if (!wrap.contains(e.target)) closeBrowser();
+});
 
 function escHtml(s) {
   const d = document.createElement('div');
@@ -541,12 +648,12 @@ function escHtml(s) {
 }
 
 function getSelectedWorkdir() {
-  const selWrap = document.querySelector('#project-group .select-wrap');
+  const selWrap = document.getElementById('project-select-wrap');
   if (selWrap.style.display === 'none') {
-    return document.getElementById('custom-path').value.trim() || undefined;
+    return selectedWorkdir || undefined;
   }
   const sel = document.getElementById('project-select');
-  if (sel.value === '__custom__') return document.getElementById('custom-path').value.trim() || undefined;
+  if (sel.value === '__browse__') return selectedWorkdir || undefined;
   return sel.value || undefined;
 }
 
@@ -752,6 +859,25 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "default": WORKING_DIR,
                 "default_name": os.path.basename(WORKING_DIR.rstrip("/")),
             })
+        elif path.startswith("/browse"):
+            from urllib.parse import urlparse, parse_qs
+            qs = parse_qs(urlparse(self.path).query)
+            browse_path = qs.get("path", [WORKING_DIR])[0]
+            browse_path = os.path.abspath(browse_path)
+            if not os.path.isdir(browse_path):
+                self._json({"error": "Not a directory"}, 400)
+                return
+            try:
+                entries = os.listdir(browse_path)
+            except PermissionError:
+                self._json({"error": "Permission denied"}, 400)
+                return
+            dirs = sorted(
+                [e for e in entries if not e.startswith(".") and os.path.isdir(os.path.join(browse_path, e))],
+                key=str.lower
+            )
+            parent = os.path.dirname(browse_path) if browse_path != "/" else None
+            self._json({"path": browse_path, "parent": parent, "dirs": dirs})
         elif path == "/tunnel/status":
             global _tunnel_proc, _tunnel_url
             running = _tunnel_proc is not None and _tunnel_proc.poll() is None
@@ -871,7 +997,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         # Log non-polling requests (skip noisy status/session polls)
         path = self.path.split("?")[0]
-        if path in ("/rc/sessions", "/rc/tunnel/status", "/rc/projects"):
+        if path in ("/rc/sessions", "/rc/tunnel/status", "/rc/projects", "/rc/browse"):
             return
         print(f"  {self.command} {self.path} → {args[1] if len(args) > 1 else ''}")
 
