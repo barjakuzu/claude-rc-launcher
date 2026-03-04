@@ -184,14 +184,32 @@ mkdir -p "$BIN_DIR"
 cat > "$BIN_LINK" <<'WRAPPER'
 #!/usr/bin/env bash
 set -euo pipefail
+APP_DIR="$HOME/.local/share/claude-rc"
 CONFIG="$HOME/.config/claude-rc/env"
+
+if [ "${1:-}" = "update" ]; then
+    echo "Updating claude-rc..."
+    if [ -d "$APP_DIR/.git" ]; then
+        git -C "$APP_DIR" pull --ff-only
+        echo "Updated. Restart the service to apply changes:"
+        case "$(uname -s)" in
+            Darwin) echo "  launchctl unload ~/Library/LaunchAgents/com.claude-rc.launcher.plist"
+                    echo "  launchctl load ~/Library/LaunchAgents/com.claude-rc.launcher.plist" ;;
+            *)      echo "  systemctl --user restart claude-rc" ;;
+        esac
+    else
+        echo "Not a git install. Re-run the install script to update."
+    fi
+    exit 0
+fi
+
 if [ -f "$CONFIG" ]; then
     set -a
     # shellcheck disable=SC1090
     . "$CONFIG"
     set +a
 fi
-exec python3 "$HOME/.local/share/claude-rc/app.py" "$@"
+exec python3 "$APP_DIR/app.py" "$@"
 WRAPPER
 chmod +x "$BIN_LINK"
 ok "Created wrapper at $BIN_LINK"

@@ -284,24 +284,24 @@ HTML_PAGE = r"""<!DOCTYPE html>
 <title>Claude RC Launcher</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { font-family: -apple-system, system-ui, 'Segoe UI', sans-serif; background: #0b1120; color: #e2e8f0; min-height: 100vh; padding: 1.5rem 1rem; }
+  body { font-family: -apple-system, system-ui, 'Segoe UI', sans-serif; background: #0a0a0a; color: #e2e8f0; min-height: 100vh; padding: 1.5rem 1rem; }
   .container { max-width: 480px; margin: 0 auto; }
 
   .logo { text-align: center; margin-bottom: 1.5rem; }
   .logo svg { width: 36px; height: 36px; margin-bottom: 0.5rem; }
-  h1 { font-size: 1.35rem; font-weight: 700; letter-spacing: -0.02em; background: linear-gradient(135deg, #60a5fa, #a78bfa); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; }
+  h1 { font-size: 1.35rem; font-weight: 700; letter-spacing: -0.02em; background: linear-gradient(135deg, #d4d4d4, #a3a3a3); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; }
   .subtitle { color: #475569; font-size: 0.75rem; margin-top: 0.2rem; letter-spacing: 0.05em; text-transform: uppercase; }
 
-  .card { background: #131a2b; border: 1px solid rgba(255,255,255,0.06); border-radius: 16px; padding: 1.5rem; margin-bottom: 1.25rem; }
+  .card { background: #141414; border: 1px solid rgba(255,255,255,0.06); border-radius: 16px; padding: 1.5rem; margin-bottom: 1.25rem; }
   .form-group { margin-bottom: 1.2rem; }
   label { display: block; font-size: 0.75rem; color: #64748b; margin-bottom: 0.35rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; }
-  input[type="text"] { width: 100%; padding: 0.6rem 0.8rem; border: 1px solid #1e293b; border-radius: 10px; background: #0b1120; color: #e2e8f0; font-size: 0.9rem; transition: all 0.2s; }
-  input[type="text"]:focus { outline: none; border-color: #3b82f6; box-shadow: 0 0 0 3px rgba(59,130,246,0.12); }
+  input[type="text"] { width: 100%; padding: 0.6rem 0.8rem; border: 1px solid #262626; border-radius: 10px; background: #0a0a0a; color: #e2e8f0; font-size: 0.9rem; transition: all 0.2s; }
+  input[type="text"]:focus { outline: none; border-color: #525252; box-shadow: 0 0 0 3px rgba(82,82,82,0.15); }
   input[type="text"]::placeholder { color: #334155; }
 
   .select-wrap { position: relative; }
-  .custom-select { width: 100%; padding: 0.6rem 2.5rem 0.6rem 0.8rem; border: 1px solid #1e293b; border-radius: 10px; background: #0b1120; color: #e2e8f0; font-size: 0.9rem; appearance: none; -webkit-appearance: none; cursor: pointer; transition: all 0.2s; }
-  .custom-select:focus { outline: none; border-color: #3b82f6; box-shadow: 0 0 0 3px rgba(59,130,246,0.12); }
+  .custom-select { width: 100%; padding: 0.6rem 2.5rem 0.6rem 0.8rem; border: 1px solid #262626; border-radius: 10px; background: #0a0a0a; color: #e2e8f0; font-size: 0.9rem; appearance: none; -webkit-appearance: none; cursor: pointer; transition: all 0.2s; }
+  .custom-select:focus { outline: none; border-color: #525252; box-shadow: 0 0 0 3px rgba(82,82,82,0.15); }
   .select-arrow { position: absolute; right: 0.8rem; top: 50%; transform: translateY(-50%); pointer-events: none; color: #475569; }
   .select-arrow svg { width: 12px; height: 12px; }
   .mode-info { display: flex; align-items: center; gap: 0.5rem; padding: 0.55rem 0.75rem; background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.04); border-radius: 8px; margin-top: 0.75rem; }
@@ -316,12 +316,12 @@ HTML_PAGE = r"""<!DOCTYPE html>
   .btn-launch:hover:not(:disabled) { transform: translateY(-1px); }
   .btn-launch:active:not(:disabled) { transform: translateY(0); }
   .btn-launch svg { width: 16px; height: 16px; }
-  .btn-launch.mode-c { background: linear-gradient(135deg, #10b981, #059669); color: white; box-shadow: 0 4px 15px rgba(16,185,129,0.25); }
-  .btn-launch.mode-c:hover:not(:disabled) { box-shadow: 0 6px 20px rgba(16,185,129,0.35); }
-  .btn-launch.mode-ci { background: linear-gradient(135deg, #3b82f6, #2563eb); color: white; box-shadow: 0 4px 15px rgba(59,130,246,0.25); }
-  .btn-launch.mode-ci:hover:not(:disabled) { box-shadow: 0 6px 20px rgba(59,130,246,0.35); }
-  .btn-launch.mode-safe { background: linear-gradient(135deg, #8b5cf6, #7c3aed); color: white; box-shadow: 0 4px 15px rgba(139,92,246,0.25); }
-  .btn-launch.mode-safe:hover:not(:disabled) { box-shadow: 0 6px 20px rgba(139,92,246,0.35); }
+  .btn-launch.mode-c { background: linear-gradient(135deg, #262626, #1a1a1a); color: #e5e5e5; box-shadow: 0 4px 15px rgba(0,0,0,0.3); border: 1px solid #333; }
+  .btn-launch.mode-c:hover:not(:disabled) { box-shadow: 0 6px 20px rgba(0,0,0,0.4); border-color: #444; }
+  .btn-launch.mode-ci { background: linear-gradient(135deg, #262626, #1a1a1a); color: #e5e5e5; box-shadow: 0 4px 15px rgba(0,0,0,0.3); border: 1px solid #333; }
+  .btn-launch.mode-ci:hover:not(:disabled) { box-shadow: 0 6px 20px rgba(0,0,0,0.4); border-color: #444; }
+  .btn-launch.mode-safe { background: linear-gradient(135deg, #262626, #1a1a1a); color: #e5e5e5; box-shadow: 0 4px 15px rgba(0,0,0,0.3); border: 1px solid #333; }
+  .btn-launch.mode-safe:hover:not(:disabled) { box-shadow: 0 6px 20px rgba(0,0,0,0.4); border-color: #444; }
 
   .btn-stop { background: rgba(239,68,68,0.12); color: #f87171; font-size: 0.78rem; padding: 0.4rem 0.85rem; width: auto; border: 1px solid rgba(239,68,68,0.2); border-radius: 6px; cursor: pointer; font-weight: 600; transition: all 0.2s; display: inline-flex; align-items: center; gap: 0.35rem; }
   .btn-stop:hover:not(:disabled) { background: rgba(239,68,68,0.2); }
@@ -332,19 +332,19 @@ HTML_PAGE = r"""<!DOCTYPE html>
   .sessions-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.6rem; }
   .section-title { font-size: 0.8rem; color: #475569; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; display: flex; align-items: center; gap: 0.4rem; }
   .section-title svg { width: 14px; height: 14px; }
-  .session-card { background: #131a2b; border: 1px solid rgba(255,255,255,0.06); border-radius: 12px; padding: 1rem 1.15rem; margin-bottom: 0.5rem; transition: border-color 0.2s; }
+  .session-card { background: #141414; border: 1px solid rgba(255,255,255,0.06); border-radius: 12px; padding: 1rem 1.15rem; margin-bottom: 0.5rem; transition: border-color 0.2s; }
   .session-card:hover { border-color: rgba(255,255,255,0.1); }
   .session-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.5rem; }
   .session-name { font-weight: 600; font-size: 0.9rem; display: flex; align-items: center; gap: 0.4rem; }
   .badge { font-size: 0.6rem; font-weight: 700; padding: 0.18rem 0.5rem; border-radius: 5px; text-transform: uppercase; letter-spacing: 0.04em; }
-  .badge-c { background: rgba(16,185,129,0.12); color: #34d399; border: 1px solid rgba(16,185,129,0.2); }
-  .badge-ci { background: rgba(59,130,246,0.12); color: #60a5fa; border: 1px solid rgba(59,130,246,0.2); }
-  .badge-safe { background: rgba(139,92,246,0.12); color: #a78bfa; border: 1px solid rgba(139,92,246,0.2); }
+  .badge-c { background: rgba(163,163,163,0.1); color: #a3a3a3; border: 1px solid rgba(163,163,163,0.2); }
+  .badge-ci { background: rgba(163,163,163,0.1); color: #a3a3a3; border: 1px solid rgba(163,163,163,0.2); }
+  .badge-safe { background: rgba(163,163,163,0.1); color: #a3a3a3; border: 1px solid rgba(163,163,163,0.2); }
   .perm-tag { font-size: 0.6rem; padding: 0.15rem 0.45rem; border-radius: 4px; font-weight: 600; }
-  .perm-skip { background: rgba(251,191,36,0.1); color: #fbbf24; border: 1px solid rgba(251,191,36,0.15); }
-  .perm-normal { background: rgba(139,92,246,0.1); color: #c4b5fd; border: 1px solid rgba(139,92,246,0.15); }
-  .session-url { background: #0b1120; border: 1px solid #1e293b; border-radius: 8px; padding: 0.5rem 0.75rem; margin-bottom: 0.65rem; word-break: break-all; font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.75rem; }
-  .session-url a { color: #60a5fa; text-decoration: none; }
+  .perm-skip { background: rgba(163,163,163,0.08); color: #a3a3a3; border: 1px solid rgba(163,163,163,0.15); }
+  .perm-normal { background: rgba(163,163,163,0.08); color: #a3a3a3; border: 1px solid rgba(163,163,163,0.15); }
+  .session-url { background: #0a0a0a; border: 1px solid #262626; border-radius: 8px; padding: 0.5rem 0.75rem; margin-bottom: 0.65rem; word-break: break-all; font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.75rem; }
+  .session-url a { color: #d4d4d4; text-decoration: none; }
   .session-url a:hover { text-decoration: underline; }
   .waiting { color: #64748b; font-style: italic; display: flex; align-items: center; gap: 0.4rem; }
   .waiting svg { width: 14px; height: 14px; animation: spin 1.5s linear infinite; }
@@ -353,16 +353,16 @@ HTML_PAGE = r"""<!DOCTYPE html>
   .project-label svg { width: 11px; height: 11px; }
 
   /* Share / Remote Access */
-  .share-card { background: #131a2b; border: 1px solid rgba(255,255,255,0.06); border-radius: 16px; padding: 1.25rem; margin-top: 1.25rem; }
+  .share-card { background: #141414; border: 1px solid rgba(255,255,255,0.06); border-radius: 16px; padding: 1.25rem; margin-top: 1.25rem; }
   .share-card h3 { font-size: 0.8rem; color: #475569; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.75rem; display: flex; align-items: center; gap: 0.4rem; }
   .share-card h3 svg { width: 14px; height: 14px; }
-  .share-url { background: #0b1120; border: 1px solid #1e293b; border-radius: 8px; padding: 0.5rem 0.75rem; margin-bottom: 0.65rem; word-break: break-all; font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.75rem; display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; }
-  .share-url a { color: #60a5fa; text-decoration: none; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-  .btn-copy { background: rgba(59,130,246,0.12); color: #60a5fa; border: 1px solid rgba(59,130,246,0.2); border-radius: 6px; padding: 0.3rem 0.6rem; font-size: 0.7rem; font-weight: 600; cursor: pointer; white-space: nowrap; display: inline-flex; align-items: center; gap: 0.3rem; }
-  .btn-copy:hover { background: rgba(59,130,246,0.2); }
+  .share-url { background: #0a0a0a; border: 1px solid #262626; border-radius: 8px; padding: 0.5rem 0.75rem; margin-bottom: 0.65rem; word-break: break-all; font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.75rem; display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; }
+  .share-url a { color: #d4d4d4; text-decoration: none; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .btn-copy { background: rgba(163,163,163,0.1); color: #a3a3a3; border: 1px solid rgba(163,163,163,0.2); border-radius: 6px; padding: 0.3rem 0.6rem; font-size: 0.7rem; font-weight: 600; cursor: pointer; white-space: nowrap; display: inline-flex; align-items: center; gap: 0.3rem; }
+  .btn-copy:hover { background: rgba(163,163,163,0.2); }
   .btn-copy svg { width: 12px; height: 12px; }
-  .btn-share { background: linear-gradient(135deg, #f59e0b, #d97706); color: white; border: none; border-radius: 10px; padding: 0.6rem 1.2rem; font-size: 0.85rem; font-weight: 700; cursor: pointer; transition: all 0.25s; width: 100%; display: flex; align-items: center; justify-content: center; gap: 0.4rem; }
-  .btn-share:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 4px 12px rgba(245,158,11,0.3); }
+  .btn-share { background: linear-gradient(135deg, #262626, #1a1a1a); color: #e5e5e5; border: 1px solid #333; border-radius: 10px; padding: 0.6rem 1.2rem; font-size: 0.85rem; font-weight: 700; cursor: pointer; transition: all 0.25s; width: 100%; display: flex; align-items: center; justify-content: center; gap: 0.4rem; }
+  .btn-share:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 4px 12px rgba(0,0,0,0.4); border-color: #444; }
   .btn-share:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
   .btn-share svg { width: 16px; height: 16px; }
   .btn-share-stop { background: rgba(239,68,68,0.12); color: #f87171; border: 1px solid rgba(239,68,68,0.2); border-radius: 10px; padding: 0.6rem 1.2rem; font-size: 0.85rem; font-weight: 700; cursor: pointer; transition: all 0.2s; width: 100%; margin-top: 0.5rem; display: flex; align-items: center; justify-content: center; gap: 0.4rem; }
@@ -373,7 +373,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
   .share-dimmed { opacity: 0.5; }
   .share-dimmed .btn-share { pointer-events: none; }
   .share-install-hint { font-size: 0.75rem; color: #64748b; margin-top: 0.5rem; }
-  .share-install-hint a { color: #60a5fa; text-decoration: none; }
+  .share-install-hint a { color: #a3a3a3; text-decoration: none; }
 
   .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid rgba(255,255,255,0.2); border-top-color: currentColor; border-radius: 50%; animation: spin 0.6s linear infinite; }
   .spinner-sm { width: 12px; height: 12px; border-width: 1.5px; }
@@ -389,15 +389,15 @@ HTML_PAGE = r"""<!DOCTYPE html>
     <svg viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg">
       <rect width="36" height="36" rx="10" fill="url(#g1)"/>
       <path d="M10 18.5L15.5 24L26 13" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
-      <defs><linearGradient id="g1" x1="0" y1="0" x2="36" y2="36"><stop stop-color="#3b82f6"/><stop offset="1" stop-color="#8b5cf6"/></linearGradient></defs>
+      <defs><linearGradient id="g1" x1="0" y1="0" x2="36" y2="36"><stop stop-color="#333"/><stop offset="1" stop-color="#1a1a1a"/></linearGradient></defs>
     </svg>
     <h1>Claude Remote Control</h1>
     <div class="subtitle">Session Launcher</div>
   </div>
 
   <div class="card">
-    <div class="form-group" id="project-group" style="display:none;">
-      <label for="project-select">Project</label>
+    <div class="form-group" id="project-group">
+      <label for="project-select">Working Directory</label>
       <div class="select-wrap">
         <select id="project-select" class="custom-select" onchange="onProjectChange()"></select>
         <span class="select-arrow"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg></span>
@@ -416,15 +416,15 @@ HTML_PAGE = r"""<!DOCTYPE html>
       <label for="mode-select">Launch Mode</label>
       <div class="select-wrap">
         <select id="mode-select" class="custom-select" onchange="updateMode()">
-          <option value="c">Standard RC &mdash; skip permissions</option>
-          <option value="ci">Teammate (in-process) &mdash; skip permissions</option>
-          <option value="safe">Standard RC &mdash; with permissions</option>
+          <option value="c">Standard RC / skip permissions</option>
+          <option value="ci">Teammate (in-process) / skip permissions</option>
+          <option value="safe">Standard RC / with permissions</option>
         </select>
         <span class="select-arrow"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg></span>
       </div>
       <div class="mode-info" id="mode-info">
-        <span class="mode-icon" id="mode-icon"><svg viewBox="0 0 24 24" fill="none" stroke="#f59e0b" stroke-width="2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg></span>
-        <span class="mode-detail" id="mode-detail"><strong>Unrestricted</strong> &mdash; skip permissions, no approval prompts</span>
+        <span class="mode-icon" id="mode-icon"><svg viewBox="0 0 24 24" fill="none" stroke="#a3a3a3" stroke-width="2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg></span>
+        <span class="mode-detail" id="mode-detail"><strong>Unrestricted</strong> / skip permissions, no approval prompts</span>
       </div>
     </div>
 
@@ -453,9 +453,9 @@ HTML_PAGE = r"""<!DOCTYPE html>
 <script>
 /* SVG icon templates */
 const ICN = {
-  bolt: '<svg viewBox="0 0 24 24" fill="none" stroke="#f59e0b" stroke-width="2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>',
-  users: '<svg viewBox="0 0 24 24" fill="none" stroke="#60a5fa" stroke-width="2"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87M16 3.13a4 4 0 010 7.75"/></svg>',
-  shield: '<svg viewBox="0 0 24 24" fill="none" stroke="#a78bfa" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>',
+  bolt: '<svg viewBox="0 0 24 24" fill="none" stroke="#a3a3a3" stroke-width="2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>',
+  users: '<svg viewBox="0 0 24 24" fill="none" stroke="#a3a3a3" stroke-width="2"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87M16 3.13a4 4 0 010 7.75"/></svg>',
+  shield: '<svg viewBox="0 0 24 24" fill="none" stroke="#a3a3a3" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>',
   stop: '<svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="1"/></svg>',
   globe: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z"/></svg>',
   copy: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>',
@@ -468,9 +468,9 @@ const ICN = {
 };
 
 const MODES = {
-  c:    { icon: ICN.bolt,   cls: 'mode-c',    detail: '<strong>Unrestricted</strong> &mdash; skip permissions, no approval prompts' },
-  ci:   { icon: ICN.users,  cls: 'mode-ci',   detail: '<strong>Teammate in-process</strong> &mdash; skip permissions, teammate mode' },
-  safe: { icon: ICN.shield, cls: 'mode-safe', detail: '<strong>Safe mode</strong> &mdash; standard permissions, requires approvals' },
+  c:    { icon: ICN.bolt,   cls: 'mode-c',    detail: '<strong>Unrestricted</strong> / skip permissions, no approval prompts' },
+  ci:   { icon: ICN.users,  cls: 'mode-ci',   detail: '<strong>Teammate in-process</strong> / skip permissions, teammate mode' },
+  safe: { icon: ICN.shield, cls: 'mode-safe', detail: '<strong>Safe mode</strong> / standard permissions, requires approvals' },
 };
 
 let tunnelState = { available: false, running: false, url: null, auth_configured: false };
@@ -507,23 +507,30 @@ async function loadProjects() {
   try {
     const data = await api('GET', '/projects');
     const projects = data.projects || [];
-    if (projects.length === 0) return;
-    const group = document.getElementById('project-group');
-    group.style.display = 'block';
-    const sel = document.getElementById('project-select');
-    sel.innerHTML = '<option value="">Default (' + escHtml(data.default_name) + ')</option>';
-    projects.forEach(p => {
-      const opt = document.createElement('option');
-      opt.value = p.path;
-      opt.textContent = p.name + (p.exists ? '' : ' (missing)');
-      opt.title = p.path;
-      if (!p.exists) opt.disabled = true;
-      sel.appendChild(opt);
-    });
-    const custom = document.createElement('option');
-    custom.value = '__custom__';
-    custom.textContent = 'Custom path\u2026';
-    sel.appendChild(custom);
+    const selWrap = document.querySelector('#project-group .select-wrap');
+    const customWrap = document.getElementById('custom-path-wrap');
+    const customInput = document.getElementById('custom-path');
+    if (projects.length === 0) {
+      selWrap.style.display = 'none';
+      customWrap.style.display = 'block';
+      customInput.placeholder = data.default || '/path/to/project';
+    } else {
+      selWrap.style.display = '';
+      const sel = document.getElementById('project-select');
+      sel.innerHTML = '<option value="">Default (' + escHtml(data.default_name) + ')</option>';
+      projects.forEach(p => {
+        const opt = document.createElement('option');
+        opt.value = p.path;
+        opt.textContent = p.name + (p.exists ? '' : ' (missing)');
+        opt.title = p.path;
+        if (!p.exists) opt.disabled = true;
+        sel.appendChild(opt);
+      });
+      const custom = document.createElement('option');
+      custom.value = '__custom__';
+      custom.textContent = 'Custom path\u2026';
+      sel.appendChild(custom);
+    }
   } catch(e) {}
 }
 
@@ -534,8 +541,10 @@ function escHtml(s) {
 }
 
 function getSelectedWorkdir() {
-  const group = document.getElementById('project-group');
-  if (group.style.display === 'none') return undefined;
+  const selWrap = document.querySelector('#project-group .select-wrap');
+  if (selWrap.style.display === 'none') {
+    return document.getElementById('custom-path').value.trim() || undefined;
+  }
   const sel = document.getElementById('project-select');
   if (sel.value === '__custom__') return document.getElementById('custom-path').value.trim() || undefined;
   return sel.value || undefined;

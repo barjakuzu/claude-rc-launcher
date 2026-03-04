@@ -19,7 +19,15 @@ The installer will:
 
 After install, the launcher runs in the background — just open **http://localhost:8200** or use the remote URL printed by the installer. No need to run anything manually.
 
-Works on **Linux** and **macOS**. Re-run to update.
+Works on **Linux** and **macOS**.
+
+## Update
+
+```bash
+claude-rc update
+```
+
+Or re-run the install script. Restart the service after updating.
 
 ## Multi-Project Setup
 
