@@ -505,7 +505,7 @@ async function refresh() {
         '</div>' +
         projectHtml +
         urlHtml +
-        '<button class="btn-stop" onclick="stopSession(\'' + escHtml(s.name) + '\')">Stop</button>' +
+        '<button class="btn-stop" onclick="stopSession(\\'' + escHtml(s.name) + '\\')">Stop</button>' +
       '</div>';
     }).join('');
   }
