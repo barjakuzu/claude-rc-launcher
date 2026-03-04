@@ -744,13 +744,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
             # Start interactive claude session with appropriate flags
             claude_flags = RC_FLAGS[mode]
-            shell_cmd = f"unset CLAUDE_CODE_SSE_PORT CLAUDECODE HTTP_PROXY HTTPS_PROXY http_proxy https_proxy; exec {CLAUDE_BIN} {claude_flags}"
+            # Run claude directly — no need for shell wrapper
+            # tmux will run the command in its own pty
             cmd = [
                 "tmux", "new-session", "-d", "-s", name,
                 "-c", session_dir,
                 "-e", f"RC_MODE={mode}",
                 "-e", f"RC_WORKDIR={session_dir}",
-                SHELL_BIN, "-l", "-c", shell_cmd,
+                CLAUDE_BIN, *claude_flags.split(),
             ]
             print(f"  Starting session: {name} (mode={mode}, dir={session_dir}, shell={SHELL_BIN})")
             print(f"  CMD: {' '.join(cmd)}")
