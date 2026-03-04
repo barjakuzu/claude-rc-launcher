@@ -178,9 +178,20 @@ def _session_exists(name):
 
 def _setup_session(session_name, display_name, mode):
     """Handle trust prompt, send /remote-control, wait for URL, then /rename."""
-    time.sleep(3)
+    # Check quickly if session is alive
+    time.sleep(1)
     if not _session_exists(session_name):
-        print(f"  {session_name}: session died before setup")
+        print(f"  {session_name}: session died within 1s")
+        return
+    # Capture pane to see what's on screen
+    r = subprocess.run(
+        ["tmux", "capture-pane", "-t", session_name, "-p"],
+        capture_output=True, text=True, timeout=5,
+    )
+    print(f"  {session_name}: pane content: {repr(r.stdout[:200])}")
+    time.sleep(2)
+    if not _session_exists(session_name):
+        print(f"  {session_name}: session died within 3s")
         return
     # Handle the "trust this folder" prompt — press Enter to accept
     print(f"  {session_name}: accepting trust prompt")
