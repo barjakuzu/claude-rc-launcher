@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Claude RC Launcher — installer / updater
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/USER/claude-rc-launcher/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/barjakuzu/claude-rc-launcher/main/install.sh | bash
 #
 # Re-running this script updates an existing installation via git pull.
 set -euo pipefail
@@ -100,7 +100,7 @@ if [ -d "$APP_DIR/.git" ]; then
 else
     info "Cloning repository..."
     mkdir -p "$(dirname "$APP_DIR")"
-    git clone https://github.com/USER/claude-rc-launcher.git "$APP_DIR"
+    git clone https://github.com/barjakuzu/claude-rc-launcher.git "$APP_DIR"
     ok "Cloned to $APP_DIR"
 fi
 

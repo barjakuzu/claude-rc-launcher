@@ -12,7 +12,7 @@ Start, stop, and monitor Claude sessions with one tap. Sessions run in tmux and 
 ## Quick Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/USER/claude-rc-launcher/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/barjakuzu/claude-rc-launcher/main/install.sh | bash
 ```
 
 The installer checks dependencies, clones the repo, creates a config file, and sets up a systemd or launchd service for your platform.
@@ -22,7 +22,7 @@ To update an existing installation, run the same command again.
 ## Manual Install
 
 ```bash
-git clone https://github.com/USER/claude-rc-launcher.git rc-launcher
+git clone https://github.com/barjakuzu/claude-rc-launcher.git rc-launcher
 cd rc-launcher
 cp .env.example .env   # edit as needed
 python3 app.py
@@ -126,7 +126,7 @@ This tool starts Claude Code sessions that can execute arbitrary code. Protect a
 If installed via the install script:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/USER/claude-rc-launcher/main/uninstall.sh | bash
+curl -fsSL https://raw.githubusercontent.com/barjakuzu/claude-rc-launcher/main/uninstall.sh | bash
 ```
 
 Or run `uninstall.sh` directly. This stops the service, removes the app directory and wrapper, but leaves your config at `~/.config/claude-rc/` intact.
