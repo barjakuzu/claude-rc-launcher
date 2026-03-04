@@ -177,10 +177,17 @@ def _session_exists(name):
 
 
 def _setup_session(session_name, display_name, mode):
-    """Send /remote-control, wait for URL, then /rename."""
+    """Handle trust prompt, send /remote-control, wait for URL, then /rename."""
     time.sleep(3)
     if not _session_exists(session_name):
         print(f"  {session_name}: session died before setup")
+        return
+    # Handle the "trust this folder" prompt — press Enter to accept
+    print(f"  {session_name}: accepting trust prompt")
+    subprocess.run(["tmux", "send-keys", "-t", session_name, "Enter"], capture_output=True)
+    time.sleep(2)
+    if not _session_exists(session_name):
+        print(f"  {session_name}: session died after trust prompt")
         return
     print(f"  {session_name}: sending /remote-control")
     subprocess.run(["tmux", "send-keys", "-t", session_name, "-l", "/remote-control"], capture_output=True)
