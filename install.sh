@@ -82,7 +82,7 @@ if ! command -v cloudflared > /dev/null 2>&1; then
             chmod +x "$BIN_DIR/cloudflared"
         elif [ "$OS" = "Darwin" ]; then
             if command -v brew > /dev/null 2>&1; then
-                brew install cloudflared
+                brew install cloudflared </dev/null 2>&1 | while read -r line; do printf '  %s\n' "$line"; done
             else
                 err "Homebrew required to install cloudflared on macOS"
             fi
