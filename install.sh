@@ -67,9 +67,10 @@ ok "python3 $PY_VER"
 need_cmd tmux
 ok "tmux $(tmux -V | awk '{print $2}')"
 
-# Claude CLI
+# Claude CLI — detect full path (needed because tmux doesn't inherit PATH)
 need_cmd claude
-ok "claude CLI found"
+CLAUDE_PATH="$(command -v claude)"
+ok "claude CLI found at $CLAUDE_PATH"
 
 # ── Cloudflared (required for remote access) ─────────────────────────
 
@@ -152,6 +153,22 @@ else
     info "Config already exists at $CONFIG_FILE (not overwritten)"
 fi
 
+# Auto-configure claude binary path (tmux doesn't inherit user PATH)
+if grep -q '^RC_CLAUDE_BIN=claude$' "$CONFIG_FILE" 2>/dev/null; then
+    sed -i.bak "s|^RC_CLAUDE_BIN=claude$|RC_CLAUDE_BIN=${CLAUDE_PATH}|" "$CONFIG_FILE"
+    rm -f "${CONFIG_FILE}.bak"
+    ok "Set RC_CLAUDE_BIN=${CLAUDE_PATH}"
+elif ! grep -q '^RC_CLAUDE_BIN=/' "$CONFIG_FILE" 2>/dev/null; then
+    echo "RC_CLAUDE_BIN=${CLAUDE_PATH}" >> "$CONFIG_FILE"
+    ok "Set RC_CLAUDE_BIN=${CLAUDE_PATH}"
+fi
+
+# Auto-configure working directory to user's home
+if grep -q '^RC_WORKING_DIR=\.$' "$CONFIG_FILE" 2>/dev/null; then
+    sed -i.bak "s|^RC_WORKING_DIR=\.\$|RC_WORKING_DIR=${HOME}|" "$CONFIG_FILE"
+    rm -f "${CONFIG_FILE}.bak"
+fi
+
 # Ensure PATH includes common binary locations (needed for launchd/systemd)
 if ! grep -q '^PATH=' "$CONFIG_FILE" 2>/dev/null; then
     if [ "$OS" = "Darwin" ]; then
@@ -232,13 +249,17 @@ if command -v cloudflared > /dev/null 2>&1; then
 
     # Check if the service is actually running
     PORT="${RC_PORT:-8200}"
-    if curl -sf "http://localhost:${PORT}/rc/status" > /dev/null 2>&1; then
+    AUTH_HEADER=""
+    if [ -n "${AUTH_USER:-}" ] && [ -n "${AUTH_PASS:-}" ]; then
+        AUTH_HEADER="-u ${AUTH_USER}:${AUTH_PASS}"
+    fi
+    if curl -sf $AUTH_HEADER "http://localhost:${PORT}/rc/status" > /dev/null 2>&1; then
         # Start tunnel via API
-        curl -sf -X POST "http://localhost:${PORT}/rc/tunnel/start" > /dev/null 2>&1 || true
+        curl -sf $AUTH_HEADER -X POST "http://localhost:${PORT}/rc/tunnel/start" > /dev/null 2>&1 || true
         info "Waiting for tunnel URL..."
         for i in $(seq 1 15); do
             sleep 1
-            TUNNEL_URL="$(curl -sf "http://localhost:${PORT}/rc/tunnel/status" 2>/dev/null | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get("url",""))' 2>/dev/null || true)"
+            TUNNEL_URL="$(curl -sf $AUTH_HEADER "http://localhost:${PORT}/rc/tunnel/status" 2>/dev/null | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get("url",""))' 2>/dev/null || true)"
             if [ -n "$TUNNEL_URL" ]; then
                 echo ""
                 ok "Remote access URL:"

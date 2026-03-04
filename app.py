@@ -276,7 +276,7 @@ def _send_auth_required(handler):
     handler.wfile.write(b"Authentication required")
 
 
-HTML_PAGE = """<!DOCTYPE html>
+HTML_PAGE = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -287,52 +287,51 @@ HTML_PAGE = """<!DOCTYPE html>
   body { font-family: -apple-system, system-ui, 'Segoe UI', sans-serif; background: #0b1120; color: #e2e8f0; min-height: 100vh; padding: 1.5rem 1rem; }
   .container { max-width: 480px; margin: 0 auto; }
 
-  /* Header */
   .logo { text-align: center; margin-bottom: 1.5rem; }
   .logo svg { width: 36px; height: 36px; margin-bottom: 0.5rem; }
-  h1 { font-size: 1.35rem; font-weight: 700; letter-spacing: -0.02em; background: linear-gradient(135deg, #60a5fa, #a78bfa); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+  h1 { font-size: 1.35rem; font-weight: 700; letter-spacing: -0.02em; background: linear-gradient(135deg, #60a5fa, #a78bfa); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; }
   .subtitle { color: #475569; font-size: 0.75rem; margin-top: 0.2rem; letter-spacing: 0.05em; text-transform: uppercase; }
 
-  /* Card */
   .card { background: #131a2b; border: 1px solid rgba(255,255,255,0.06); border-radius: 16px; padding: 1.5rem; margin-bottom: 1.25rem; }
-
-  /* Form */
   .form-group { margin-bottom: 1.2rem; }
   label { display: block; font-size: 0.75rem; color: #64748b; margin-bottom: 0.35rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; }
   input[type="text"] { width: 100%; padding: 0.6rem 0.8rem; border: 1px solid #1e293b; border-radius: 10px; background: #0b1120; color: #e2e8f0; font-size: 0.9rem; transition: all 0.2s; }
   input[type="text"]:focus { outline: none; border-color: #3b82f6; box-shadow: 0 0 0 3px rgba(59,130,246,0.12); }
   input[type="text"]::placeholder { color: #334155; }
 
-  /* Custom select */
-  .select-wrap { position: relative; margin-bottom: 1.2rem; }
+  .select-wrap { position: relative; }
   .custom-select { width: 100%; padding: 0.6rem 2.5rem 0.6rem 0.8rem; border: 1px solid #1e293b; border-radius: 10px; background: #0b1120; color: #e2e8f0; font-size: 0.9rem; appearance: none; -webkit-appearance: none; cursor: pointer; transition: all 0.2s; }
   .custom-select:focus { outline: none; border-color: #3b82f6; box-shadow: 0 0 0 3px rgba(59,130,246,0.12); }
-  .select-arrow { position: absolute; right: 0.8rem; top: 50%; transform: translateY(-50%); pointer-events: none; color: #475569; font-size: 0.7rem; }
-  .mode-info { display: flex; align-items: center; gap: 0.5rem; padding: 0.55rem 0.75rem; background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.04); border-radius: 8px; margin-top: 0.5rem; transition: all 0.3s; }
-  .mode-icon { font-size: 1rem; flex-shrink: 0; }
+  .select-arrow { position: absolute; right: 0.8rem; top: 50%; transform: translateY(-50%); pointer-events: none; color: #475569; }
+  .select-arrow svg { width: 12px; height: 12px; }
+  .mode-info { display: flex; align-items: center; gap: 0.5rem; padding: 0.55rem 0.75rem; background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.04); border-radius: 8px; margin-top: 0.75rem; }
+  .mode-icon { flex-shrink: 0; display: flex; align-items: center; }
+  .mode-icon svg { width: 16px; height: 16px; }
   .mode-detail { font-size: 0.75rem; color: #94a3b8; line-height: 1.4; }
   .mode-detail strong { color: #cbd5e1; font-weight: 600; }
 
-  /* Launch button */
-  .btn-launch { width: 100%; padding: 0.75rem; border: none; border-radius: 10px; font-size: 0.95rem; font-weight: 700; cursor: pointer; transition: all 0.25s; display: flex; align-items: center; justify-content: center; gap: 0.5rem; letter-spacing: 0.01em; }
+  /* Buttons */
+  .btn-launch { width: 100%; padding: 0.75rem; border: none; border-radius: 10px; font-size: 0.95rem; font-weight: 700; cursor: pointer; transition: all 0.25s; display: flex; align-items: center; justify-content: center; gap: 0.5rem; }
   .btn-launch:disabled { opacity: 0.4; cursor: not-allowed; }
   .btn-launch:hover:not(:disabled) { transform: translateY(-1px); }
   .btn-launch:active:not(:disabled) { transform: translateY(0); }
+  .btn-launch svg { width: 16px; height: 16px; }
   .btn-launch.mode-c { background: linear-gradient(135deg, #10b981, #059669); color: white; box-shadow: 0 4px 15px rgba(16,185,129,0.25); }
   .btn-launch.mode-c:hover:not(:disabled) { box-shadow: 0 6px 20px rgba(16,185,129,0.35); }
   .btn-launch.mode-ci { background: linear-gradient(135deg, #3b82f6, #2563eb); color: white; box-shadow: 0 4px 15px rgba(59,130,246,0.25); }
   .btn-launch.mode-ci:hover:not(:disabled) { box-shadow: 0 6px 20px rgba(59,130,246,0.35); }
   .btn-launch.mode-safe { background: linear-gradient(135deg, #8b5cf6, #7c3aed); color: white; box-shadow: 0 4px 15px rgba(139,92,246,0.25); }
   .btn-launch.mode-safe:hover:not(:disabled) { box-shadow: 0 6px 20px rgba(139,92,246,0.35); }
-  .btn-icon { font-size: 1.1rem; }
 
-  /* Stop button */
-  .btn-stop { background: rgba(239,68,68,0.12); color: #f87171; font-size: 0.78rem; padding: 0.4rem 0.85rem; width: auto; border: 1px solid rgba(239,68,68,0.2); border-radius: 6px; cursor: pointer; font-weight: 600; transition: all 0.2s; }
+  .btn-stop { background: rgba(239,68,68,0.12); color: #f87171; font-size: 0.78rem; padding: 0.4rem 0.85rem; width: auto; border: 1px solid rgba(239,68,68,0.2); border-radius: 6px; cursor: pointer; font-weight: 600; transition: all 0.2s; display: inline-flex; align-items: center; gap: 0.35rem; }
   .btn-stop:hover:not(:disabled) { background: rgba(239,68,68,0.2); }
+  .btn-stop:disabled { opacity: 0.5; cursor: not-allowed; }
+  .btn-stop svg { width: 12px; height: 12px; }
 
   /* Sessions */
   .sessions-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.6rem; }
-  #sessions-title { font-size: 0.8rem; color: #475569; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; }
+  .section-title { font-size: 0.8rem; color: #475569; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; display: flex; align-items: center; gap: 0.4rem; }
+  .section-title svg { width: 14px; height: 14px; }
   .session-card { background: #131a2b; border: 1px solid rgba(255,255,255,0.06); border-radius: 12px; padding: 1rem 1.15rem; margin-bottom: 0.5rem; transition: border-color 0.2s; }
   .session-card:hover { border-color: rgba(255,255,255,0.1); }
   .session-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.5rem; }
@@ -347,32 +346,41 @@ HTML_PAGE = """<!DOCTYPE html>
   .session-url { background: #0b1120; border: 1px solid #1e293b; border-radius: 8px; padding: 0.5rem 0.75rem; margin-bottom: 0.65rem; word-break: break-all; font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.75rem; }
   .session-url a { color: #60a5fa; text-decoration: none; }
   .session-url a:hover { text-decoration: underline; }
-  .waiting { color: #64748b; font-style: italic; }
+  .waiting { color: #64748b; font-style: italic; display: flex; align-items: center; gap: 0.4rem; }
+  .waiting svg { width: 14px; height: 14px; animation: spin 1.5s linear infinite; }
   .empty { text-align: center; color: #334155; padding: 2rem 0; font-size: 0.85rem; }
-  .project-label { font-size: 0.7rem; color: #475569; margin-bottom: 0.5rem; }
+  .project-label { font-size: 0.7rem; color: #475569; margin-bottom: 0.5rem; display: flex; align-items: center; gap: 0.3rem; }
+  .project-label svg { width: 11px; height: 11px; }
 
-  /* Remote Access card */
-  .share-card { background: #131a2b; border: 1px solid rgba(255,255,255,0.06); border-radius: 16px; padding: 1.25rem; margin-bottom: 1.25rem; }
-  .share-card h3 { font-size: 0.8rem; color: #475569; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.75rem; }
+  /* Share / Remote Access */
+  .share-card { background: #131a2b; border: 1px solid rgba(255,255,255,0.06); border-radius: 16px; padding: 1.25rem; margin-top: 1.25rem; }
+  .share-card h3 { font-size: 0.8rem; color: #475569; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.75rem; display: flex; align-items: center; gap: 0.4rem; }
+  .share-card h3 svg { width: 14px; height: 14px; }
   .share-url { background: #0b1120; border: 1px solid #1e293b; border-radius: 8px; padding: 0.5rem 0.75rem; margin-bottom: 0.65rem; word-break: break-all; font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.75rem; display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; }
   .share-url a { color: #60a5fa; text-decoration: none; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-  .btn-copy { background: rgba(59,130,246,0.12); color: #60a5fa; border: 1px solid rgba(59,130,246,0.2); border-radius: 6px; padding: 0.3rem 0.6rem; font-size: 0.7rem; font-weight: 600; cursor: pointer; white-space: nowrap; }
+  .btn-copy { background: rgba(59,130,246,0.12); color: #60a5fa; border: 1px solid rgba(59,130,246,0.2); border-radius: 6px; padding: 0.3rem 0.6rem; font-size: 0.7rem; font-weight: 600; cursor: pointer; white-space: nowrap; display: inline-flex; align-items: center; gap: 0.3rem; }
   .btn-copy:hover { background: rgba(59,130,246,0.2); }
-  .btn-share { background: linear-gradient(135deg, #f59e0b, #d97706); color: white; border: none; border-radius: 10px; padding: 0.6rem 1.2rem; font-size: 0.85rem; font-weight: 700; cursor: pointer; transition: all 0.25s; width: 100%; }
+  .btn-copy svg { width: 12px; height: 12px; }
+  .btn-share { background: linear-gradient(135deg, #f59e0b, #d97706); color: white; border: none; border-radius: 10px; padding: 0.6rem 1.2rem; font-size: 0.85rem; font-weight: 700; cursor: pointer; transition: all 0.25s; width: 100%; display: flex; align-items: center; justify-content: center; gap: 0.4rem; }
   .btn-share:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 4px 12px rgba(245,158,11,0.3); }
-  .btn-share:disabled { opacity: 0.4; cursor: not-allowed; }
-  .btn-share-stop { background: rgba(239,68,68,0.12); color: #f87171; border: 1px solid rgba(239,68,68,0.2); border-radius: 10px; padding: 0.6rem 1.2rem; font-size: 0.85rem; font-weight: 700; cursor: pointer; transition: all 0.2s; width: 100%; margin-top: 0.5rem; }
+  .btn-share:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
+  .btn-share svg { width: 16px; height: 16px; }
+  .btn-share-stop { background: rgba(239,68,68,0.12); color: #f87171; border: 1px solid rgba(239,68,68,0.2); border-radius: 10px; padding: 0.6rem 1.2rem; font-size: 0.85rem; font-weight: 700; cursor: pointer; transition: all 0.2s; width: 100%; margin-top: 0.5rem; display: flex; align-items: center; justify-content: center; gap: 0.4rem; }
   .btn-share-stop:hover { background: rgba(239,68,68,0.2); }
-  .share-warning { background: rgba(251,191,36,0.08); border: 1px solid rgba(251,191,36,0.2); border-radius: 8px; padding: 0.55rem 0.75rem; margin-bottom: 0.65rem; font-size: 0.75rem; color: #fbbf24; line-height: 1.4; }
+  .btn-share-stop svg { width: 14px; height: 14px; }
+  .share-warning { background: rgba(251,191,36,0.08); border: 1px solid rgba(251,191,36,0.2); border-radius: 8px; padding: 0.55rem 0.75rem; margin-bottom: 0.65rem; font-size: 0.75rem; color: #fbbf24; line-height: 1.4; display: flex; align-items: flex-start; gap: 0.4rem; }
+  .share-warning svg { width: 14px; height: 14px; flex-shrink: 0; margin-top: 1px; }
   .share-dimmed { opacity: 0.5; }
   .share-dimmed .btn-share { pointer-events: none; }
   .share-install-hint { font-size: 0.75rem; color: #64748b; margin-top: 0.5rem; }
   .share-install-hint a { color: #60a5fa; text-decoration: none; }
-  .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid rgba(255,255,255,0.2); border-top-color: white; border-radius: 50%; animation: spin 0.6s linear infinite; vertical-align: middle; margin-right: 0.4rem; }
+
+  .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid rgba(255,255,255,0.2); border-top-color: currentColor; border-radius: 50%; animation: spin 0.6s linear infinite; }
+  .spinner-sm { width: 12px; height: 12px; border-width: 1.5px; }
   @keyframes spin { to { transform: rotate(360deg); } }
 
-  /* Custom path input */
   #custom-path-wrap { display: none; margin-top: 0.5rem; }
+  .version { text-align: center; color: #1e293b; font-size: 0.65rem; margin-top: 1.5rem; }
 </style>
 </head>
 <body>
@@ -391,9 +399,8 @@ HTML_PAGE = """<!DOCTYPE html>
     <div class="form-group" id="project-group" style="display:none;">
       <label for="project-select">Project</label>
       <div class="select-wrap">
-        <select id="project-select" class="custom-select" onchange="onProjectChange()">
-        </select>
-        <span class="select-arrow">&#9660;</span>
+        <select id="project-select" class="custom-select" onchange="onProjectChange()"></select>
+        <span class="select-arrow"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg></span>
       </div>
       <div id="custom-path-wrap">
         <input type="text" id="custom-path" placeholder="/path/to/project" />
@@ -413,44 +420,68 @@ HTML_PAGE = """<!DOCTYPE html>
           <option value="ci">Teammate (in-process) &mdash; skip permissions</option>
           <option value="safe">Standard RC &mdash; with permissions</option>
         </select>
-        <span class="select-arrow">&#9660;</span>
+        <span class="select-arrow"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg></span>
       </div>
       <div class="mode-info" id="mode-info">
-        <span class="mode-icon" id="mode-icon">&#9889;</span>
-        <span class="mode-detail" id="mode-detail"><strong>Unrestricted</strong> &mdash; runs with --dangerously-skip-permissions, no approval prompts</span>
+        <span class="mode-icon" id="mode-icon"><svg viewBox="0 0 24 24" fill="none" stroke="#f59e0b" stroke-width="2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg></span>
+        <span class="mode-detail" id="mode-detail"><strong>Unrestricted</strong> &mdash; skip permissions, no approval prompts</span>
       </div>
     </div>
 
     <button class="btn-launch mode-c" id="btn-launch" onclick="startSession()">
-      <span class="btn-icon" id="btn-launch-icon">&#9654;</span>
+      <svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
       Launch Session
     </button>
   </div>
 
   <div class="sessions-header">
-    <div id="sessions-title">Running Sessions</div>
-    <button class="btn-stop" id="btn-stop-all" style="display:none;" onclick="stopAll()">Stop All</button>
+    <div class="section-title">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
+      Running Sessions
+    </div>
+    <button class="btn-stop" id="btn-stop-all" style="display:none;" onclick="stopAll()">
+      <svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="1"/></svg>
+      Stop All
+    </button>
   </div>
   <div id="sessions"></div>
 
   <div id="share-section"></div>
+
+  <div class="version" id="version-label"></div>
 </div>
 <script>
+/* SVG icon templates */
+const ICN = {
+  bolt: '<svg viewBox="0 0 24 24" fill="none" stroke="#f59e0b" stroke-width="2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>',
+  users: '<svg viewBox="0 0 24 24" fill="none" stroke="#60a5fa" stroke-width="2"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87M16 3.13a4 4 0 010 7.75"/></svg>',
+  shield: '<svg viewBox="0 0 24 24" fill="none" stroke="#a78bfa" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>',
+  stop: '<svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="1"/></svg>',
+  globe: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z"/></svg>',
+  copy: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>',
+  check: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 6L9 17l-5-5"/></svg>',
+  warn: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0zM12 9v4M12 17h.01"/></svg>',
+  folder: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/></svg>',
+  loader: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>',
+  share: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="M8.59 13.51l6.83 3.98M15.41 6.51l-6.82 3.98"/></svg>',
+  x: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>',
+};
+
 const MODES = {
-  c:    { icon: String.fromCodePoint(0x26A1), cls: 'mode-c',    detail: '<strong>Unrestricted</strong> &mdash; runs with --dangerously-skip-permissions, no approval prompts' },
-  ci:   { icon: String.fromCodePoint(0x1F91D), cls: 'mode-ci',   detail: '<strong>Teammate in-process</strong> &mdash; skip permissions, teammate mode enabled' },
-  safe: { icon: String.fromCodePoint(0x1F512), cls: 'mode-safe', detail: '<strong>Safe mode</strong> &mdash; standard permissions, requires user approvals' },
+  c:    { icon: ICN.bolt,   cls: 'mode-c',    detail: '<strong>Unrestricted</strong> &mdash; skip permissions, no approval prompts' },
+  ci:   { icon: ICN.users,  cls: 'mode-ci',   detail: '<strong>Teammate in-process</strong> &mdash; skip permissions, teammate mode' },
+  safe: { icon: ICN.shield, cls: 'mode-safe', detail: '<strong>Safe mode</strong> &mdash; standard permissions, requires approvals' },
 };
 
 let tunnelState = { available: false, running: false, url: null, auth_configured: false };
+let stoppingSet = new Set(); /* track sessions being stopped */
 
 function updateMode() {
   const mode = document.getElementById('mode-select').value;
   const m = MODES[mode];
-  document.getElementById('mode-icon').textContent = m.icon;
+  document.getElementById('mode-icon').innerHTML = m.icon;
   document.getElementById('mode-detail').innerHTML = m.detail;
-  const btn = document.getElementById('btn-launch');
-  btn.className = 'btn-launch ' + m.cls;
+  document.getElementById('btn-launch').className = 'btn-launch ' + m.cls;
 }
 
 function defaultName() {
@@ -469,8 +500,7 @@ async function api(method, path, body) {
 
 function onProjectChange() {
   const sel = document.getElementById('project-select');
-  const wrap = document.getElementById('custom-path-wrap');
-  wrap.style.display = sel.value === '__custom__' ? 'block' : 'none';
+  document.getElementById('custom-path-wrap').style.display = sel.value === '__custom__' ? 'block' : 'none';
 }
 
 async function loadProjects() {
@@ -492,7 +522,7 @@ async function loadProjects() {
     });
     const custom = document.createElement('option');
     custom.value = '__custom__';
-    custom.textContent = 'Custom path...';
+    custom.textContent = 'Custom path\u2026';
     sel.appendChild(custom);
   } catch(e) {}
 }
@@ -507,9 +537,7 @@ function getSelectedWorkdir() {
   const group = document.getElementById('project-group');
   if (group.style.display === 'none') return undefined;
   const sel = document.getElementById('project-select');
-  if (sel.value === '__custom__') {
-    return document.getElementById('custom-path').value.trim() || undefined;
-  }
+  if (sel.value === '__custom__') return document.getElementById('custom-path').value.trim() || undefined;
   return sel.value || undefined;
 }
 
@@ -522,8 +550,13 @@ async function refresh() {
   if (!data.sessions || data.sessions.length === 0) {
     el.innerHTML = '<div class="empty">No sessions running</div>';
     stopAllBtn.style.display = 'none';
+    stoppingSet.clear();
   } else {
-    stopAllBtn.style.display = data.sessions.length > 1 ? 'block' : 'none';
+    /* Clear stoppingSet for sessions that no longer exist */
+    const names = new Set(data.sessions.map(s => s.name));
+    for (const n of stoppingSet) { if (!names.has(n)) stoppingSet.delete(n); }
+
+    stopAllBtn.style.display = data.sessions.length > 1 ? 'inline-flex' : 'none';
     stopAllBtn.disabled = false;
     el.innerHTML = data.sessions.map(s => {
       const badgeClass = s.mode === 'ci' ? 'badge-ci' : s.mode === 'safe' ? 'badge-safe' : 'badge-c';
@@ -533,10 +566,14 @@ async function refresh() {
       const modeLabel = s.mode === 'ci' ? 'teammate' : s.mode === 'safe' ? 'safe' : 'standard';
       const urlHtml = s.url
         ? '<div class="session-url"><a href="' + escHtml(s.url) + '" target="_blank">' + escHtml(s.url) + '</a></div>'
-        : '<div class="session-url waiting">Waiting for URL...</div>';
+        : '<div class="session-url"><span class="waiting">' + ICN.loader + ' Waiting for URL\u2026</span></div>';
       const projectHtml = s.project
-        ? '<div class="project-label" title="' + escHtml(s.workdir || '') + '">' + escHtml(s.project) + '</div>'
+        ? '<div class="project-label" title="' + escHtml(s.workdir || '') + '">' + ICN.folder + ' ' + escHtml(s.project) + '</div>'
         : '';
+      const isStopping = stoppingSet.has(s.name);
+      const stopBtn = isStopping
+        ? '<button class="btn-stop" disabled><span class="spinner spinner-sm"></span> Stopping\u2026</button>'
+        : '<button class="btn-stop" onclick="stopSession(\'' + s.name.replace(/'/g, "\\'") + '\')">' + ICN.stop + ' Stop</button>';
       return '<div class="session-card">' +
         '<div class="session-header">' +
           '<span class="session-name">' + escHtml(s.name) + '</span>' +
@@ -544,21 +581,15 @@ async function refresh() {
             '<span class="badge ' + badgeClass + '">' + modeLabel + '</span>' +
           '</span>' +
         '</div>' +
-        projectHtml +
-        urlHtml +
-        '<button class="btn-stop" onclick="stopSession(\\'' + escHtml(s.name) + '\\')">Stop</button>' +
+        projectHtml + urlHtml + stopBtn +
       '</div>';
     }).join('');
   }
-
-  // Update tunnel status
   await refreshTunnel();
 }
 
 async function refreshTunnel() {
-  try {
-    tunnelState = await api('GET', '/tunnel/status');
-  } catch(e) {
+  try { tunnelState = await api('GET', '/tunnel/status'); } catch(e) {
     tunnelState = { available: false, running: false, url: null, auth_configured: false };
   }
   renderShare();
@@ -567,48 +598,45 @@ async function refreshTunnel() {
 function renderShare() {
   const el = document.getElementById('share-section');
   if (!tunnelState.available) {
-    el.innerHTML = '<div class="share-card share-dimmed"><h3>Remote Access</h3>' +
-      '<button class="btn-share" disabled>Share</button>' +
-      '<div class="share-install-hint">Requires <a href="https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/" target="_blank">cloudflared</a> to be installed.</div></div>';
+    el.innerHTML = '<div class="share-card share-dimmed"><h3>' + ICN.globe + ' Remote Access</h3>' +
+      '<button class="btn-share" disabled>' + ICN.share + ' Share</button>' +
+      '<div class="share-install-hint">Requires <a href="https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/" target="_blank">cloudflared</a></div></div>';
     return;
   }
   let body = '';
   if (tunnelState.running && tunnelState.url) {
     if (!tunnelState.auth_configured) {
-      body += '<div class="share-warning">Warning: No authentication configured (RC_AUTH_USER). Anyone with this link can launch sessions.</div>';
+      body += '<div class="share-warning">' + ICN.warn + ' <span>No authentication configured. Anyone with this link can launch sessions.</span></div>';
     }
     body += '<div class="share-url"><a href="' + escHtml(tunnelState.url) + '" target="_blank">' + escHtml(tunnelState.url) + '</a>' +
-      '<button class="btn-copy" onclick="copyUrl()">Copy</button></div>' +
-      '<button class="btn-share-stop" onclick="stopTunnel()">Stop Sharing</button>';
+      '<button class="btn-copy" onclick="copyUrl()">' + ICN.copy + ' Copy</button></div>' +
+      '<button class="btn-share-stop" onclick="stopTunnel()">' + ICN.x + ' Stop Sharing</button>';
   } else if (tunnelState.running) {
-    body += '<button class="btn-share" disabled><span class="spinner"></span>Starting tunnel...</button>';
+    body += '<button class="btn-share" disabled><span class="spinner"></span> Starting tunnel\u2026</button>';
   } else {
-    body += '<button class="btn-share" onclick="startTunnel()">Share</button>';
+    body += '<button class="btn-share" onclick="startTunnel()">' + ICN.share + ' Share</button>';
   }
-  el.innerHTML = '<div class="share-card"><h3>Remote Access</h3>' + body + '</div>';
+  el.innerHTML = '<div class="share-card"><h3>' + ICN.globe + ' Remote Access</h3>' + body + '</div>';
 }
 
 async function startTunnel() {
   await api('POST', '/tunnel/start');
-  tunnelState.running = true;
-  tunnelState.url = null;
+  tunnelState.running = true; tunnelState.url = null;
   renderShare();
 }
 
 async function stopTunnel() {
   await api('POST', '/tunnel/stop');
-  tunnelState.running = false;
-  tunnelState.url = null;
+  tunnelState.running = false; tunnelState.url = null;
   renderShare();
 }
 
 function copyUrl() {
-  if (tunnelState.url) {
-    navigator.clipboard.writeText(tunnelState.url).then(() => {
-      const btn = document.querySelector('.btn-copy');
-      if (btn) { btn.textContent = 'Copied!'; setTimeout(() => { btn.textContent = 'Copy'; }, 1500); }
-    });
-  }
+  if (!tunnelState.url) return;
+  navigator.clipboard.writeText(tunnelState.url).then(() => {
+    const btn = document.querySelector('.btn-copy');
+    if (btn) { btn.innerHTML = ICN.check + ' Copied!'; setTimeout(() => { btn.innerHTML = ICN.copy + ' Copy'; }, 1500); }
+  });
 }
 
 async function startSession() {
@@ -619,7 +647,7 @@ async function startSession() {
   const workdir = getSelectedWorkdir();
   input.value = '';
   btn.disabled = true;
-  btn.innerHTML = '<span class="btn-icon">&#8987;</span> Launching...';
+  btn.innerHTML = '<span class="spinner"></span> Launching\u2026';
   const body = { name, mode };
   if (workdir) body.workdir = workdir;
   await api('POST', '/start', body);
@@ -630,17 +658,32 @@ async function startSession() {
     if (s && s.url) break;
   }
   btn.disabled = false;
-  btn.innerHTML = '<span class="btn-icon" id="btn-launch-icon">&#9654;</span> Launch Session';
+  btn.innerHTML = '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg> Launch Session';
   refresh();
 }
 
 async function stopSession(name) {
+  stoppingSet.add(name);
+  renderSessions();
   await api('POST', '/stop', { name });
   refresh();
 }
 
+function renderSessions() {
+  /* Re-render just the stop buttons without full refresh */
+  document.querySelectorAll('.btn-stop[onclick]').forEach(btn => {
+    const m = btn.getAttribute('onclick').match(/stopSession\('(.+?)'\)/);
+    if (m && stoppingSet.has(m[1])) {
+      btn.disabled = true;
+      btn.innerHTML = '<span class="spinner spinner-sm"></span> Stopping\u2026';
+    }
+  });
+}
+
 async function stopAll() {
-  document.getElementById('btn-stop-all').disabled = true;
+  const btn = document.getElementById('btn-stop-all');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner spinner-sm"></span> Stopping\u2026';
   await api('POST', '/stop-all');
   refresh();
 }
@@ -648,6 +691,10 @@ async function stopAll() {
 loadProjects();
 refresh();
 setInterval(refresh, 5000);
+fetch('/rc/tunnel/status').then(r=>r.json()).then(d => {
+  document.getElementById('version-label').textContent = 'v""" + VERSION + r"""';
+}).catch(()=>{});
+document.getElementById('version-label').textContent = 'v""" + VERSION + r"""';
 </script>
 </body>
 </html>
