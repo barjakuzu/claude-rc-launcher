@@ -1,6 +1,6 @@
 # Claude RC Launcher
 
-A web UI to launch and manage [Claude Code](https://docs.anthropic.com/en/docs/claude-code) remote-control sessions from any browser — including your phone.
+Launch and manage [Claude Code](https://docs.anthropic.com/en/docs/claude-code) remote-control sessions from anywhere — your phone, another laptop, wherever you are.
 
 ## Install
 
@@ -10,43 +10,30 @@ A web UI to launch and manage [Claude Code](https://docs.anthropic.com/en/docs/c
 curl -fsSL https://raw.githubusercontent.com/barjakuzu/claude-rc-launcher/main/install.sh | bash
 ```
 
-This works on both **Linux** and **macOS**. Re-run to update.
+The installer will:
+1. Install cloudflared (for remote access)
+2. Set up auth credentials (required)
+3. Start the service
+4. Give you a public URL you can open from anywhere
 
-### Or run manually
-
-```bash
-git clone https://github.com/barjakuzu/claude-rc-launcher.git
-cd claude-rc-launcher
-cp .env.example .env
-python3 app.py
-```
-
-Open http://localhost:8200
+Works on **Linux** and **macOS**. Re-run to update.
 
 ## Configuration
 
-Edit `.env` (or `~/.config/claude-rc/env` if installed via script):
+Edit `~/.config/claude-rc/env`:
 
 | Variable | Default | Description |
 |---|---|---|
-| `RC_HOST` | `0.0.0.0` | Listen address |
-| `RC_PORT` | `8200` | Listen port |
+| `RC_AUTH_USER` / `RC_AUTH_PASS` | *(set during install)* | Login credentials |
 | `RC_WORKING_DIR` | `.` | Working directory for sessions |
-| `RC_CLAUDE_BIN` | `claude` | Path to Claude CLI |
-| `RC_AUTH_USER` / `RC_AUTH_PASS` | *(unset)* | HTTP Basic Auth (set both to enable) |
-| `RC_PROJECTS` | *(unset)* | Comma-separated project paths for the project picker |
+| `RC_PROJECTS` | *(unset)* | Comma-separated project paths for the picker |
+| `RC_PORT` | `8200` | Listen port |
 
 ## Launch Modes
 
-- **Standard (c)** — skip permissions, no approval prompts
-- **Teammate (ci)** — skip permissions + teammate mode
+- **Standard** — skip permissions, no approval prompts
+- **Teammate** — skip permissions + teammate mode
 - **Safe** — normal permission checks apply
-
-## Remote Access
-
-Click **Share** in the UI to create a public tunnel via [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/). No setup needed — just install cloudflared and click the button.
-
-Other options: SSH tunnel (`ssh -L 8200:localhost:8200 your-server`) or nginx reverse proxy (see `nginx.example.conf`).
 
 ## Uninstall
 
