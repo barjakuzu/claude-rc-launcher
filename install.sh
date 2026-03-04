@@ -22,8 +22,13 @@ err()   { printf '\033[1;31m=>\033[0m %s\n' "$*" >&2; exit 1; }
 
 prompt_yn() {
     local answer
-    printf '\033[1;36m??\033[0m %s ' "$1" > /dev/tty
-    read -r answer < /dev/tty
+    if [ -e /dev/tty ]; then
+        printf '\033[1;36m??\033[0m %s ' "$1" > /dev/tty
+        read -r answer < /dev/tty
+    else
+        printf '\033[1;36m??\033[0m %s ' "$1"
+        read -r answer || true
+    fi
     answer="${answer:-$2}"
     [[ "$answer" =~ ^[Yy] ]]
 }
@@ -31,8 +36,13 @@ prompt_yn() {
 prompt_value() {
     # $1 = prompt, $2 = default (empty = required)
     local value
-    printf '\033[1;36m??\033[0m %s ' "$1" > /dev/tty
-    read -r value < /dev/tty
+    if [ -e /dev/tty ]; then
+        printf '\033[1;36m??\033[0m %s ' "$1" > /dev/tty
+        read -r value < /dev/tty
+    else
+        printf '\033[1;36m??\033[0m %s ' "$1"
+        read -r value || true
+    fi
     echo "${value:-$2}"
 }
 
@@ -110,8 +120,15 @@ if [ -d "$APP_DIR/.git" ]; then
 else
     info "Cloning repository..."
     mkdir -p "$(dirname "$APP_DIR")"
-    git clone https://github.com/barjakuzu/claude-rc-launcher.git "$APP_DIR"
-    ok "Cloned to $APP_DIR"
+    if git clone https://github.com/barjakuzu/claude-rc-launcher.git "$APP_DIR" 2>/dev/null; then
+        ok "Cloned to $APP_DIR"
+    else
+        warn "git clone failed — downloading as tarball..."
+        TMP_TAR="$(mktemp -d)"
+        curl -fsSL "https://api.github.com/repos/barjakuzu/claude-rc-launcher/tarball/main" | tar xz -C "$TMP_TAR" --strip-components=1
+        mv "$TMP_TAR" "$APP_DIR"
+        ok "Downloaded to $APP_DIR"
+    fi
 fi
 
 # ── Authentication setup ─────────────────────────────────────────────
