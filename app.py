@@ -197,10 +197,25 @@ def _setup_session(session_name, display_name, mode):
     # Handle the "trust this folder" prompt — press Enter to accept
     print(f"  {session_name}: accepting trust prompt")
     subprocess.run(["tmux", "send-keys", "-t", session_name, "Enter"], capture_output=True)
-    time.sleep(2)
-    if not _session_exists(session_name):
-        print(f"  {session_name}: session died after trust prompt")
+
+    # Wait for Claude's interactive prompt to appear before sending commands
+    print(f"  {session_name}: waiting for Claude to be ready...")
+    for _ in range(30):
+        time.sleep(2)
+        if not _session_exists(session_name):
+            print(f"  {session_name}: session died while loading")
+            return
+        r = subprocess.run(
+            ["tmux", "capture-pane", "-t", session_name, "-p"],
+            capture_output=True, text=True, timeout=5,
+        )
+        # Claude is ready when we see the prompt character
+        if "\u276f" in r.stdout or "❯" in r.stdout or ">" in r.stdout.split("\n")[-5:]:
+            break
+    else:
+        print(f"  {session_name}: timed out waiting for Claude prompt")
         return
+
     print(f"  {session_name}: sending /remote-control")
     subprocess.run(["tmux", "send-keys", "-t", session_name, "-l", "/remote-control"], capture_output=True)
     time.sleep(0.5)
