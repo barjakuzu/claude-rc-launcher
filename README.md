@@ -2,6 +2,10 @@
 
 Launch and manage [Claude Code](https://docs.anthropic.com/en/docs/claude-code) remote-control sessions from anywhere — your phone, another laptop, wherever you are.
 
+<p align="center">
+  <img src="screenshot.png" alt="Claude RC Launcher" width="400">
+</p>
+
 ## Install
 
 **Requirements:** Python 3.8+, tmux, Claude CLI (`claude login` first)
