@@ -178,20 +178,21 @@ def _session_exists(name):
 
 def _setup_session(session_name, display_name, mode):
     """Handle trust prompt, send /remote-control, wait for URL, then /rename."""
-    # Check quickly if session is alive
-    time.sleep(1)
-    if not _session_exists(session_name):
-        print(f"  {session_name}: session died within 1s")
-        return
+    # Check quickly if session is alive, capture output if it dies
+    for check in range(10):
+        time.sleep(0.3)
+        if not _session_exists(session_name):
+            print(f"  {session_name}: session died after {(check+1)*0.3:.1f}s")
+            return
     # Capture pane to see what's on screen
     r = subprocess.run(
         ["tmux", "capture-pane", "-t", session_name, "-p"],
         capture_output=True, text=True, timeout=5,
     )
-    print(f"  {session_name}: pane content: {repr(r.stdout[:200])}")
+    print(f"  {session_name}: pane content: {repr(r.stdout[:300])}")
     time.sleep(2)
     if not _session_exists(session_name):
-        print(f"  {session_name}: session died within 3s")
+        print(f"  {session_name}: session died within 5s")
         return
     # Handle the "trust this folder" prompt — press Enter to accept
     print(f"  {session_name}: accepting trust prompt")
@@ -751,7 +752,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 SHELL_BIN, "-lc",
                 f"unset CLAUDE_CODE_SSE_PORT CLAUDECODE HTTP_PROXY HTTPS_PROXY http_proxy https_proxy; {CLAUDE_BIN} {claude_flags}",
             ]
-            print(f"  Starting session: {name} (mode={mode}, dir={session_dir})")
+            print(f"  Starting session: {name} (mode={mode}, dir={session_dir}, shell={SHELL_BIN})")
+            print(f"  CMD: {' '.join(cmd)}")
             result = subprocess.run(cmd, capture_output=True, text=True)
             if result.returncode != 0:
                 print(f"  ERROR: tmux failed: {result.stderr.strip()}")
