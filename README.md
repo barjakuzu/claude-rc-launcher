@@ -27,7 +27,47 @@ Works on **Linux** and **macOS**.
 claude-rc update
 ```
 
-Or re-run the install script. Restart the service after updating.
+Then restart the service (see below).
+
+## Restart / Stop / Start
+
+**macOS (launchd):**
+
+```bash
+# Restart (after update or config change)
+launchctl unload ~/Library/LaunchAgents/com.claude-rc.launcher.plist
+launchctl load ~/Library/LaunchAgents/com.claude-rc.launcher.plist
+
+# Stop
+launchctl unload ~/Library/LaunchAgents/com.claude-rc.launcher.plist
+
+# Start
+launchctl load ~/Library/LaunchAgents/com.claude-rc.launcher.plist
+```
+
+**Linux (systemd):**
+
+```bash
+# Restart
+systemctl --user restart claude-rc
+
+# Stop
+systemctl --user stop claude-rc
+
+# Start
+systemctl --user start claude-rc
+
+# View logs
+journalctl --user -u claude-rc -f
+```
+
+**Quick kill (any platform):**
+
+```bash
+kill $(lsof -ti :8200)
+```
+
+The service auto-restarts if managed by launchd/systemd.
 
 ## Multi-Project Setup
 
@@ -37,7 +77,7 @@ To launch sessions in different project directories, edit `~/.config/claude-rc/e
 RC_PROJECTS=/path/to/project-a,/path/to/project-b
 ```
 
-Restart with `kill $(lsof -ti :8200)` (it auto-restarts). A project picker will appear in the UI.
+Restart the service to apply. A project picker will appear in the UI. You can also browse to any folder using the built-in directory browser.
 
 ## Configuration
 

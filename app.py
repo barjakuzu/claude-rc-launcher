@@ -284,16 +284,15 @@ HTML_PAGE = r"""<!DOCTYPE html>
 <title>Claude RC Launcher</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { font-family: -apple-system, system-ui, 'Segoe UI', sans-serif; background: #0a0a0a; color: #e2e8f0; min-height: 100vh; padding: 1.5rem 1rem; }
+  body { font-family: -apple-system, system-ui, 'Segoe UI', sans-serif; background: #0a0a0a; color: #e2e8f0; min-height: 100vh; padding: 0.75rem 1rem; }
   .container { max-width: 480px; margin: 0 auto; }
 
-  .logo { text-align: center; margin-bottom: 1.5rem; }
-  .logo svg { width: 36px; height: 36px; margin-bottom: 0.5rem; }
-  h1 { font-size: 1.35rem; font-weight: 700; letter-spacing: -0.02em; background: linear-gradient(135deg, #d4d4d4, #a3a3a3); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; }
-  .subtitle { color: #475569; font-size: 0.75rem; margin-top: 0.2rem; letter-spacing: 0.05em; text-transform: uppercase; }
+  .logo { text-align: center; margin-bottom: 0.75rem; }
+  h1 { font-size: 1.1rem; font-weight: 700; letter-spacing: -0.02em; background: linear-gradient(135deg, #d4d4d4, #a3a3a3); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; display: inline; }
+  .subtitle { color: #475569; font-size: 0.65rem; margin-top: 0.15rem; letter-spacing: 0.05em; text-transform: uppercase; }
 
-  .card { background: #141414; border: 1px solid rgba(255,255,255,0.06); border-radius: 16px; padding: 1.5rem; margin-bottom: 1.25rem; }
-  .form-group { margin-bottom: 1.2rem; }
+  .card { background: #141414; border: 1px solid rgba(255,255,255,0.06); border-radius: 16px; padding: 1rem 1.25rem; margin-bottom: 0.75rem; }
+  .form-group { margin-bottom: 0.85rem; }
   label { display: block; font-size: 0.75rem; color: #64748b; margin-bottom: 0.35rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; }
   input[type="text"] { width: 100%; padding: 0.6rem 0.8rem; border: 1px solid #262626; border-radius: 10px; background: #0a0a0a; color: #e2e8f0; font-size: 0.9rem; transition: all 0.2s; }
   input[type="text"]:focus { outline: none; border-color: #525252; box-shadow: 0 0 0 3px rgba(82,82,82,0.15); }
@@ -409,12 +408,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
 <body>
 <div class="container">
   <div class="logo">
-    <svg viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg">
-      <rect width="36" height="36" rx="10" fill="url(#g1)"/>
-      <path d="M10 18.5L15.5 24L26 13" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
-      <defs><linearGradient id="g1" x1="0" y1="0" x2="36" y2="36"><stop stop-color="#333"/><stop offset="1" stop-color="#1a1a1a"/></linearGradient></defs>
-    </svg>
-    <h1>Claude Remote Control</h1>
+    <h1>Claude RC</h1>
     <div class="subtitle">Session Launcher</div>
   </div>
 
