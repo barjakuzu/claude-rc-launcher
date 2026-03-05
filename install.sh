@@ -192,9 +192,9 @@ fi
 # Ensure PATH includes common binary locations (needed for launchd/systemd)
 if ! grep -q '^PATH=' "$CONFIG_FILE" 2>/dev/null; then
     if [ "$OS" = "Darwin" ]; then
-        echo "PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin" >> "$CONFIG_FILE"
+        echo "PATH=${BIN_DIR}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin" >> "$CONFIG_FILE"
     else
-        echo "PATH=/usr/local/bin:/usr/bin:/bin" >> "$CONFIG_FILE"
+        echo "PATH=${BIN_DIR}:/usr/local/bin:/usr/bin:/bin" >> "$CONFIG_FILE"
     fi
 fi
 
@@ -297,7 +297,7 @@ if command -v cloudflared > /dev/null 2>&1; then
         info "Waiting for tunnel URL..."
         for i in $(seq 1 15); do
             sleep 1
-            TUNNEL_URL="$(curl -sf $AUTH_HEADER "http://localhost:${PORT}/rc/tunnel/status" 2>/dev/null | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get("url",""))' 2>/dev/null || true)"
+            TUNNEL_URL="$(curl -sf $AUTH_HEADER "http://localhost:${PORT}/rc/tunnel/status" 2>/dev/null | python3 -c 'import sys,json; d=json.load(sys.stdin); u=d.get("url"); print(u if u else "")' 2>/dev/null || true)"
             if [ -n "$TUNNEL_URL" ]; then
                 echo ""
                 ok "Remote access URL:"
