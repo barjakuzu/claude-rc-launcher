@@ -274,6 +274,86 @@ elif [ "$OS" = "Darwin" ]; then
     ok "Started claude-rc service"
 fi
 
+# ── Register MCP server ─────────────────────────────────────────────
+
+# Read auth credentials from config for MCP env
+MCP_AUTH_USER=""
+MCP_AUTH_PASS=""
+if [ -f "$CONFIG_FILE" ]; then
+    MCP_AUTH_USER="$(grep '^RC_AUTH_USER=' "$CONFIG_FILE" 2>/dev/null | cut -d= -f2- || true)"
+    MCP_AUTH_PASS="$(grep '^RC_AUTH_PASS=' "$CONFIG_FILE" 2>/dev/null | cut -d= -f2- || true)"
+fi
+MCP_PORT="$(grep '^RC_PORT=' "$CONFIG_FILE" 2>/dev/null | cut -d= -f2- || echo "8200")"
+
+if command -v claude > /dev/null 2>&1; then
+    info "Registering MCP server for schedule management..."
+    claude mcp add-json claude-rc-scheduler "{
+  \"command\": \"python3\",
+  \"args\": [\"${APP_DIR}/mcp_server.py\"],
+  \"env\": {
+    \"RC_PORT\": \"${MCP_PORT}\",
+    \"RC_AUTH_USER\": \"${MCP_AUTH_USER}\",
+    \"RC_AUTH_PASS\": \"${MCP_AUTH_PASS}\"
+  }
+}" 2>/dev/null && ok "MCP server registered (claude-rc-scheduler)" || warn "Could not register MCP server (non-critical)"
+
+    # ── Browser Automation MCP (optional) ─────────────────────────────────
+
+    echo ""
+    if prompt_yn "Set up browser automation MCP? (lets Claude control Chrome) (y/N)" "n"; then
+        echo ""
+        info "Two options for browser automation:"
+        echo ""
+        echo "  1) openbrowser  — Connects to Chrome via DevTools Protocol (CDP)"
+        echo "     Best for: VPS, headless servers, unattended/scheduled tasks"
+        echo "     Requires: Chrome running with --remote-debugging-port"
+        echo ""
+        echo "  2) chrome-ext   — Uses the Claude-in-Chrome browser extension"
+        echo "     Best for: Personal machines with a visible Chrome browser"
+        echo "     Requires: Install extension from Chrome Web Store"
+        echo ""
+        BROWSER_MCP="$(prompt_value "Choose (1 or 2): " "")"
+
+        if [ "$BROWSER_MCP" = "1" ]; then
+            # openbrowser setup
+            CDP_PORT="$(prompt_value "Chrome CDP port [9222]: " "9222")"
+
+            info "Registering openbrowser MCP server..."
+            claude mcp add-json openbrowser "{
+  \"command\": \"npx\",
+  \"args\": [\"-y\", \"@anthropic/openbrowser@latest\"],
+  \"env\": {
+    \"CHROME_CDP_URL\": \"http://127.0.0.1:${CDP_PORT}\"
+  }
+}" 2>/dev/null && ok "openbrowser MCP registered (CDP port: ${CDP_PORT})" || warn "Could not register MCP (non-critical)"
+
+            echo ""
+            info "Make sure Chrome is running with:"
+            echo "  google-chrome --remote-debugging-port=${CDP_PORT} --remote-allow-origins=*"
+            info "For headless servers, also set DISPLAY or use Xvfb."
+
+        elif [ "$BROWSER_MCP" = "2" ]; then
+            # claude-in-chrome extension setup
+            info "Registering claude-in-chrome MCP server..."
+            claude mcp add-json claude-in-chrome "{
+  \"command\": \"npx\",
+  \"args\": [\"-y\", \"@anthropic/claude-in-chrome-mcp@latest\"]
+}" 2>/dev/null && ok "claude-in-chrome MCP registered" || warn "Could not register MCP (non-critical)"
+
+            echo ""
+            info "Next steps:"
+            echo "  1. Open Chrome and install the Claude-in-Chrome extension"
+            echo "     from the Chrome Web Store"
+            echo "  2. Click the extension icon and press 'Connect'"
+            echo "  3. The extension will automatically connect to Claude Code sessions"
+        else
+            warn "Invalid choice — skipping browser automation setup"
+        fi
+    fi
+else
+    warn "Claude CLI not found — skipping MCP server registration"
+fi
+
 # ── Start tunnel automatically ──────────────────────────────────────
 
 echo ""

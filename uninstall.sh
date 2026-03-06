@@ -21,6 +21,11 @@ elif [ "$OS" = "Darwin" ]; then
     info "Removed launchd plist"
 fi
 
+# Remove MCP server registration
+if command -v claude > /dev/null 2>&1; then
+    claude mcp remove claude-rc-scheduler 2>/dev/null && info "Removed MCP server registration" || true
+fi
+
 # Remove application directory and wrapper
 rm -rf "$HOME/.local/share/claude-rc"
 rm -f "$HOME/.local/bin/claude-rc"
