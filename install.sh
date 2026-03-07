@@ -144,12 +144,6 @@ if [ -n "$LOCAL_SOURCE" ]; then
     mkdir -p "$RC_HOME"
     rm -rf "$APP_DIR"
     cp -r "$LOCAL_SOURCE" "$APP_DIR"
-    # Clean up non-runtime files from app directory
-    rm -f "$APP_DIR/README.md" "$APP_DIR/Dockerfile" "$APP_DIR/docker-compose.yml" \
-          "$APP_DIR/install.sh" "$APP_DIR/uninstall.sh" "$APP_DIR/.env.example" \
-          "$APP_DIR/claude-rc.service" "$APP_DIR/com.claude-rc.launcher.plist" \
-          "$APP_DIR/.gitignore" "$APP_DIR/LICENSE"
-    rm -rf "$APP_DIR/.git"
     ok "Copied to $APP_DIR"
 elif [ -d "$APP_DIR/.git" ]; then
     info "Existing installation found — updating..."
@@ -168,6 +162,14 @@ else
         ok "Downloaded to $APP_DIR"
     fi
 fi
+
+# Clean up non-runtime files from app directory
+rm -f "$APP_DIR/README.md" "$APP_DIR/Dockerfile" "$APP_DIR/docker-compose.yml" \
+      "$APP_DIR/install.sh" "$APP_DIR/uninstall.sh" "$APP_DIR/.env.example" \
+      "$APP_DIR/claude-rc.service" "$APP_DIR/com.claude-rc.launcher.plist" \
+      "$APP_DIR/.gitignore" "$APP_DIR/LICENSE" "$APP_DIR/screenshot.png" \
+      "$APP_DIR/nginx.example.conf"
+rm -rf "$APP_DIR/.git"
 
 # ── Create logs directory ────────────────────────────────────────────
 
