@@ -18,9 +18,9 @@
     <true/>
 
     <key>StandardOutPath</key>
-    <string>/tmp/claude-rc.log</string>
+    <string>__RC_HOME__/logs/claude-rc.log</string>
 
     <key>StandardErrorPath</key>
-    <string>/tmp/claude-rc.log</string>
+    <string>__RC_HOME__/logs/claude-rc.log</string>
 </dict>
 </plist>

@@ -4,6 +4,9 @@ import os
 
 VERSION = "1.1.0"
 
+# Single home directory for all claude-rc data
+RC_HOME = os.environ.get("RC_HOME", os.path.expanduser("~/.claude-rc"))
+
 HOST = os.environ.get("RC_HOST", "0.0.0.0")
 PORT = int(os.environ.get("RC_PORT", "8200"))
 SESSION_PREFIX = os.environ.get("RC_PREFIX", "rc-")
@@ -28,6 +31,8 @@ MODEL_MAP = {
     "3": "haiku",    # Haiku 4.5
 }
 
-SCHEDULES_FILE = os.path.join(
-    os.path.expanduser("~"), ".config", "claude-rc", "schedules.json"
-)
+SCHEDULES_FILE = os.path.join(RC_HOME, "schedules.json")
+LOG_FILE = os.path.join(RC_HOME, "logs", "claude-rc.log")
+
+# Ensure directories exist
+os.makedirs(os.path.join(RC_HOME, "logs"), exist_ok=True)

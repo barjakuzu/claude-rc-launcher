@@ -26,13 +26,22 @@ if command -v claude > /dev/null 2>&1; then
     claude mcp remove claude-rc-scheduler 2>/dev/null && info "Removed MCP server registration" || true
 fi
 
-# Remove application directory and wrapper
-rm -rf "$HOME/.local/share/claude-rc"
+# Remove application files, logs, state (preserve env config)
+rm -rf "$HOME/.claude-rc/app"
+rm -rf "$HOME/.claude-rc/logs"
+rm -f "$HOME/.claude-rc/schedules.json"
 rm -f "$HOME/.local/bin/claude-rc"
 ok "Removed application files"
 
+# Clean up old locations if present
+if [ -d "$HOME/.local/share/claude-rc" ] || [ -d "$HOME/.config/claude-rc" ]; then
+    rm -rf "$HOME/.local/share/claude-rc"
+    rm -rf "$HOME/.config/claude-rc"
+    info "Cleaned up old installation paths"
+fi
+
 # Keep config
-info "Config preserved at ~/.config/claude-rc/"
-info "Remove manually if no longer needed: rm -rf ~/.config/claude-rc"
+info "Config preserved at ~/.claude-rc/env"
+info "Remove manually if no longer needed: rm -rf ~/.claude-rc"
 
 ok "Uninstall complete"

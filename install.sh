@@ -6,9 +6,10 @@
 # Re-running this script updates an existing installation via git pull.
 set -euo pipefail
 
-APP_DIR="$HOME/.local/share/claude-rc"
-CONFIG_DIR="$HOME/.config/claude-rc"
-CONFIG_FILE="$CONFIG_DIR/env"
+RC_HOME="$HOME/.claude-rc"
+APP_DIR="$RC_HOME/app"
+CONFIG_FILE="$RC_HOME/env"
+LOG_DIR="$RC_HOME/logs"
 BIN_DIR="$HOME/.local/bin"
 BIN_LINK="$BIN_DIR/claude-rc"
 SERVICE_NAME="claude-rc"
@@ -114,15 +115,49 @@ if ! command -v cloudflared > /dev/null 2>&1; then
     fi
 fi
 
-# ── Clone or update repo ────────────────────────────────────────────
+# ── Migrate old installation ─────────────────────────────────────────
 
-if [ -d "$APP_DIR/.git" ]; then
+OLD_CONFIG="$HOME/.config/claude-rc/env"
+OLD_SCHEDULES="$HOME/.config/claude-rc/schedules.json"
+
+if [ -f "$OLD_CONFIG" ] && [ ! -f "$CONFIG_FILE" ]; then
+    info "Migrating config from ~/.config/claude-rc/env..."
+    mkdir -p "$RC_HOME"
+    cp "$OLD_CONFIG" "$CONFIG_FILE"
+    ok "Config migrated to $CONFIG_FILE"
+fi
+
+if [ -f "$OLD_SCHEDULES" ] && [ ! -f "$RC_HOME/schedules.json" ]; then
+    info "Migrating schedules from old location..."
+    mkdir -p "$RC_HOME"
+    mv "$OLD_SCHEDULES" "$RC_HOME/schedules.json"
+    ok "Schedules migrated"
+fi
+
+# ── Clone, update, or copy local repo ────────────────────────────────
+
+# LOCAL_SOURCE env var allows installing from a local directory instead of GitHub
+LOCAL_SOURCE="${LOCAL_SOURCE:-}"
+
+if [ -n "$LOCAL_SOURCE" ]; then
+    info "Installing from local source: $LOCAL_SOURCE"
+    mkdir -p "$RC_HOME"
+    rm -rf "$APP_DIR"
+    cp -r "$LOCAL_SOURCE" "$APP_DIR"
+    # Clean up non-runtime files from app directory
+    rm -f "$APP_DIR/README.md" "$APP_DIR/Dockerfile" "$APP_DIR/docker-compose.yml" \
+          "$APP_DIR/install.sh" "$APP_DIR/uninstall.sh" "$APP_DIR/.env.example" \
+          "$APP_DIR/claude-rc.service" "$APP_DIR/com.claude-rc.launcher.plist" \
+          "$APP_DIR/.gitignore" "$APP_DIR/LICENSE"
+    rm -rf "$APP_DIR/.git"
+    ok "Copied to $APP_DIR"
+elif [ -d "$APP_DIR/.git" ]; then
     info "Existing installation found — updating..."
     git -C "$APP_DIR" pull --ff-only < /dev/null
     ok "Updated to latest"
 else
     info "Cloning repository..."
-    mkdir -p "$(dirname "$APP_DIR")"
+    mkdir -p "$RC_HOME"
     if git clone https://github.com/barjakuzu/claude-rc-launcher.git "$APP_DIR" < /dev/null 2>/dev/null; then
         ok "Cloned to $APP_DIR"
     else
@@ -134,13 +169,43 @@ else
     fi
 fi
 
-# ── Authentication setup ─────────────────────────────────────────────
+# ── Create logs directory ────────────────────────────────────────────
 
-mkdir -p "$CONFIG_DIR"
+mkdir -p "$LOG_DIR"
+
+# ── Authentication setup ─────────────────────────────────────────────
 
 SETUP_AUTH=false
 if [ ! -f "$CONFIG_FILE" ]; then
-    cp "$APP_DIR/.env.example" "$CONFIG_FILE"
+    # Write default env config from embedded template
+    cat > "$CONFIG_FILE" <<'ENVTPL'
+# Claude RC Launcher — Environment Variables
+
+# ── Server ───────────────────────────────────────────────────────────
+# Address and port the launcher listens on.
+RC_HOST=0.0.0.0
+RC_PORT=8200
+
+# ── Claude ───────────────────────────────────────────────────────────
+# Working directory for Claude sessions (absolute path recommended).
+RC_WORKING_DIR=.
+
+# Path to the Claude CLI binary, or just "claude" to find it on PATH.
+RC_CLAUDE_BIN=claude
+
+# Tmux session name prefix (sessions are named <prefix><your-name>).
+RC_PREFIX=rc-
+
+# ── Authentication ───────────────────────────────────────────────────
+# Optional HTTP Basic Auth. Both must be set to enable.
+# RC_AUTH_USER=admin
+# RC_AUTH_PASS=changeme
+
+# ── Multi-project ───────────────────────────────────────────────────
+# Comma-separated list of project directories. When set, the UI shows
+# a project picker and each session launches in the chosen directory.
+# RC_PROJECTS=/home/user/project-a,/home/user/project-b
+ENVTPL
     SETUP_AUTH=true
 elif ! grep -q '^RC_AUTH_USER=' "$CONFIG_FILE" 2>/dev/null; then
     SETUP_AUTH=true
@@ -204,8 +269,9 @@ mkdir -p "$BIN_DIR"
 cat > "$BIN_LINK" <<'WRAPPER'
 #!/usr/bin/env bash
 set -euo pipefail
-APP_DIR="$HOME/.local/share/claude-rc"
-CONFIG="$HOME/.config/claude-rc/env"
+RC_HOME="$HOME/.claude-rc"
+APP_DIR="$RC_HOME/app"
+CONFIG="$RC_HOME/env"
 
 if [ "${1:-}" = "update" ]; then
     echo "Updating claude-rc..."
@@ -259,7 +325,23 @@ esac
 if [ "$OS" = "Linux" ]; then
     SYSTEMD_DIR="$HOME/.config/systemd/user"
     mkdir -p "$SYSTEMD_DIR"
-    cp "$APP_DIR/claude-rc.service" "$SYSTEMD_DIR/${SERVICE_NAME}.service"
+    cat > "$SYSTEMD_DIR/${SERVICE_NAME}.service" <<EOF
+[Unit]
+Description=Claude RC Launcher
+After=network.target
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.claude-rc/env
+ExecStart=/usr/bin/env python3 %h/.claude-rc/app/app.py
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:%h/.claude-rc/logs/claude-rc.log
+StandardError=append:%h/.claude-rc/logs/claude-rc.log
+
+[Install]
+WantedBy=default.target
+EOF
     systemctl --user daemon-reload 2>/dev/null || true
     systemctl --user enable --now "${SERVICE_NAME}" 2>/dev/null || true
     ok "Started claude-rc service"
@@ -268,7 +350,34 @@ elif [ "$OS" = "Darwin" ]; then
     PLIST_DIR="$HOME/Library/LaunchAgents"
     PLIST_FILE="$PLIST_DIR/com.claude-rc.launcher.plist"
     mkdir -p "$PLIST_DIR"
-    sed "s|__BIN_LINK__|${BIN_LINK}|g" "$APP_DIR/com.claude-rc.launcher.plist" > "$PLIST_FILE"
+    cat > "$PLIST_FILE" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.claude-rc.launcher</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>${BIN_LINK}</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>${RC_HOME}/logs/claude-rc.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>${RC_HOME}/logs/claude-rc.log</string>
+</dict>
+</plist>
+EOF
     launchctl unload "$PLIST_FILE" 2>/dev/null || true
     launchctl load "$PLIST_FILE" 2>/dev/null || true
     ok "Started claude-rc service"
@@ -362,16 +471,26 @@ echo ""
 
 if command -v cloudflared > /dev/null 2>&1; then
     info "Starting launcher and creating tunnel..."
-    # Give the service a moment to start
-    sleep 2
 
-    # Check if the service is actually running
+    # Wait for the service to be ready (up to 10 seconds)
     PORT="${RC_PORT:-8200}"
     AUTH_HEADER=""
-    if [ -n "${AUTH_USER:-}" ] && [ -n "${AUTH_PASS:-}" ]; then
+    if [ -n "${MCP_AUTH_USER:-}" ] && [ -n "${MCP_AUTH_PASS:-}" ]; then
+        AUTH_HEADER="-u ${MCP_AUTH_USER}:${MCP_AUTH_PASS}"
+    elif [ -n "${AUTH_USER:-}" ] && [ -n "${AUTH_PASS:-}" ]; then
         AUTH_HEADER="-u ${AUTH_USER}:${AUTH_PASS}"
     fi
-    if curl -sf $AUTH_HEADER "http://localhost:${PORT}/rc/status" > /dev/null 2>&1; then
+
+    SERVICE_READY=false
+    for i in $(seq 1 10); do
+        if curl -sf $AUTH_HEADER "http://localhost:${PORT}/rc/sessions" > /dev/null 2>&1; then
+            SERVICE_READY=true
+            break
+        fi
+        sleep 1
+    done
+
+    if [ "$SERVICE_READY" = true ]; then
         # Start tunnel via API
         curl -sf $AUTH_HEADER -X POST "http://localhost:${PORT}/rc/tunnel/start" > /dev/null 2>&1 || true
         info "Waiting for tunnel URL..."
@@ -383,7 +502,7 @@ if command -v cloudflared > /dev/null 2>&1; then
                 ok "Remote access URL:"
                 printf '\n  \033[1;4;36m%s\033[0m\n\n' "$TUNNEL_URL"
                 info "Open this URL from anywhere — phone, another computer, etc."
-                info "Login with: $AUTH_USER / your password"
+                info "Login with: ${AUTH_USER:-${MCP_AUTH_USER:-admin}} / your password"
                 break
             fi
         done

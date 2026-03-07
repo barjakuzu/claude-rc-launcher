@@ -4,10 +4,12 @@ After=network.target
 
 [Service]
 Type=simple
-EnvironmentFile=%h/.config/claude-rc/env
-ExecStart=/usr/bin/env python3 %h/.local/share/claude-rc/app.py
+EnvironmentFile=%h/.claude-rc/env
+ExecStart=/usr/bin/env python3 %h/.claude-rc/app/app.py
 Restart=on-failure
 RestartSec=5
+StandardOutput=append:%h/.claude-rc/logs/claude-rc.log
+StandardError=append:%h/.claude-rc/logs/claude-rc.log
 
 [Install]
 WantedBy=default.target

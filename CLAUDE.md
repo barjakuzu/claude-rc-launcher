@@ -12,7 +12,7 @@ A Python web app that launches and manages Claude CLI remote-control sessions vi
 # Direct (requires env vars or .env sourced)
 python3 app.py
 
-# Via wrapper (sources ~/.config/claude-rc/env automatically)
+# Via wrapper (sources ~/.claude-rc/env automatically)
 claude-rc
 
 # Update installed version
@@ -32,9 +32,11 @@ server.py       — HTTP handler, routing, auth, project helpers
 sessions.py     — tmux session lifecycle (list, create, setup, stop)
 tunnel.py       — Cloudflare tunnel management
 scheduler.py    — Cron expression parser + scheduler thread
-schedules.py    — Schedule storage CRUD (JSON file at ~/.config/claude-rc/schedules.json)
+schedules.py    — Schedule storage CRUD (JSON file at ~/.claude-rc/schedules.json)
 mcp_server.py   — MCP server for chat-based schedule management (standalone)
-static/index.html — Complete frontend (HTML + CSS + JS inline, no framework)
+static/index.html — Frontend HTML (links to style.css + app.js, no framework)
+static/style.css  — Extracted CSS styles
+static/app.js     — Extracted JS application logic
 ```
 
 ### Key patterns
@@ -79,7 +81,7 @@ All under `/rc/` prefix:
 
 - `install.sh` — curl-pipe installer. Clones repo, sets up auth, creates wrapper script, configures launchd (macOS) or systemd (Linux) service. Re-running updates via `git pull`.
 - `uninstall.sh` — removes service + app dir, preserves config.
-- Config lives at `~/.config/claude-rc/env`, app at `~/.local/share/claude-rc/`.
+- Everything lives under `~/.claude-rc/`: config at `env`, app code at `app/`, logs at `logs/`, schedules at `schedules.json`.
 
 ## Important Gotchas
 

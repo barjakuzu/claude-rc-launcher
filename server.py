@@ -16,6 +16,7 @@ from config import (
 )
 from sessions import (
     list_rc_sessions, session_exists, setup_session, stop_session,
+    get_all_session_errors,
 )
 from tunnel import (
     cloudflared_available, start_tunnel, stop_tunnel, get_tunnel_status,
@@ -75,7 +76,40 @@ def _load_html():
         return f.read()
 
 
+_CONTENT_TYPES = {
+    ".css": "text/css",
+    ".js": "application/javascript",
+    ".html": "text/html",
+    ".json": "application/json",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".svg": "image/svg+xml",
+    ".ico": "image/x-icon",
+}
+
+
 class Handler(http.server.BaseHTTPRequestHandler):
+    def _serve_static(self, path):
+        """Serve a file from the static/ directory."""
+        # Strip leading /static/
+        rel = path[len("/static/"):]
+        if ".." in rel or not rel:
+            self.send_error(403)
+            return
+        filepath = os.path.join(os.path.dirname(__file__), "static", rel)
+        if not os.path.isfile(filepath):
+            self.send_error(404)
+            return
+        ext = os.path.splitext(filepath)[1].lower()
+        content_type = _CONTENT_TYPES.get(ext, "application/octet-stream")
+        with open(filepath, "rb") as f:
+            data = f.read()
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
     def _json(self, data, code=200):
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
@@ -101,6 +135,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if not _check_auth(self):
             return _send_auth_required(self)
 
+        # Serve static files (handles both /static/* and /rc/static/*)
+        static_path = self.path.split('?')[0]
+        if static_path.startswith("/rc"):
+            static_path = static_path[3:]
+        if static_path.startswith("/static/"):
+            return self._serve_static(static_path)
+
         path = self.path
         if path.startswith("/rc"):
             path = path[3:] or "/"
@@ -110,7 +151,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         elif path == "/sessions":
             sessions = list_rc_sessions()
-            self._json({"sessions": sessions})
+            errors = get_all_session_errors()
+            resp = {"sessions": sessions}
+            if errors:
+                resp["errors"] = errors
+            self._json(resp)
 
         elif path == "/projects":
             projects = _parse_projects()
@@ -180,6 +225,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             mode = body.get("mode", "c")
             model = body.get("model")
             workdir = body.get("workdir", "").strip()
+            sandbox = body.get("sandbox", False)
 
             if not name:
                 name = SESSION_PREFIX + time.strftime("%H%M%S")
@@ -207,13 +253,25 @@ class Handler(http.server.BaseHTTPRequestHandler):
             claude_args = claude_flags.split()
             if model_flag:
                 claude_args.extend(["--model", model_flag])
-            cmd = [
-                "tmux", "new-session", "-d", "-s", name,
-                "-c", session_dir,
+            env_flags = [
                 "-e", f"RC_MODE={mode}",
                 "-e", f"RC_WORKDIR={session_dir}",
                 "-e", "DISPLAY=:1",
-                CLAUDE_BIN, *claude_args,
+            ]
+            if sandbox:
+                env_flags.extend(["-e", "IS_SANDBOX=1"])
+            # Wrap command in shell: run claude, and if it exits non-zero,
+            # print stderr and sleep so setup_session can read the error
+            claude_cmd = " ".join(
+                [f"CLAUDECODE= {CLAUDE_BIN}"] + claude_args
+            )
+            wrapper = f'{claude_cmd} 2>&1 || {{ echo ""; sleep 30; }}'
+            cmd = [
+                "tmux", "new-session", "-d", "-s", name,
+                "-c", session_dir,
+                "-x", "200", "-y", "50",
+                *env_flags,
+                "bash", "-c", wrapper,
             ]
             print(f"  Starting session: {name} (mode={mode}, model={model_flag}, dir={session_dir})")
             print(f"  CMD: {' '.join(cmd)}")
@@ -364,8 +422,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "-e", f"RC_WORKDIR={session_dir}",
                 "-e", "RC_WIZARD=1",
                 "-e", "DISPLAY=:1",
-                CLAUDE_BIN, *claude_flags.split(),
             ]
+            wiz_claude_cmd = " ".join(
+                [f"CLAUDECODE= {CLAUDE_BIN}"] + claude_flags.split()
+            )
+            wiz_wrapper = f'{wiz_claude_cmd} 2>&1 || {{ echo ""; sleep 30; }}'
+            cmd.extend(["bash", "-c", wiz_wrapper])
             print(f"  Wizard: starting session {name} (mode={mode}, dir={session_dir})")
             result = subprocess.run(cmd, capture_output=True, text=True)
             if result.returncode != 0:
@@ -397,6 +459,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         path = self.path.split("?")[0]
         if path in ("/rc/sessions", "/rc/tunnel/status", "/rc/projects",
-                     "/rc/browse", "/rc/schedules", "/rc/version"):
+                     "/rc/browse", "/rc/schedules", "/rc/version") or \
+                path.startswith("/rc/static/") or path.startswith("/static/"):
             return
         print(f"  {self.command} {self.path} → {args[1] if len(args) > 1 else ''}")
