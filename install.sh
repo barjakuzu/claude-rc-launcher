@@ -168,7 +168,7 @@ rm -f "$APP_DIR/README.md" "$APP_DIR/Dockerfile" "$APP_DIR/docker-compose.yml" \
       "$APP_DIR/install.sh" "$APP_DIR/uninstall.sh" "$APP_DIR/.env.example" \
       "$APP_DIR/claude-rc.service" "$APP_DIR/com.claude-rc.launcher.plist" \
       "$APP_DIR/.gitignore" "$APP_DIR/LICENSE" "$APP_DIR/screenshot.png" \
-      "$APP_DIR/nginx.example.conf"
+      "$APP_DIR/launcher.gif" "$APP_DIR/nginx.example.conf"
 rm -rf "$APP_DIR/.git"
 
 # ── Create logs directory ────────────────────────────────────────────
@@ -385,7 +385,7 @@ EOF
     ok "Started claude-rc service"
 fi
 
-# ── Browser Automation MCP (optional) ────────────────────────────────
+# ── Browser Automation (optional) ────────────────────────────────────
 
 # Read auth credentials from config for tunnel URL display
 MCP_AUTH_USER=""
@@ -395,29 +395,31 @@ if [ -f "$CONFIG_FILE" ]; then
     MCP_AUTH_PASS="$(grep '^RC_AUTH_PASS=' "$CONFIG_FILE" 2>/dev/null | cut -d= -f2- || true)"
 fi
 
-if command -v claude > /dev/null 2>&1; then
-    echo ""
-    if prompt_yn "Set up browser automation MCP? (lets Claude control Chrome via Puppeteer) (y/N)" "n"; then
-        CDP_PORT="$(prompt_value "Chrome CDP port [9222]: " "9222")"
-
-        info "Registering Puppeteer MCP server..."
-        claude mcp add-json browser-automation "{
-  \"command\": \"npx\",
-  \"args\": [\"-y\", \"@modelcontextprotocol/server-puppeteer\"],
-  \"env\": {
-    \"PUPPETEER_BROWSER_URL\": \"http://127.0.0.1:${CDP_PORT}\"
-  }
-}" 2>/dev/null && ok "Browser automation MCP registered (CDP port: ${CDP_PORT})" || warn "Could not register MCP (non-critical)"
-
-        echo ""
-        info "Chrome must be running with CDP enabled for browser automation to work."
-        info "Start Chrome with:"
-        echo "  google-chrome --no-sandbox --disable-gpu --remote-debugging-port=${CDP_PORT} --remote-allow-origins=*"
-        info "For headless/VNC servers, ensure DISPLAY is set and Xauthority is accessible."
-        info "Tip: create a systemd service to keep Chrome running persistently."
+echo ""
+if prompt_yn "Set up browser automation? (lets Claude control a headless browser via playwright-cli) (y/N)" "n"; then
+    if command -v playwright-cli > /dev/null 2>&1; then
+        ok "playwright-cli already installed ($(playwright-cli --version 2>/dev/null || echo 'unknown'))"
+    else
+        info "Installing @playwright/cli..."
+        if command -v npm > /dev/null 2>&1; then
+            npm install -g @playwright/cli 2>/dev/null && ok "playwright-cli installed" || warn "Could not install @playwright/cli (non-critical)"
+        else
+            warn "npm not found — install Node.js first, then run: npm install -g @playwright/cli"
+        fi
     fi
-else
-    warn "Claude CLI not found — skipping MCP server registration"
+
+    echo ""
+    info "playwright-cli gives Claude headless browser control — no Chrome, no Xvfb needed."
+    info "Usage in schedule prompts:"
+    echo "  playwright-cli -s=session open"
+    echo "  playwright-cli -s=session goto \"https://example.com\""
+    echo "  playwright-cli -s=session snapshot   # get element refs"
+    echo "  playwright-cli -s=session click ref1  # interact"
+    echo "  playwright-cli -s=session screenshot  # verify"
+    echo "  playwright-cli -s=session close"
+    echo ""
+    info "Save login sessions with: playwright-cli -s=name state-save ~/.playwright/states/site-auth"
+    info "Load in scheduled tasks with: playwright-cli -s=name state-load ~/.playwright/states/site-auth"
 fi
 
 # ── Start tunnel automatically ──────────────────────────────────────
