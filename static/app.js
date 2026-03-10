@@ -1,9 +1,16 @@
-/* Tab switching */
+/* Tab switching (mobile) */
 function switchTab(tab) {
   document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
   document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('active'));
   document.getElementById('tab-' + tab).classList.add('active');
   document.querySelector('[data-tab="' + tab + '"]').classList.add('active');
+}
+
+/* Workspace tab switching (desktop) */
+function switchWsTab(tab) {
+  document.querySelectorAll('.ws-tab').forEach(el => el.classList.toggle('active', el.dataset.ws === tab));
+  document.querySelectorAll('#tab-sessions, #tab-schedules').forEach(el => el.classList.remove('ws-active'));
+  document.getElementById('tab-' + tab).classList.add('ws-active');
 }
 
 /* SVG icon templates */
@@ -18,6 +25,7 @@ const ICN = {
   warn: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0zM12 9v4M12 17h.01"/></svg>',
   folder: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/></svg>',
   loader: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>',
+  restart: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 4v6h6"/><path d="M3.51 15a9 9 0 102.13-9.36L1 10"/></svg>',
   share: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="M8.59 13.51l6.83 3.98M15.41 6.51l-6.82 3.98"/></svg>',
   x: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>',
   clock: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>',
@@ -37,13 +45,16 @@ let stoppingSet = new Set();
 let shownErrors = new Set();
 let editingScheduleId = null;
 
-function updateMode() {
-  const mode = document.getElementById('mode-select').value;
+function selectMode(mode) {
+  document.querySelectorAll('.mode-radio').forEach(el => {
+    const isSelected = el.dataset.mode === mode;
+    el.classList.toggle('selected', isSelected);
+    el.querySelector('input').checked = isSelected;
+  });
   const m = MODES[mode];
-  document.getElementById('mode-icon').innerHTML = m.icon;
-  document.getElementById('mode-detail').innerHTML = m.detail;
   document.getElementById('btn-launch').className = 'btn-launch ' + m.cls;
 }
+function updateMode() { /* compat stub */ }
 
 function defaultName() {
   const d = new Date();
@@ -52,28 +63,38 @@ function defaultName() {
 
 document.getElementById('session-name').placeholder = defaultName();
 
+const _apiBase = window.location.origin + '/rc';
 async function api(method, path, body) {
   const opts = { method, headers: {'Content-Type': 'application/json'} };
   if (body) opts.body = JSON.stringify(body);
-  const r = await fetch('/rc' + path, opts);
+  const r = await fetch(_apiBase + path, opts);
   return r.json();
 }
 
-let currentBrowsePath = null;
-let selectedWorkdir = null;
-let browserOpen = false;
+/* --- Directory browser (multi-instance) --- */
+
+let browsers = {
+  launch: { path: null, selected: null, open: false },
+  sched: { path: null, selected: null, open: false },
+  wiz: { path: null, selected: null, open: false },
+};
 let hasProjects = false;
+
+function _ids(ctx) {
+  if (ctx === 'launch') return { wrap: 'dir-browser-wrap', input: 'dir-browser-input', browser: 'dir-browser', breadcrumb: 'dir-breadcrumb', list: 'dir-list' };
+  return { wrap: ctx + '-dir-browser-wrap', input: ctx + '-dir-browser-input', browser: ctx + '-dir-browser', breadcrumb: ctx + '-dir-breadcrumb', list: ctx + '-dir-list' };
+}
 
 function onProjectChange() {
   const sel = document.getElementById('project-select');
   const browserWrap = document.getElementById('dir-browser-wrap');
   if (sel.value === '__browse__') {
     browserWrap.style.display = 'block';
-    selectedWorkdir = null;
-    browseTo(currentBrowsePath || selectedWorkdir);
+    browsers.launch.selected = null;
+    browseTo('launch', browsers.launch.path || browsers.launch.selected);
   } else {
     browserWrap.style.display = 'none';
-    closeBrowser();
+    closeBrowser('launch');
   }
 }
 
@@ -83,14 +104,14 @@ async function loadProjects() {
     const projects = data.projects || [];
     const selWrap = document.getElementById('project-select-wrap');
     const browserWrap = document.getElementById('dir-browser-wrap');
-    selectedWorkdir = null;
-    currentBrowsePath = data.default || '/';
+    browsers.launch.selected = null;
+    browsers.launch.path = data.default || '/';
     if (projects.length === 0) {
       hasProjects = false;
       selWrap.style.display = 'none';
       browserWrap.style.display = 'block';
       document.getElementById('dir-browser-input').value = data.default || '/';
-      browseTo(data.default || '/');
+      browseTo('launch', data.default || '/');
     } else {
       hasProjects = true;
       selWrap.style.display = '';
@@ -113,38 +134,41 @@ async function loadProjects() {
   } catch(e) {}
 }
 
-function toggleBrowser() {
-  const panel = document.getElementById('dir-browser');
-  if (browserOpen) {
-    closeBrowser();
+function toggleBrowser(ctx) {
+  const ids = _ids(ctx);
+  const panel = document.getElementById(ids.browser);
+  if (browsers[ctx].open) {
+    closeBrowser(ctx);
   } else {
     panel.classList.add('open');
-    browserOpen = true;
-    browseTo(currentBrowsePath || selectedWorkdir || '/');
+    browsers[ctx].open = true;
+    browseTo(ctx, browsers[ctx].path || browsers[ctx].selected || '/');
   }
 }
 
-function closeBrowser() {
-  document.getElementById('dir-browser').classList.remove('open');
-  browserOpen = false;
+function closeBrowser(ctx) {
+  const ids = _ids(ctx);
+  document.getElementById(ids.browser).classList.remove('open');
+  browsers[ctx].open = false;
 }
 
-async function browseTo(path) {
+async function browseTo(ctx, path) {
   if (!path) path = '/';
-  currentBrowsePath = path;
-  const listEl = document.getElementById('dir-list');
-  const crumbEl = document.getElementById('dir-breadcrumb');
+  browsers[ctx].path = path;
+  const ids = _ids(ctx);
+  const listEl = document.getElementById(ids.list);
+  const crumbEl = document.getElementById(ids.breadcrumb);
   listEl.innerHTML = '<div class="dir-empty">Loading\u2026</div>';
   try {
     const data = await api('GET', '/browse?path=' + encodeURIComponent(path));
-    currentBrowsePath = data.path;
+    browsers[ctx].path = data.path;
     const parts = data.path.split('/').filter(Boolean);
-    let crumbHtml = '<span class="dir-breadcrumb-seg" onclick="browseTo(\'/\')">/</span>';
+    let crumbHtml = '<span class="dir-breadcrumb-seg" onclick="browseTo(\'' + ctx + '\',\'/\')">/</span>';
     let accumulated = '';
     parts.forEach((part, i) => {
       accumulated += '/' + part;
       const p = accumulated;
-      crumbHtml += '<span class="dir-breadcrumb-sep">/</span><span class="dir-breadcrumb-seg" onclick="browseTo(\'' + escHtml(p.replace(/'/g, "\\\\'")) + '\')">' + escHtml(part) + '</span>';
+      crumbHtml += '<span class="dir-breadcrumb-sep">/</span><span class="dir-breadcrumb-seg" onclick="browseTo(\'' + ctx + '\',\'' + escHtml(p.replace(/'/g, "\\\\'")) + '\')">' + escHtml(part) + '</span>';
     });
     crumbEl.innerHTML = crumbHtml;
     if (data.dirs.length === 0) {
@@ -152,24 +176,38 @@ async function browseTo(path) {
     } else {
       listEl.innerHTML = data.dirs.map(d => {
         const full = (data.path === '/' ? '/' : data.path + '/') + d;
-        return '<div class="dir-item" onclick="browseTo(\'' + escHtml(full.replace(/'/g, "\\\\'")) + '\')">' + ICN.folder + ' ' + escHtml(d) + '</div>';
+        return '<div class="dir-item" onclick="browseTo(\'' + ctx + '\',\'' + escHtml(full.replace(/'/g, "\\\\'")) + '\')">' + ICN.folder + ' ' + escHtml(d) + '</div>';
       }).join('');
     }
+    // Update the input to show current path
+    document.getElementById(ids.input).value = data.path;
   } catch(e) {
     listEl.innerHTML = '<div class="dir-empty">Error loading directory</div>';
   }
 }
 
-function selectDir(path) {
-  selectedWorkdir = path || currentBrowsePath;
-  document.getElementById('dir-browser-input').value = selectedWorkdir;
-  closeBrowser();
+function selectDir(ctx) {
+  const ids = _ids(ctx);
+  browsers[ctx].selected = browsers[ctx].path;
+  document.getElementById(ids.input).value = browsers[ctx].selected;
+  closeBrowser(ctx);
+  // For sched/wiz context, also update the workdir input
+  if (ctx === 'sched') {
+    document.getElementById('sched-workdir').value = browsers[ctx].selected;
+  } else if (ctx === 'wiz') {
+    document.getElementById('wiz-workdir').value = browsers[ctx].selected;
+  }
 }
 
-document.addEventListener('click', function(e) {
-  if (!browserOpen) return;
-  const wrap = document.getElementById('dir-browser-wrap');
-  if (!wrap.contains(e.target)) closeBrowser();
+/* Close browser when clicking outside — use mousedown so it fires before
+   innerHTML updates remove the clicked element from DOM */
+document.addEventListener('mousedown', function(e) {
+  for (const ctx of Object.keys(browsers)) {
+    if (!browsers[ctx].open) continue;
+    const ids = _ids(ctx);
+    const wrap = document.getElementById(ids.wrap);
+    if (wrap && !wrap.contains(e.target)) closeBrowser(ctx);
+  }
 });
 
 function escHtml(s) {
@@ -178,10 +216,10 @@ function escHtml(s) {
   return d.innerHTML;
 }
 
-function showToast(title, message, duration, action) {
+function showToast(title, message, duration, action, type) {
   const container = document.getElementById('toast-container');
   const toast = document.createElement('div');
-  toast.className = 'toast';
+  toast.className = 'toast' + (type === 'success' ? ' toast-success' : '');
   let html = '<div class="toast-title">' + escHtml(title) + '</div>' + escHtml(message);
   if (action) {
     html += '<div><button class="toast-action" id="toast-action-btn">' + escHtml(action.label) + '</button></div>';
@@ -200,10 +238,10 @@ function showToast(title, message, duration, action) {
 function getSelectedWorkdir() {
   const selWrap = document.getElementById('project-select-wrap');
   if (selWrap.style.display === 'none') {
-    return selectedWorkdir || undefined;
+    return browsers.launch.selected || undefined;
   }
   const sel = document.getElementById('project-select');
-  if (sel.value === '__browse__') return selectedWorkdir || undefined;
+  if (sel.value === '__browse__') return browsers.launch.selected || undefined;
   return sel.value || undefined;
 }
 
@@ -213,7 +251,6 @@ async function refresh() {
   const data = await api('GET', '/sessions');
   if (data.errors) {
     for (const [name, error] of Object.entries(data.errors)) {
-      // Skip if already shown or if startSession is handling this one
       if (!shownErrors.has(name) && launchingSession !== name) {
         shownErrors.add(name);
         showToast('Session failed: ' + name, error, 12000);
@@ -223,20 +260,27 @@ async function refresh() {
   const el = document.getElementById('sessions');
   document.getElementById('session-name').placeholder = defaultName();
 
-  const stopAllBtn = document.getElementById('btn-stop-all');
-  const countBadge = document.getElementById('session-count');
+  const count = (data.sessions || []).length;
+
+  // Update all session count badges
+  document.querySelectorAll('.session-count-badge').forEach(badge => {
+    if (count > 0) { badge.textContent = count; badge.style.display = ''; }
+    else { badge.style.display = 'none'; }
+  });
+
+  // Update all stop-all buttons
+  document.querySelectorAll('.btn-stop-all-btn').forEach(btn => {
+    btn.style.display = count > 1 ? 'inline-flex' : 'none';
+    btn.disabled = false;
+  });
+
   if (!data.sessions || data.sessions.length === 0) {
     el.innerHTML = '<div class="empty">No sessions running</div>';
-    stopAllBtn.style.display = 'none';
-    if (countBadge) countBadge.style.display = 'none';
     stoppingSet.clear();
   } else {
-    if (countBadge) { countBadge.textContent = data.sessions.length; countBadge.style.display = ''; }
     const names = new Set(data.sessions.map(s => s.name));
     for (const n of stoppingSet) { if (!names.has(n)) stoppingSet.delete(n); }
 
-    stopAllBtn.style.display = data.sessions.length > 1 ? 'inline-flex' : 'none';
-    stopAllBtn.disabled = false;
     el.innerHTML = data.sessions.map(s => {
       const badgeClass = s.mode === 'ci' ? 'badge-ci' : s.mode === 'safe' ? 'badge-safe' : 'badge-c';
       const permTag = s.mode === 'safe'
@@ -253,6 +297,9 @@ async function refresh() {
         : s.url
           ? '<div class="session-url"><a href="' + escHtml(s.url) + '" target="_blank">' + escHtml(s.url) + '</a></div>'
           : '<div class="session-url"><span class="waiting">' + ICN.loader + ' Waiting for URL\u2026</span></div>';
+      const copyBtn = s.url && !isDead
+        ? '<button class="btn-copy btn-copy-url" onclick="copyUrl(\'' + escHtml(s.url.replace(/'/g, "\\'")) + '\',this)">' + ICN.copy + ' Copy</button>'
+        : '';
       const projectHtml = s.project
         ? '<div class="project-label" title="' + escHtml(s.workdir || '') + '">' + ICN.folder + ' ' + escHtml(s.project) + '</div>'
         : '';
@@ -269,17 +316,19 @@ async function refresh() {
         '</div>';
       }
       const isStopping = stoppingSet.has(s.name);
+      const restartBtn = '<button class="btn-restart" onclick="restartSession(\'' + s.name.replace(/'/g, "\\'") + '\')">' + ICN.restart + ' Restart</button>';
       const stopBtn = isStopping
         ? '<button class="btn-stop" disabled><span class="spinner spinner-sm"></span> Stopping\u2026</button>'
         : '<button class="btn-stop" onclick="stopSession(\'' + s.name.replace(/'/g, "\\'") + '\')">' + ICN.stop + ' Stop</button>';
       return '<div class="session-card' + (isDead ? ' session-card-dead' : '') + '">' +
         '<div class="session-header">' +
           '<span class="session-name">' + escHtml(s.name) + wizardBadge + '</span>' +
-          '<span style="display:flex;gap:0.35rem;align-items:center;">' + permTag +
+          '<span style="display:flex;gap:0.3rem;align-items:center;">' + permTag +
             '<span class="badge ' + badgeClass + '">' + modeLabel + '</span>' +
           '</span>' +
         '</div>' +
-        projectHtml + tokenHtml + wizardHint + urlHtml + stopBtn +
+        projectHtml + tokenHtml + wizardHint + urlHtml +
+        '<div class="session-actions"><div class="session-actions-left">' + restartBtn + stopBtn + '</div>' + copyBtn + '</div>' +
       '</div>';
     }).join('');
   }
@@ -330,17 +379,18 @@ async function stopTunnel() {
   renderShare();
 }
 
-function copyUrl() {
-  if (!tunnelState.url) return;
-  navigator.clipboard.writeText(tunnelState.url).then(() => {
-    const btn = document.querySelector('.btn-copy');
+function copyUrl(url, btnEl) {
+  const text = url || tunnelState.url;
+  if (!text) return;
+  const btn = btnEl || document.querySelector('.btn-copy');
+  navigator.clipboard.writeText(text).then(() => {
     if (btn) { btn.innerHTML = ICN.check + ' Copied!'; setTimeout(() => { btn.innerHTML = ICN.copy + ' Copy'; }, 1500); }
   });
 }
 
 async function startSession(opts) {
   opts = opts || {};
-  const mode = opts.mode || document.getElementById('mode-select').value;
+  const mode = opts.mode || document.querySelector('input[name="launch-mode"]:checked').value;
   const btn = document.getElementById('btn-launch');
   const input = document.getElementById('session-name');
   const name = opts.name || input.value.trim() || input.placeholder;
@@ -380,7 +430,10 @@ async function startSession(opts) {
       break;
     }
     const s = (data.sessions || []).find(s => s.name === launchName);
-    if (s && s.url) break;
+    if (s && s.url) {
+      showToast('Session launched', launchName + ' is ready', 5000, null, 'success');
+      break;
+    }
   }
   launchingSession = null;
   btn.disabled = false;
@@ -406,10 +459,75 @@ function renderSessions() {
 }
 
 async function stopAll() {
-  const btn = document.getElementById('btn-stop-all');
-  btn.disabled = true;
-  btn.innerHTML = '<span class="spinner spinner-sm"></span> Stopping\u2026';
+  document.querySelectorAll('.btn-stop-all-btn').forEach(btn => {
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner spinner-sm"></span> Stopping\u2026';
+  });
   await api('POST', '/stop-all');
+  refresh();
+}
+
+async function restartSession(name) {
+  const btn = document.querySelector('.btn-restart[onclick*="' + name + '"]');
+  if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spinner spinner-sm"></span> Restarting\u2026'; }
+  await api('POST', '/restart', { name, resume: true });
+  refresh();
+}
+
+/* --- Resume --- */
+
+async function openResumeModal() {
+  document.getElementById('resume-modal').style.display = 'flex';
+  const el = document.getElementById('resume-list');
+  el.innerHTML = '<div class="empty">Loading\u2026</div>';
+  try {
+    const data = await api('GET', '/resume/sessions');
+    const projects = data.projects || [];
+    if (projects.length === 0) {
+      el.innerHTML = '<div class="empty">No past sessions found</div>';
+      return;
+    }
+    el.innerHTML = projects.map(p => {
+      const sessions = p.sessions.map(s => {
+        const title = s.name || s.id.substring(0, 8) + '\u2026';
+        const updated = formatRelativeTime(s.updated);
+        return '<div class="resume-item" onclick="resumeSession(\'' + escHtml(s.id) + '\', \'' + escHtml((s.name || '').replace(/'/g, '')) + '\', \'' + escHtml(p.project) + '\')">' +
+          '<div class="resume-item-info">' +
+            '<div class="resume-item-title">' + escHtml(title) + '</div>' +
+            '<div class="resume-item-meta">' +
+              '<span>' + escHtml(s.branch) + '</span>' +
+              '<span>' + escHtml(s.size_label) + '</span>' +
+              '<span>' + updated + '</span>' +
+            '</div>' +
+          '</div>' +
+          '<button class="resume-item-btn">Resume</button>' +
+        '</div>';
+      }).join('');
+      return '<div class="resume-project">' +
+        '<div class="resume-project-name">' + escHtml(p.project) + '</div>' +
+        sessions +
+      '</div>';
+    }).join('');
+  } catch(e) {
+    el.innerHTML = '<div class="empty">Failed to load sessions</div>';
+  }
+}
+
+function closeResumeModal() {
+  document.getElementById('resume-modal').style.display = 'none';
+}
+
+async function resumeSession(sessionId, title, project) {
+  closeResumeModal();
+  const result = await api('POST', '/resume/start', {
+    session_id: sessionId,
+    title: title,
+    project: project,
+    mode: 'c',
+  });
+  if (result && !result.ok) {
+    showToast('Resume failed', result.message || 'Unknown error');
+  }
   refresh();
 }
 
@@ -473,11 +591,19 @@ function applyCronPreset() {
 function onSchedProjectChange() {
   const sel = document.getElementById('sched-project-select');
   const input = document.getElementById('sched-workdir');
-  if (sel.value === '__custom__') {
+  const browserWrap = document.getElementById('sched-dir-browser-wrap');
+  if (sel.value === '__browse__') {
+    input.style.display = 'none';
+    browserWrap.style.display = 'block';
+    browsers.sched.selected = null;
+    browseTo('sched', browsers.sched.path || '/');
+  } else if (sel.value === '__custom__') {
+    browserWrap.style.display = 'none';
     input.style.display = '';
     input.value = '';
     input.focus();
   } else if (sel.value) {
+    browserWrap.style.display = 'none';
     input.style.display = 'none';
     input.value = sel.value;
   }
@@ -485,11 +611,13 @@ function onSchedProjectChange() {
 
 async function populateSchedProjects(currentWorkdir) {
   const wrap = document.getElementById('sched-project-wrap');
+  const browserWrap = document.getElementById('sched-dir-browser-wrap');
   try {
     const data = await api('GET', '/projects');
     const projects = data.projects || [];
     const sel = document.getElementById('sched-project-select');
     sel.innerHTML = '';
+    browsers.sched.path = data.default || '/';
     /* Default option */
     const defOpt = document.createElement('option');
     defOpt.value = data.default || '';
@@ -503,6 +631,11 @@ async function populateSchedProjects(currentWorkdir) {
       if (!p.exists) opt.disabled = true;
       sel.appendChild(opt);
     });
+    /* Browse option */
+    const browseOpt = document.createElement('option');
+    browseOpt.value = '__browse__';
+    browseOpt.textContent = 'Browse\u2026';
+    sel.appendChild(browseOpt);
     /* Custom option */
     const custom = document.createElement('option');
     custom.value = '__custom__';
@@ -511,8 +644,9 @@ async function populateSchedProjects(currentWorkdir) {
     wrap.style.display = '';
     /* Select matching project or show custom */
     const input = document.getElementById('sched-workdir');
+    browserWrap.style.display = 'none';
     if (currentWorkdir) {
-      const match = Array.from(sel.options).find(o => o.value === currentWorkdir);
+      const match = Array.from(sel.options).find(o => o.value === currentWorkdir && o.value !== '__browse__' && o.value !== '__custom__');
       if (match) {
         sel.value = currentWorkdir;
         input.value = currentWorkdir;
@@ -593,7 +727,6 @@ function wizardNext() {
   if (wizardStep === 0) {
     const desc = document.getElementById('wiz-description').value.trim();
     if (!desc) return;
-    // Auto-generate name from description
     const nameInput = document.getElementById('wiz-name');
     if (!nameInput.value.trim()) {
       nameInput.value = desc.split(/\s+/).slice(0, 4).join('-').toLowerCase().replace(/[^a-z0-9-]/g, '');
@@ -612,12 +745,18 @@ function wizardBack() {
 function onWizProjectChange() {
   const sel = document.getElementById('wiz-project-select');
   const input = document.getElementById('wiz-workdir');
+  const browserWrap = document.getElementById('wiz-dir-browser-wrap');
   if (sel.value === '__custom__') {
-    input.style.display = '';
-    input.value = '';
-    input.focus();
+    input.style.display = 'none';
+    browserWrap.style.display = 'block';
+    browsers.wiz.selected = null;
+    const startPath = browsers.wiz.path || '/';
+    document.getElementById('wiz-dir-browser-input').value = startPath;
+    browseTo('wiz', startPath);
   } else if (sel.value) {
     input.style.display = 'none';
+    browserWrap.style.display = 'none';
+    closeBrowser('wiz');
     input.value = sel.value;
   }
 }
@@ -627,6 +766,7 @@ async function populateWizProjects() {
   try {
     const data = await api('GET', '/projects');
     const projects = data.projects || [];
+    browsers.wiz.path = data.default || '/';
     const sel = document.getElementById('wiz-project-select');
     sel.innerHTML = '';
     const defOpt = document.createElement('option');
@@ -663,6 +803,8 @@ async function wizardCreate() {
   let workdir = document.getElementById('wiz-workdir').value.trim();
   if (wizProjSel && wizProjSel.value && wizProjSel.value !== '__custom__') {
     workdir = wizProjSel.value;
+  } else if (wizProjSel && wizProjSel.value === '__custom__' && browsers.wiz.selected) {
+    workdir = browsers.wiz.selected;
   }
   const mode = document.getElementById('wiz-mode').value;
   let name = document.getElementById('wiz-name').value.trim();
@@ -683,7 +825,6 @@ async function wizardCreate() {
 
   const sessionName = result.name || name;
 
-  // Wait for session URL to appear
   let sessionUrl = null;
   for (let i = 0; i < 15; i++) {
     await new Promise(r => setTimeout(r, 2000));
@@ -698,7 +839,6 @@ async function wizardCreate() {
   btn.disabled = false;
   btn.innerHTML = '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg> Create with Claude';
 
-  // Show step 4 with session link
   const urlEl = document.getElementById('wiz-session-url');
   const linkEl = document.getElementById('wiz-open-link');
   if (sessionUrl) {
@@ -722,7 +862,6 @@ async function openEditSchedule(id) {
   document.getElementById('modal-title').textContent = 'Edit Schedule';
   document.getElementById('sched-name').value = s.name || '';
   document.getElementById('sched-cron').value = s.cron || '';
-  /* Try to match a preset */
   const presetSel = document.getElementById('sched-cron-preset');
   const presetMatch = Array.from(presetSel.options).find(o => o.value === s.cron);
   presetSel.value = presetMatch ? s.cron : '';
@@ -738,14 +877,18 @@ async function openEditSchedule(id) {
 function closeModal() {
   document.getElementById('schedule-modal').style.display = 'none';
   editingScheduleId = null;
+  closeBrowser('sched');
 }
 
 async function saveSchedule() {
-  /* Resolve workdir: from project select or manual input */
   const schedProjSel = document.getElementById('sched-project-select');
   let workdir = document.getElementById('sched-workdir').value.trim();
-  if (schedProjSel && schedProjSel.value && schedProjSel.value !== '__custom__') {
+  if (schedProjSel && schedProjSel.value && schedProjSel.value !== '__custom__' && schedProjSel.value !== '__browse__') {
     workdir = schedProjSel.value;
+  }
+  // If browse was used, take the selected path
+  if (schedProjSel && schedProjSel.value === '__browse__' && browsers.sched.selected) {
+    workdir = browsers.sched.selected;
   }
   const body = {
     name: document.getElementById('sched-name').value.trim(),
@@ -846,4 +989,6 @@ refresh();
 setInterval(refresh, 5000);
 fetch('/rc/version').then(r=>r.json()).then(d => {
   document.getElementById('version-label').textContent = 'v' + d.version;
+  const vt = document.getElementById('version-label-top');
+  if (vt) vt.textContent = 'v' + d.version;
 }).catch(()=>{});

@@ -1,5 +1,8 @@
 """Session management — tmux session lifecycle."""
 
+import datetime
+import glob
+import json
 import os
 import re
 import subprocess
@@ -79,17 +82,23 @@ def get_session_env(session_name, var_name):
 
 def get_url(session_name):
     """Extract the claude.ai URL from a tmux session's pane output."""
-    try:
-        r = subprocess.run(
-            ["tmux", "capture-pane", "-t", session_name, "-p", "-S", "-50", "-J"],
-            capture_output=True, text=True, timeout=5,
-        )
-        text = r.stdout.replace("\n", " ")
-        m = re.search(r'(https://claude\.ai/code/session_[^\s]+)', text)
-        if m:
-            return m.group(1)
-    except Exception:
-        pass
+    # First check stored env var (survives scrollback overflow after --resume)
+    stored = get_session_env(session_name, "RC_URL")
+    if stored and stored.startswith("https://claude.ai/code/session_"):
+        return stored
+    # Fall back to scanning pane output — check recent first, then deeper
+    for history_lines in ("-50", "-500"):
+        try:
+            r = subprocess.run(
+                ["tmux", "capture-pane", "-t", session_name, "-p", "-S", history_lines, "-J"],
+                capture_output=True, text=True, timeout=5,
+            )
+            text = r.stdout.replace("\n", " ")
+            m = re.search(r'(https://claude\.ai/code/session_[^\s]+)', text)
+            if m:
+                return m.group(1)
+        except Exception:
+            pass
     return None
 
 
@@ -220,11 +229,41 @@ def setup_session(session_name, display_name, mode):
             subprocess.run(["tmux", "send-keys", "-t", session_name, "Down"], capture_output=True)
             time.sleep(0.3)
             subprocess.run(["tmux", "send-keys", "-t", session_name, "Enter"], capture_output=True)
+            # Verify the dialog was dismissed; retry if still showing
+            for _retry in range(3):
+                time.sleep(1)
+                recheck = subprocess.run(
+                    ["tmux", "capture-pane", "-t", session_name, "-p"],
+                    capture_output=True, text=True, timeout=5,
+                ).stdout
+                if "Bypass Permissions mode" not in recheck or "Yes, I accept" not in recheck:
+                    break
+                print(f"  {session_name}: bypass prompt still showing, retrying...")
+                subprocess.run(["tmux", "send-keys", "-t", session_name, "Down"], capture_output=True)
+                time.sleep(0.3)
+                subprocess.run(["tmux", "send-keys", "-t", session_name, "Enter"], capture_output=True)
             continue
         # Accept trust folder prompt in all modes
         if not prompt_found and "trust" in text.lower() and "Yes, I trust" in text:
             print(f"  {session_name}: accepting trust prompt")
             subprocess.run(["tmux", "send-keys", "-t", session_name, "Enter"], capture_output=True)
+            continue
+        # Handle --resume session picker (must check BEFORE prompt detection,
+        # because the picker uses ❯ as a cursor which looks like the Claude prompt)
+        if "Resume Session" in text or ("Search" in text and "Ctrl+" in text):
+            resume_search = get_session_env(session_name, "RC_RESUME_SEARCH")
+            if resume_search:
+                # Only type if we haven't already (check if search box has our text)
+                if resume_search not in text:
+                    print(f"  {session_name}: resume picker detected, searching for '{resume_search}'")
+                    subprocess.run(["tmux", "send-keys", "-t", session_name, "-l", resume_search], capture_output=True)
+                    time.sleep(2)
+                else:
+                    print(f"  {session_name}: resume picker filtered, selecting session")
+            else:
+                print(f"  {session_name}: resume picker detected, selecting first session")
+            subprocess.run(["tmux", "send-keys", "-t", session_name, "Enter"], capture_output=True)
+            time.sleep(2)
             continue
         # Look for Claude's interactive prompt "❯ " (but not menu items like "❯ 1.")
         for line in text.split("\n"):
@@ -265,6 +304,11 @@ def setup_session(session_name, display_name, mode):
         url = get_url(session_name)
         if url:
             print(f"  {session_name}: got URL → {url}")
+            # Persist URL as tmux env var so it survives scrollback overflow
+            subprocess.run(
+                ["tmux", "set-environment", "-t", session_name, "RC_URL", url],
+                capture_output=True,
+            )
             time.sleep(1)
             subprocess.run(["tmux", "send-keys", "-t", session_name, "-l", f"/rename {display_name}"], capture_output=True)
             time.sleep(0.5)
@@ -287,3 +331,214 @@ def stop_session(name):
         if not session_exists(name):
             return
     subprocess.run(["tmux", "kill-session", "-t", name], capture_output=True)
+
+
+def restart_session(name, mode=None, workdir=None, model=None, sandbox=False,
+                    resume=True):
+    """Restart a dead or stale session. Kills the old tmux session and creates
+    a new one with the same parameters. If resume=True, passes --resume to
+    Claude so conversation context is preserved."""
+    from config import CLAUDE_BIN, RC_FLAGS, MODEL_MAP, SESSION_PREFIX, SHELL_BIN
+
+    # Read existing session env before killing
+    if mode is None:
+        mode = get_session_env(name, "RC_MODE") or "c"
+    if workdir is None:
+        workdir = get_session_env(name, "RC_WORKDIR") or "."
+
+    # Kill the old session
+    if session_exists(name):
+        subprocess.run(["tmux", "kill-session", "-t", name], capture_output=True)
+        # Brief wait for tmux cleanup
+        time.sleep(0.5)
+
+    session_dir = os.path.abspath(workdir)
+    claude_flags = RC_FLAGS.get(mode, RC_FLAGS["c"])
+    claude_args = claude_flags.split()
+
+    if resume:
+        claude_args.append("--resume")
+
+    model_flag = MODEL_MAP.get(model) if model else None
+    if model_flag:
+        claude_args.extend(["--model", model_flag])
+
+    env_flags = [
+        "-e", f"RC_MODE={mode}",
+        "-e", f"RC_WORKDIR={session_dir}",
+        "-e", "DISPLAY=:1",
+    ]
+    if sandbox or os.geteuid() == 0:
+        env_flags.extend(["-e", "IS_SANDBOX=1"])
+
+    claude_cmd = " ".join([f"CLAUDECODE= {CLAUDE_BIN}"] + claude_args)
+    wrapper = f'{claude_cmd} 2>&1 || {{ echo ""; sleep 30; }}'
+    cmd = [
+        "tmux", "new-session", "-d", "-s", name,
+        "-c", session_dir,
+        "-x", "200", "-y", "50",
+        *env_flags,
+        "bash", "-c", wrapper,
+    ]
+    print(f"  Restarting session: {name} (mode={mode}, resume={resume}, dir={session_dir})")
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        error = f"tmux failed: {result.stderr.strip()}"
+        print(f"  ERROR: {error}")
+        return False, error
+
+    display_name = name
+    threading.Thread(
+        target=setup_session, args=(name, display_name, mode), daemon=True
+    ).start()
+    return True, "Restarting"
+
+
+def _project_dir_to_path(dirname):
+    """Convert Claude's project dir name back to a filesystem path.
+    e.g. '-root--claude-rc-app' → '/root/.claude-rc/app'"""
+    # Claude encodes paths by replacing / with - and . with nothing (roughly)
+    # We'll try to resolve it, but it's a best-effort mapping.
+    return dirname.replace("-", "/").replace("//", "/-")
+
+
+def list_resumable_sessions():
+    """Scan Claude's session storage and return resumable sessions grouped by project."""
+    claude_projects = os.path.expanduser("~/.claude/projects")
+    if not os.path.isdir(claude_projects):
+        return []
+
+    projects = []
+    for proj_dir in sorted(glob.glob(os.path.join(claude_projects, "*")),
+                           key=os.path.getmtime, reverse=True):
+        if not os.path.isdir(proj_dir):
+            continue
+        proj_name = os.path.basename(proj_dir)
+
+        session_files = sorted(
+            glob.glob(os.path.join(proj_dir, "*.jsonl")),
+            key=os.path.getmtime, reverse=True,
+        )
+        if not session_files:
+            continue
+
+        sessions = []
+        for f in session_files:
+            size = os.path.getsize(f)
+            if size < 10:
+                continue  # Skip empty/trivial files
+            mtime = os.path.getmtime(f)
+            session_id = os.path.splitext(os.path.basename(f))[0]
+            name = None
+            branch = None
+            cwd = None
+
+            try:
+                with open(f) as fh:
+                    for line_num, line in enumerate(fh):
+                        if line_num > 20:
+                            break
+                        try:
+                            d = json.loads(line.strip())
+                            if d.get("type") == "custom-title" and d.get("customTitle"):
+                                name = d["customTitle"]
+                            if d.get("gitBranch") and not branch:
+                                branch = d["gitBranch"]
+                            if d.get("cwd") and not cwd:
+                                cwd = d["cwd"]
+                        except (json.JSONDecodeError, KeyError):
+                            continue
+            except OSError:
+                continue
+
+            # Skip tiny unnamed sessions (likely failed starts)
+            if not name and size < 1024:
+                continue
+            sessions.append({
+                "id": session_id,
+                "name": name,
+                "branch": branch or "HEAD",
+                "size": size,
+                "size_label": f"{size / 1024:.0f}KB" if size < 1048576 else f"{size / 1048576:.1f}MB",
+                "updated": datetime.datetime.fromtimestamp(mtime).isoformat(),
+                "cwd": cwd,
+            })
+
+        if sessions:
+            projects.append({
+                "project": proj_name,
+                "sessions": sessions,
+            })
+
+    return projects
+
+
+def resume_session(session_name, session_title, project_dir, mode="c"):
+    """Launch a new tmux session with claude --resume, select the target session
+    in the picker by searching for its title, and set up remote control."""
+    from config import CLAUDE_BIN, RC_FLAGS, MODEL_MAP, SESSION_PREFIX
+
+    if mode not in RC_FLAGS:
+        mode = "c"
+
+    # Build tmux session name from the session title
+    tmux_name = session_title or session_name[:8]
+    if not tmux_name.startswith(SESSION_PREFIX):
+        tmux_name = SESSION_PREFIX + tmux_name
+    tmux_name = re.sub(r'[^a-zA-Z0-9_-]', '', tmux_name)
+
+    if session_exists(tmux_name):
+        return True, "Already running", tmux_name
+
+    # Resolve working directory from project dir name
+    claude_projects = os.path.expanduser("~/.claude/projects")
+    proj_path = os.path.join(claude_projects, project_dir)
+    # Try to get cwd from the session file
+    session_file = os.path.join(proj_path, f"{session_name}.jsonl")
+    session_dir = None
+    if os.path.isfile(session_file):
+        try:
+            with open(session_file) as fh:
+                for line in fh:
+                    d = json.loads(line.strip())
+                    if d.get("cwd"):
+                        session_dir = d["cwd"]
+                        break
+        except Exception:
+            pass
+    if not session_dir or not os.path.isdir(session_dir):
+        session_dir = os.path.expanduser("~")
+
+    claude_flags = RC_FLAGS[mode]
+    # Pass session UUID directly to --resume to skip the picker
+    claude_args = claude_flags.split() + ["--resume", session_name]
+
+    env_flags = [
+        "-e", f"RC_MODE={mode}",
+        "-e", f"RC_WORKDIR={session_dir}",
+        "-e", "DISPLAY=:1",
+    ]
+    if os.geteuid() == 0:
+        env_flags.extend(["-e", "IS_SANDBOX=1"])
+
+    claude_cmd = " ".join([f"CLAUDECODE= {CLAUDE_BIN}"] + claude_args)
+    wrapper = f'{claude_cmd} 2>&1 || {{ echo ""; sleep 30; }}'
+    cmd = [
+        "tmux", "new-session", "-d", "-s", tmux_name,
+        "-c", session_dir,
+        "-x", "200", "-y", "50",
+        *env_flags,
+        "bash", "-c", wrapper,
+    ]
+
+    print(f"  Resume: starting session {tmux_name} (resume={session_name[:8]}, dir={session_dir})")
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        error = f"tmux failed: {result.stderr.strip()}"
+        print(f"  ERROR: {error}")
+        return False, error, tmux_name
+
+    threading.Thread(
+        target=setup_session, args=(tmux_name, tmux_name, mode), daemon=True
+    ).start()
+    return True, "Resuming", tmux_name

@@ -16,6 +16,7 @@ from config import (
 )
 from sessions import (
     list_rc_sessions, session_exists, setup_session, stop_session,
+    restart_session, list_resumable_sessions, resume_session,
     get_all_session_errors,
 )
 from tunnel import (
@@ -107,6 +108,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-cache, must-revalidate")
         self.end_headers()
         self.wfile.write(data)
 
@@ -119,6 +121,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def _html(self, content):
         self.send_response(200)
         self.send_header("Content-Type", "text/html")
+        self.send_header("Cache-Control", "no-cache, must-revalidate")
         self.end_headers()
         self.wfile.write(content.encode())
 
@@ -200,6 +203,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     s["next_run"] = None
             self._json({"schedules": schedules})
 
+        elif path == "/resume/sessions":
+            projects = list_resumable_sessions()
+            self._json({"projects": projects})
+
         elif path == "/status":
             # Backwards compat
             sessions = list_rc_sessions()
@@ -258,7 +265,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "-e", f"RC_WORKDIR={session_dir}",
                 "-e", "DISPLAY=:1",
             ]
-            if sandbox:
+            if sandbox or os.geteuid() == 0:
                 env_flags.extend(["-e", "IS_SANDBOX=1"])
             # Wrap command in shell: run claude, and if it exits non-zero,
             # print stderr and sleep so setup_session can read the error
@@ -299,6 +306,28 @@ class Handler(http.server.BaseHTTPRequestHandler):
             for s in list_rc_sessions():
                 stop_session(s["name"])
             self._json({"ok": True, "message": "All stopped"})
+
+        elif path == "/restart":
+            body = self._read_body()
+            name = body.get("name", "").strip()
+            if not name:
+                self._json({"ok": False, "message": "Missing session name"}, 400)
+                return
+            resume = body.get("resume", True)
+            ok, msg = restart_session(name, resume=resume)
+            self._json({"ok": ok, "message": msg, "name": name})
+
+        elif path == "/resume/start":
+            body = self._read_body()
+            session_id = body.get("session_id", "").strip()
+            session_title = body.get("title", "").strip()
+            project = body.get("project", "").strip()
+            mode = body.get("mode", "c")
+            if not session_id or not project:
+                self._json({"ok": False, "message": "Missing session_id or project"}, 400)
+                return
+            ok, msg, name = resume_session(session_id, session_title, project, mode)
+            self._json({"ok": ok, "message": msg, "name": name})
 
         elif path == "/tunnel/start":
             if not cloudflared_available():
@@ -422,6 +451,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "-e", f"RC_WORKDIR={session_dir}",
                 "-e", "RC_WIZARD=1",
                 "-e", "DISPLAY=:1",
+                "-e", "IS_SANDBOX=1",
             ]
             wiz_claude_cmd = " ".join(
                 [f"CLAUDECODE= {CLAUDE_BIN}"] + claude_flags.split()
@@ -459,7 +489,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         path = self.path.split("?")[0]
         if path in ("/rc/sessions", "/rc/tunnel/status", "/rc/projects",
-                     "/rc/browse", "/rc/schedules", "/rc/version") or \
+                     "/rc/browse", "/rc/schedules", "/rc/version",
+                     "/rc/resume/sessions") or \
                 path.startswith("/rc/static/") or path.startswith("/static/"):
             return
         print(f"  {self.command} {self.path} → {args[1] if len(args) > 1 else ''}")

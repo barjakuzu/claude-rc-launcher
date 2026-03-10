@@ -182,19 +182,25 @@ def _fire_schedule(schedule):
         add_history_entry(schedule["id"], "error", "No prompt or instructions file")
         return
 
-    # Create tmux session
+    # Create tmux session (use sandbox workaround for root, same as server.py)
     claude_flags = RC_FLAGS[mode]
     model_flag = MODEL_MAP.get(model) if model else None
     claude_args = claude_flags.split()
     if model_flag:
         claude_args.extend(["--model", model_flag])
+    claude_cmd = " ".join(
+        [f"CLAUDECODE= {CLAUDE_BIN}"] + claude_args
+    )
+    wrapper = f'{claude_cmd} 2>&1 || {{ echo ""; sleep 30; }}'
     cmd = [
         "tmux", "new-session", "-d", "-s", session_name,
         "-c", workdir,
+        "-x", "200", "-y", "50",
         "-e", f"RC_MODE={mode}",
         "-e", f"RC_WORKDIR={workdir}",
         "-e", "DISPLAY=:1",
-        CLAUDE_BIN, *claude_args,
+        "-e", "IS_SANDBOX=1",
+        "bash", "-c", wrapper,
     ]
     print(f"  Scheduler: firing '{name}' → session {session_name}")
     result = subprocess.run(cmd, capture_output=True, text=True)
