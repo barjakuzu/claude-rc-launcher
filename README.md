@@ -3,7 +3,7 @@
 Launch and manage [Claude Code](https://docs.anthropic.com/en/docs/claude-code) remote-control sessions from anywhere — your phone, another laptop, wherever you are.
 
 <p align="center">
-  <img src="screenshot.png" alt="Claude RC Launcher" width="400">
+  <img src="launcher.gif" alt="Claude RC Launcher" width="700">
 </p>
 
 ## Install
