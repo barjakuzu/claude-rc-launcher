@@ -180,6 +180,8 @@ mkdir -p "$LOG_DIR"
 SETUP_AUTH=false
 if [ ! -f "$CONFIG_FILE" ]; then
     # Write default env config from embedded template
+    touch "$CONFIG_FILE"
+    chmod 600 "$CONFIG_FILE"
     cat > "$CONFIG_FILE" <<'ENVTPL'
 # Claude RC Launcher — Environment Variables
 
@@ -225,16 +227,12 @@ if [ "$SETUP_AUTH" = true ]; then
         [ -z "$AUTH_PASS" ] && warn "Password cannot be empty"
     done
 
-    # Write credentials to config
-    if grep -q '^# RC_AUTH_USER' "$CONFIG_FILE" 2>/dev/null; then
-        sed -i.bak "s/^# RC_AUTH_USER=.*/RC_AUTH_USER=${AUTH_USER}/" "$CONFIG_FILE"
-        sed -i.bak "s/^# RC_AUTH_PASS=.*/RC_AUTH_PASS=${AUTH_PASS}/" "$CONFIG_FILE"
-        rm -f "${CONFIG_FILE}.bak"
-    elif ! grep -q '^RC_AUTH_USER=' "$CONFIG_FILE" 2>/dev/null; then
-        echo "" >> "$CONFIG_FILE"
-        echo "RC_AUTH_USER=${AUTH_USER}" >> "$CONFIG_FILE"
-        echo "RC_AUTH_PASS=${AUTH_PASS}" >> "$CONFIG_FILE"
-    fi
+    # Write credentials to config (use grep+rewrite to avoid sed injection)
+    # Remove any existing auth lines and append fresh ones
+    grep -v '^#\? *RC_AUTH_USER=' "$CONFIG_FILE" | grep -v '^#\? *RC_AUTH_PASS=' > "${CONFIG_FILE}.tmp" || true
+    printf '\nRC_AUTH_USER=%s\nRC_AUTH_PASS=%s\n' "$AUTH_USER" "$AUTH_PASS" >> "${CONFIG_FILE}.tmp"
+    mv "${CONFIG_FILE}.tmp" "$CONFIG_FILE"
+    chmod 600 "$CONFIG_FILE"
     ok "Auth configured: $AUTH_USER / ****"
 else
     info "Config already exists at $CONFIG_FILE (not overwritten)"

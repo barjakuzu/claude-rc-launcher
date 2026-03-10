@@ -1,6 +1,7 @@
 """HTTP handler and routing."""
 
 import base64
+import hmac
 import http.server
 import json
 import os
@@ -56,7 +57,7 @@ def _check_auth(handler):
     try:
         decoded = base64.b64decode(auth_header[6:]).decode("utf-8")
         user, password = decoded.split(":", 1)
-        return user == AUTH_USER and password == AUTH_PASS
+        return hmac.compare_digest(user, AUTH_USER) and hmac.compare_digest(password, AUTH_PASS)
     except Exception:
         return False
 
@@ -94,10 +95,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
         """Serve a file from the static/ directory."""
         # Strip leading /static/
         rel = path[len("/static/"):]
-        if ".." in rel or not rel:
+        if not rel:
             self.send_error(403)
             return
-        filepath = os.path.join(os.path.dirname(__file__), "static", rel)
+        static_dir = os.path.realpath(os.path.join(os.path.dirname(__file__), "static"))
+        filepath = os.path.realpath(os.path.join(static_dir, rel))
+        if not filepath.startswith(static_dir + os.sep):
+            self.send_error(403)
+            return
         if not os.path.isfile(filepath):
             self.send_error(404)
             return
@@ -125,9 +130,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(content.encode())
 
-    def _read_body(self):
+    def _read_body(self, max_size=1_000_000):
         length = int(self.headers.get("Content-Length", 0))
         if length == 0:
+            return {}
+        if length > max_size:
             return {}
         try:
             return json.loads(self.rfile.read(length))
@@ -171,7 +178,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif path.startswith("/browse"):
             qs = parse_qs(urlparse(self.path).query)
             browse_path = qs.get("path", [WORKING_DIR])[0]
-            browse_path = os.path.abspath(browse_path)
+            browse_path = os.path.realpath(browse_path)
+            # Restrict browsing to home directory and /tmp
+            allowed_roots = [os.path.expanduser("~"), "/tmp"]
+            if not any(browse_path == root or browse_path.startswith(root + os.sep) for root in allowed_roots):
+                self._json({"error": "Access denied"}, 403)
+                return
             if not os.path.isdir(browse_path):
                 self._json({"error": "Not a directory"}, 400)
                 return
@@ -298,6 +310,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not name:
                 self._json({"ok": False, "message": "Missing session name"}, 400)
                 return
+            if not name.startswith(SESSION_PREFIX):
+                self._json({"ok": False, "message": "Invalid session name"}, 400)
+                return
             if session_exists(name):
                 stop_session(name)
             self._json({"ok": True, "message": "Stopped"})
@@ -312,6 +327,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             name = body.get("name", "").strip()
             if not name:
                 self._json({"ok": False, "message": "Missing session name"}, 400)
+                return
+            if not name.startswith(SESSION_PREFIX):
+                self._json({"ok": False, "message": "Invalid session name"}, 400)
                 return
             resume = body.get("resume", True)
             ok, msg = restart_session(name, resume=resume)
@@ -427,9 +445,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
             mode_labels = {"c": "Standard RC", "ci": "Teammate", "safe": "Safe mode"}
             api_url = f"http://localhost:{PORT}/rc"
-            if AUTH_USER and AUTH_PASS:
-                auth_header = f"-u '{AUTH_USER}:{AUTH_PASS}'"
-            else:
+            # Use a one-time token file for wizard auth instead of embedding credentials
+            wizard_token = os.urandom(16).hex()
+            token_file = os.path.join(os.path.expanduser("~/.claude-rc"), f".wizard-token-{wizard_token}")
+            try:
+                with open(token_file, "w") as tf:
+                    if AUTH_USER and AUTH_PASS:
+                        tf.write(f"{AUTH_USER}:{AUTH_PASS}")
+                os.chmod(token_file, 0o600)
+                auth_header = f"-u \"$(cat {token_file})\""
+            except Exception:
                 auth_header = ""
             prompt = WIZARD_PROMPT.format(
                 description=description,

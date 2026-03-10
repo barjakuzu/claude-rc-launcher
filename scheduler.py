@@ -172,11 +172,19 @@ def _fire_schedule(schedule):
     prompt = schedule.get("prompt", "")
     instructions_file = schedule.get("instructions_file")
     if instructions_file and os.path.isfile(instructions_file):
-        try:
-            with open(instructions_file, "r") as f:
-                prompt = f.read()
-        except Exception as e:
-            print(f"  Scheduler: failed to read instructions file: {e}")
+        # Restrict to files under home directory or workdir
+        real_path = os.path.realpath(instructions_file)
+        allowed_roots = [os.path.expanduser("~")]
+        if workdir:
+            allowed_roots.append(os.path.realpath(workdir))
+        if any(real_path.startswith(root + os.sep) or real_path == root for root in allowed_roots):
+            try:
+                with open(instructions_file, "r") as f:
+                    prompt = f.read()
+            except Exception as e:
+                print(f"  Scheduler: failed to read instructions file: {e}")
+        else:
+            print(f"  Scheduler: instructions_file outside allowed directories: {instructions_file}")
 
     if not prompt:
         add_history_entry(schedule["id"], "error", "No prompt or instructions file")

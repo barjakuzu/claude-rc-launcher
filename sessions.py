@@ -481,6 +481,14 @@ def resume_session(session_name, session_title, project_dir, mode="c"):
     if mode not in RC_FLAGS:
         mode = "c"
 
+    # Sanitize session_name: must be a valid UUID-like string (alphanumeric + hyphens)
+    session_name = re.sub(r'[^a-zA-Z0-9_-]', '', session_name)
+    if not session_name:
+        return False, "Invalid session ID", ""
+
+    # Sanitize project_dir: strip path separators to prevent traversal
+    project_dir = re.sub(r'[/\\]', '', project_dir)
+
     # Build tmux session name from the session title
     tmux_name = session_title or session_name[:8]
     if not tmux_name.startswith(SESSION_PREFIX):
@@ -493,6 +501,10 @@ def resume_session(session_name, session_title, project_dir, mode="c"):
     # Resolve working directory from project dir name
     claude_projects = os.path.expanduser("~/.claude/projects")
     proj_path = os.path.join(claude_projects, project_dir)
+    # Verify resolved path is under claude projects dir
+    proj_path = os.path.realpath(proj_path)
+    if not proj_path.startswith(os.path.realpath(claude_projects) + os.sep):
+        return False, "Invalid project", tmux_name
     # Try to get cwd from the session file
     session_file = os.path.join(proj_path, f"{session_name}.jsonl")
     session_dir = None
