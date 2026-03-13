@@ -34,5 +34,15 @@ MODEL_MAP = {
 SCHEDULES_FILE = os.path.join(RC_HOME, "schedules.json")
 LOG_FILE = os.path.join(RC_HOME, "logs", "claude-rc.log")
 
+# Directories the browser can navigate into. Comma-separated absolute paths.
+# Supports ~ for home directory. Paths that don't exist are silently ignored.
+# Default: home dir, /tmp, /var/www, and the RC installation folder.
+_default_roots = f"~,/tmp,/var/www,{RC_HOME}"
+BROWSE_ROOTS = [
+    os.path.realpath(os.path.expanduser(p.strip()))
+    for p in os.environ.get("RC_BROWSE_ROOTS", _default_roots).split(",")
+    if p.strip()
+]
+
 # Ensure directories exist
 os.makedirs(os.path.join(RC_HOME, "logs"), exist_ok=True)

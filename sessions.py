@@ -80,13 +80,49 @@ def get_session_env(session_name, var_name):
     return None
 
 
+def _is_rc_active(session_name):
+    """Check if the status bar shows 'Remote Control active' (not connecting/failed/reconnecting)."""
+    try:
+        r = subprocess.run(
+            ["tmux", "capture-pane", "-t", session_name, "-e", "-p",
+             "-S", "-200", "-E", "200"],
+            capture_output=True, text=True, timeout=5,
+        )
+        clean = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', r.stdout)
+        return "Remote Control active" in clean
+    except Exception:
+        return False
+
+
+def get_active_rc_session():
+    """Return the name of the session that currently has remote-control active, or None.
+    Only one remote-control session can be active at a time per account."""
+    r = subprocess.run(
+        ["tmux", "list-sessions", "-F", "#{session_name}"],
+        capture_output=True, text=True,
+    )
+    if r.returncode != 0:
+        return None
+    for line in r.stdout.strip().splitlines():
+        name = line.strip()
+        if not name.startswith(SESSION_PREFIX):
+            continue
+        if _is_rc_active(name):
+            return name
+    return None
+
+
 def get_url(session_name):
-    """Extract the claude.ai URL from a tmux session's pane output."""
-    # First check stored env var (survives scrollback overflow after --resume)
-    stored = get_session_env(session_name, "RC_URL")
-    if stored and stored.startswith("https://claude.ai/code/session_"):
-        return stored
-    # Fall back to scanning pane output — check recent first, then deeper
+    """Extract the claude.ai URL from a tmux session's pane output.
+    Only returns a URL if remote-control is actually active (not connecting/failed)."""
+    # First check if remote-control is in a healthy state
+    # If it's "connecting", "reconnecting", or "failed", URL is not usable
+    if not _is_rc_active(session_name):
+        # Still store/return URL for internal use (setup_session needs it)
+        # but mark it via env var so callers know it's not confirmed
+        return None
+
+    # Scan pane output for the most recent URL (check recent first, then deeper)
     for history_lines in ("-50", "-500"):
         try:
             r = subprocess.run(
@@ -94,11 +130,44 @@ def get_url(session_name):
                 capture_output=True, text=True, timeout=5,
             )
             text = r.stdout.replace("\n", " ")
-            m = re.search(r'(https://claude\.ai/code/session_[^\s]+)', text)
-            if m:
-                return m.group(1)
+            # Find ALL URLs and return the last (most recent) one
+            matches = re.findall(r'(https://claude\.ai/code/session_[^\s]+)', text)
+            if matches:
+                url = matches[-1]
+                # Update stored env var if it changed
+                stored = get_session_env(session_name, "RC_URL")
+                if stored != url:
+                    subprocess.run(
+                        ["tmux", "set-environment", "-t", session_name, "RC_URL", url],
+                        capture_output=True,
+                    )
+                return url
         except Exception:
             pass
+    # Fall back to stored env var (survives scrollback overflow)
+    stored = get_session_env(session_name, "RC_URL")
+    if stored and stored.startswith("https://claude.ai/code/session_"):
+        return stored
+    return None
+
+
+def _get_url_internal(session_name):
+    """Like get_url but skips the active check — for internal setup_session use."""
+    for history_lines in ("-50", "-500"):
+        try:
+            r = subprocess.run(
+                ["tmux", "capture-pane", "-t", session_name, "-p", "-S", history_lines, "-J"],
+                capture_output=True, text=True, timeout=5,
+            )
+            text = r.stdout.replace("\n", " ")
+            matches = re.findall(r'(https://claude\.ai/code/session_[^\s]+)', text)
+            if matches:
+                return matches[-1]
+        except Exception:
+            pass
+    stored = get_session_env(session_name, "RC_URL")
+    if stored and stored.startswith("https://claude.ai/code/session_"):
+        return stored
     return None
 
 
@@ -172,6 +241,13 @@ def _kill_dead_session(session_name):
 
 def setup_session(session_name, display_name, mode):
     """Handle trust prompt, send /remote-control, wait for URL, then /rename."""
+    # Keep the tmux PTY output flowing by piping to /dev/null.
+    # This prevents output buffering issues in detached sessions that can
+    # cause Claude's WebSocket (remote-control) to stall or disconnect.
+    subprocess.run(
+        ["tmux", "pipe-pane", "-t", session_name, "cat > /dev/null"],
+        capture_output=True,
+    )
     last_output = ""
     for check in range(10):
         time.sleep(0.3)
@@ -283,28 +359,110 @@ def setup_session(session_name, display_name, mode):
         print(f"  {session_name}: timed out waiting for Claude prompt")
         return
 
-    print(f"  {session_name}: sending /remote-control")
-    subprocess.run(["tmux", "send-keys", "-t", session_name, "-l", "/remote-control"], capture_output=True)
-    time.sleep(0.5)
-    subprocess.run(["tmux", "send-keys", "-t", session_name, "Enter"], capture_output=True)
-    rc_menu_accepted = False
-    for i in range(30):
-        time.sleep(2)
-        if not session_exists(session_name):
-            print(f"  {session_name}: session died while waiting for URL")
-            return
-        # Handle remote-control menu prompt (select "Enable Remote Control")
-        if not rc_menu_accepted:
-            pane = _capture_pane_text(session_name)
-            if "Enable Remote Control" in pane:
-                print(f"  {session_name}: accepting remote-control menu")
+    # Check if another session already has remote-control active
+    # (only one RC session allowed per account — a second one destabilizes both)
+    existing_rc = get_active_rc_session()
+    if existing_rc and existing_rc != session_name:
+        print(f"  {session_name}: skipping /remote-control — {existing_rc} already has it active")
+        _store_session_error(session_name,
+            f"Remote control not started: {existing_rc} already has an active connection. "
+            "Only one remote-control session is allowed at a time. "
+            "Stop that session first, or use it instead.")
+        # Still rename the session
+        time.sleep(1)
+        subprocess.run(["tmux", "send-keys", "-t", session_name, "-l", f"/rename {display_name}"], capture_output=True)
+        time.sleep(0.5)
+        subprocess.run(["tmux", "send-keys", "-t", session_name, "Enter"], capture_output=True)
+        return
+
+    # Wait for CLI to fully initialize after showing prompt
+    # (prompt appears before internal WebSocket/API connections are ready)
+    print(f"  {session_name}: prompt found, waiting for CLI to fully initialize...")
+    time.sleep(10)
+
+    # Check if remote-control is already active (status bar shows "Remote Control active")
+    try:
+        r = subprocess.run(
+            ["tmux", "capture-pane", "-t", session_name, "-e", "-p", "-S", "-200", "-E", "200"],
+            capture_output=True, text=True, timeout=5,
+        )
+        clean = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', r.stdout)
+        if "Remote Control active" in clean:
+            url = _get_url_internal(session_name)
+            if url:
+                print(f"  {session_name}: remote-control already active → {url}")
+                subprocess.run(
+                    ["tmux", "set-environment", "-t", session_name, "RC_URL", url],
+                    capture_output=True,
+                )
+                time.sleep(1)
+                subprocess.run(["tmux", "send-keys", "-t", session_name, "-l", f"/rename {display_name}"], capture_output=True)
+                time.sleep(0.5)
                 subprocess.run(["tmux", "send-keys", "-t", session_name, "Enter"], capture_output=True)
-                rc_menu_accepted = True
+                return
+    except Exception:
+        pass
+
+    def _send_rc(sname):
+        """Send /remote-control and press Enter."""
+        subprocess.run(["tmux", "send-keys", "-t", sname, "-l", "/remote-control"], capture_output=True)
+        time.sleep(1)
+        subprocess.run(["tmux", "send-keys", "-t", sname, "Enter"], capture_output=True)
+
+    def _wait_for_rc_active(sname, timeout=60):
+        """Poll until 'Remote Control active' appears in status bar.
+        Returns the URL if successful, None if timed out/failed.
+        Handles menus and failures along the way."""
+        rc_menu_handled = False
+        for _ in range(timeout // 2):
+            time.sleep(2)
+            if not session_exists(sname):
+                print(f"  {sname}: session died while waiting for URL")
+                return None
+            pane = _capture_pane_text(sname)
+            # Handle "Enable Remote Control" menu (first-time setup)
+            if not rc_menu_handled and "Enable Remote Control" in pane:
+                print(f"  {sname}: accepting enable remote-control menu")
+                subprocess.run(["tmux", "send-keys", "-t", sname, "Enter"], capture_output=True)
+                rc_menu_handled = True
                 continue
-        url = get_url(session_name)
+            # Handle the "already active" menu — just press Escape to dismiss
+            if "Disconnect this session" in pane:
+                print(f"  {sname}: RC menu appeared, dismissing (already connected)")
+                subprocess.run(["tmux", "send-keys", "-t", sname, "Escape"], capture_output=True)
+                time.sleep(1)
+                # Check if it's already active
+                if _is_rc_active(sname):
+                    url = _get_url_internal(sname)
+                    if url:
+                        return url
+                continue
+            # Check status bar for definitive state
+            if _is_rc_active(sname):
+                url = _get_url_internal(sname)
+                if url:
+                    return url
+            # Check for failure — return None to trigger retry
+            try:
+                sr = subprocess.run(
+                    ["tmux", "capture-pane", "-t", sname, "-e", "-p", "-S", "-200", "-E", "200"],
+                    capture_output=True, text=True, timeout=5,
+                )
+                clean = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', sr.stdout)
+                if "Remote Control failed" in clean:
+                    print(f"  {sname}: remote-control failed")
+                    return None
+            except Exception:
+                pass
+        return None
+
+    # Try /remote-control up to 3 times
+    for attempt in range(3):
+        print(f"  {session_name}: sending /remote-control (attempt {attempt + 1}/3)")
+        _send_rc(session_name)
+        url = _wait_for_rc_active(session_name, timeout=30)
         if url:
-            print(f"  {session_name}: got URL → {url}")
-            # Persist URL as tmux env var so it survives scrollback overflow
+            print(f"  {session_name}: remote-control active → {url}")
             subprocess.run(
                 ["tmux", "set-environment", "-t", session_name, "RC_URL", url],
                 capture_output=True,
@@ -314,7 +472,10 @@ def setup_session(session_name, display_name, mode):
             time.sleep(0.5)
             subprocess.run(["tmux", "send-keys", "-t", session_name, "Enter"], capture_output=True)
             return
-    print(f"  {session_name}: timed out waiting for URL")
+        # Wait before retry
+        print(f"  {session_name}: attempt {attempt + 1} failed, waiting before retry...")
+        time.sleep(5)
+    print(f"  {session_name}: timed out after 3 attempts")
 
 
 def stop_session(name):
@@ -333,6 +494,65 @@ def stop_session(name):
     subprocess.run(["tmux", "kill-session", "-t", name], capture_output=True)
 
 
+def _find_session_uuid(tmux_name, workdir):
+    """Find the Claude session UUID for a tmux session by matching the
+    session title (set via /rename) in the project's JSONL files."""
+    claude_projects = os.path.expanduser("~/.claude/projects")
+    if not os.path.isdir(claude_projects):
+        return None
+
+    # Build ordered list of project dirs — prefer ones matching the workdir
+    all_proj_dirs = sorted(glob.glob(os.path.join(claude_projects, "*")),
+                           key=os.path.getmtime, reverse=True)
+    # Claude encodes workdir as project dir name (e.g. /root → -root)
+    workdir_encoded = workdir.replace("/", "-") if workdir else ""
+    matching = [d for d in all_proj_dirs if os.path.basename(d) == workdir_encoded]
+    other = [d for d in all_proj_dirs if os.path.basename(d) != workdir_encoded]
+    proj_dirs = matching + other
+
+    for proj_dir in proj_dirs:
+        if not os.path.isdir(proj_dir):
+            continue
+        for f in sorted(glob.glob(os.path.join(proj_dir, "*.jsonl")),
+                        key=os.path.getmtime, reverse=True)[:10]:
+            try:
+                # Check head (first 20 lines) — covers resumed sessions
+                # and tail (last 50 lines) — covers /rename written mid-session
+                with open(f) as fh:
+                    head_lines = []
+                    for i, line in enumerate(fh):
+                        if i >= 20:
+                            break
+                        head_lines.append(line)
+                # Check head
+                for line in head_lines:
+                    try:
+                        d = json.loads(line.strip())
+                        if d.get("customTitle") == tmux_name:
+                            return os.path.splitext(os.path.basename(f))[0]
+                    except (json.JSONDecodeError, KeyError):
+                        continue
+                # Check tail — read last 50 lines for /rename written later
+                with open(f, "rb") as fh:
+                    fh.seek(0, 2)
+                    fsize = fh.tell()
+                    # Read last ~64KB to get tail lines
+                    chunk_size = min(fsize, 65536)
+                    fh.seek(fsize - chunk_size)
+                    tail_text = fh.read().decode("utf-8", errors="ignore")
+                    tail_lines = tail_text.splitlines()[-50:]
+                for line in tail_lines:
+                    try:
+                        d = json.loads(line.strip())
+                        if d.get("customTitle") == tmux_name:
+                            return os.path.splitext(os.path.basename(f))[0]
+                    except (json.JSONDecodeError, KeyError):
+                        continue
+            except Exception:
+                continue
+    return None
+
+
 def restart_session(name, mode=None, workdir=None, model=None, sandbox=False,
                     resume=True):
     """Restart a dead or stale session. Kills the old tmux session and creates
@@ -346,27 +566,41 @@ def restart_session(name, mode=None, workdir=None, model=None, sandbox=False,
     if workdir is None:
         workdir = get_session_env(name, "RC_WORKDIR") or "."
 
+    session_dir = os.path.abspath(workdir)
+
+    # Find the Claude session UUID BEFORE killing (so JSONL is still fresh)
+    resume_id = None
+    if resume:
+        resume_id = _find_session_uuid(name, session_dir)
+        print(f"  {name}: UUID lookup → {resume_id[:8] if resume_id else 'not found'}")
+
     # Kill the old session
     if session_exists(name):
         subprocess.run(["tmux", "kill-session", "-t", name], capture_output=True)
         # Brief wait for tmux cleanup
         time.sleep(0.5)
 
-    session_dir = os.path.abspath(workdir)
     claude_flags = RC_FLAGS.get(mode, RC_FLAGS["c"])
     claude_args = claude_flags.split()
 
     if resume:
-        claude_args.append("--resume")
+        if resume_id:
+            claude_args.extend(["--resume", resume_id])
+        else:
+            claude_args.append("--resume")
 
     model_flag = MODEL_MAP.get(model) if model else None
     if model_flag:
         claude_args.extend(["--model", model_flag])
 
+    # Use the display name to search in the picker if no exact UUID found
+    display_name = name.replace(SESSION_PREFIX, "")
     env_flags = [
         "-e", f"RC_MODE={mode}",
         "-e", f"RC_WORKDIR={session_dir}",
+        "-e", f"RC_RESUME_SEARCH={display_name}",
         "-e", "DISPLAY=:1",
+        "-e", "TERM=xterm-256color",
     ]
     if sandbox or os.geteuid() == 0:
         env_flags.extend(["-e", "IS_SANDBOX=1"])
@@ -448,6 +682,21 @@ def list_resumable_sessions():
                                 cwd = d["cwd"]
                         except (json.JSONDecodeError, KeyError):
                             continue
+                # Also check tail for /rename written mid-session (latest title wins)
+                with open(f, "rb") as fh:
+                        fh.seek(0, 2)
+                        fsize = fh.tell()
+                        chunk_size = min(fsize, 65536)
+                        fh.seek(fsize - chunk_size)
+                        tail_text = fh.read().decode("utf-8", errors="ignore")
+                        for tline in reversed(tail_text.splitlines()):
+                            try:
+                                d = json.loads(tline.strip())
+                                if d.get("type") == "custom-title" and d.get("customTitle"):
+                                    name = d["customTitle"]
+                                    break
+                            except (json.JSONDecodeError, KeyError):
+                                continue
             except OSError:
                 continue
 
@@ -529,6 +778,7 @@ def resume_session(session_name, session_title, project_dir, mode="c"):
         "-e", f"RC_MODE={mode}",
         "-e", f"RC_WORKDIR={session_dir}",
         "-e", "DISPLAY=:1",
+        "-e", "TERM=xterm-256color",
     ]
     if os.geteuid() == 0:
         env_flags.extend(["-e", "IS_SANDBOX=1"])

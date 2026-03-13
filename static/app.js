@@ -64,10 +64,19 @@ function defaultName() {
 document.getElementById('session-name').placeholder = defaultName();
 
 const _apiBase = window.location.origin + '/rc';
+// Auth token injected by the server into the page. Mobile Safari doesn't
+// forward Basic Auth credentials on fetch/XHR, so we attach it explicitly.
+const _authToken = window.__RC_AUTH || '';
 async function api(method, path, body) {
-  const opts = { method, headers: {'Content-Type': 'application/json'} };
+  const headers = {'Content-Type': 'application/json'};
+  if (_authToken) headers['Authorization'] = _authToken;
+  const opts = { method, headers };
   if (body) opts.body = JSON.stringify(body);
   const r = await fetch(_apiBase + path, opts);
+  if (r.status === 401) {
+    window.location.reload();
+    throw new Error('Authentication required');
+  }
   return r.json();
 }
 
@@ -161,6 +170,10 @@ async function browseTo(ctx, path) {
   listEl.innerHTML = '<div class="dir-empty">Loading\u2026</div>';
   try {
     const data = await api('GET', '/browse?path=' + encodeURIComponent(path));
+    if (data.error) {
+      listEl.innerHTML = '<div class="dir-empty">' + escHtml(data.error) + '</div>';
+      return;
+    }
     browsers[ctx].path = data.path;
     const parts = data.path.split('/').filter(Boolean);
     let crumbHtml = '<span class="dir-breadcrumb-seg" onclick="browseTo(\'' + ctx + '\',\'/\')">/</span>';

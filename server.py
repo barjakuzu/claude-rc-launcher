@@ -13,7 +13,7 @@ from urllib.parse import urlparse, parse_qs
 
 from config import (
     VERSION, HOST, PORT, SESSION_PREFIX, WORKING_DIR, CLAUDE_BIN,
-    AUTH_USER, AUTH_PASS, RC_FLAGS, MODEL_MAP, SHELL_BIN,
+    AUTH_USER, AUTH_PASS, RC_FLAGS, MODEL_MAP, SHELL_BIN, BROWSE_ROOTS,
 )
 from sessions import (
     list_rc_sessions, session_exists, setup_session, stop_session,
@@ -71,11 +71,17 @@ def _send_auth_required(handler):
     handler.wfile.write(b"Authentication required")
 
 
-def _load_html():
-    """Load the frontend HTML from static/index.html."""
+def _load_html(auth_header=""):
+    """Load the frontend HTML from static/index.html, injecting auth token."""
     html_path = os.path.join(os.path.dirname(__file__), "static", "index.html")
     with open(html_path, "r") as f:
-        return f.read()
+        html = f.read()
+    # Inject the auth token so JS can attach it to API calls.
+    # Mobile Safari doesn't forward Basic Auth on XHR/fetch.
+    if auth_header:
+        token_script = f'<script>window.__RC_AUTH="{auth_header}";</script>'
+        html = html.replace("</head>", token_script + "</head>", 1)
+    return html
 
 
 _CONTENT_TYPES = {
@@ -157,7 +163,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             path = path[3:] or "/"
 
         if path == "/":
-            self._html(_load_html())
+            auth_hdr = self.headers.get("Authorization", "")
+            self._html(_load_html(auth_hdr))
 
         elif path == "/sessions":
             sessions = list_rc_sessions()
@@ -179,9 +186,26 @@ class Handler(http.server.BaseHTTPRequestHandler):
             qs = parse_qs(urlparse(self.path).query)
             browse_path = qs.get("path", [WORKING_DIR])[0]
             browse_path = os.path.realpath(browse_path)
-            # Restrict browsing to home directory and /tmp
-            allowed_roots = [os.path.expanduser("~"), "/tmp"]
+            # Restrict browsing to allowed roots (configurable via RC_BROWSE_ROOTS)
+            allowed_roots = BROWSE_ROOTS
+            if browse_path == "/":
+                # Show allowed roots as virtual directory listing
+                dirs = sorted(set(
+                    r.strip("/").split("/")[0] for r in allowed_roots
+                ), key=str.lower)
+                self._json({"path": "/", "parent": None, "dirs": dirs})
+                return
             if not any(browse_path == root or browse_path.startswith(root + os.sep) for root in allowed_roots):
+                # Allow intermediate paths (e.g. /var) if they lead to an allowed root
+                if any(root.startswith(browse_path + os.sep) for root in allowed_roots):
+                    dirs = sorted(set(
+                        root[len(browse_path):].strip("/").split("/")[0]
+                        for root in allowed_roots
+                        if root.startswith(browse_path + os.sep)
+                    ), key=str.lower)
+                    parent = os.path.dirname(browse_path) if browse_path != "/" else None
+                    self._json({"path": browse_path, "parent": parent, "dirs": dirs})
+                    return
                 self._json({"error": "Access denied"}, 403)
                 return
             if not os.path.isdir(browse_path):
@@ -192,8 +216,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
             except PermissionError:
                 self._json({"error": "Permission denied"}, 400)
                 return
+            # Show non-hidden dirs, plus any hidden dirs that are allowed roots
+            allowed_hidden = set()
+            for root in allowed_roots:
+                if root.startswith(browse_path + os.sep):
+                    child = root[len(browse_path):].strip("/").split("/")[0]
+                    if child.startswith("."):
+                        allowed_hidden.add(child)
             dirs = sorted(
-                [e for e in entries if not e.startswith(".") and os.path.isdir(os.path.join(browse_path, e))],
+                [e for e in entries
+                 if os.path.isdir(os.path.join(browse_path, e))
+                 and (not e.startswith(".") or e in allowed_hidden)],
                 key=str.lower
             )
             parent = os.path.dirname(browse_path) if browse_path != "/" else None
@@ -276,6 +309,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "-e", f"RC_MODE={mode}",
                 "-e", f"RC_WORKDIR={session_dir}",
                 "-e", "DISPLAY=:1",
+                "-e", "TERM=xterm-256color",
             ]
             if sandbox or os.geteuid() == 0:
                 env_flags.extend(["-e", "IS_SANDBOX=1"])
