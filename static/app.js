@@ -74,7 +74,7 @@ async function api(method, path, body) {
   if (body) opts.body = JSON.stringify(body);
   const r = await fetch(_apiBase + path, opts);
   if (r.status === 401) {
-    window.location.reload();
+    window.location.href = '/login';
     throw new Error('Authentication required');
   }
   return r.json();
@@ -313,6 +313,9 @@ async function refresh() {
       const copyBtn = s.url && !isDead
         ? '<button class="btn-copy btn-copy-url" onclick="copyUrl(\'' + escHtml(s.url.replace(/'/g, "\\'")) + '\',this)">' + ICN.copy + ' Copy</button>'
         : '';
+      const nudgeBtn = !s.url && !isDead
+        ? '<button class="btn-unstick" onclick="unstickSession(\'' + s.name.replace(/'/g, "\\'") + '\')">' + ICN.bolt + ' Nudge</button>'
+        : '';
       const projectHtml = s.project
         ? '<div class="project-label" title="' + escHtml(s.workdir || '') + '">' + ICN.folder + ' ' + escHtml(s.project) + '</div>'
         : '';
@@ -329,6 +332,7 @@ async function refresh() {
         '</div>';
       }
       const isStopping = stoppingSet.has(s.name);
+      const previewBtn = !isDead ? '<button class="btn-preview" onclick="openPreview(\'' + s.name.replace(/'/g, "\\'") + '\')">Preview</button>' : '';
       const restartBtn = '<button class="btn-restart" onclick="restartSession(\'' + s.name.replace(/'/g, "\\'") + '\')">' + ICN.restart + ' Restart</button>';
       const stopBtn = isStopping
         ? '<button class="btn-stop" disabled><span class="spinner spinner-sm"></span> Stopping\u2026</button>'
@@ -341,7 +345,7 @@ async function refresh() {
           '</span>' +
         '</div>' +
         projectHtml + tokenHtml + wizardHint + urlHtml +
-        '<div class="session-actions"><div class="session-actions-left">' + restartBtn + stopBtn + '</div>' + copyBtn + '</div>' +
+        '<div class="session-actions"><div class="session-actions-left">' + previewBtn + restartBtn + stopBtn + '</div>' + (nudgeBtn || copyBtn) + '</div>' +
       '</div>';
     }).join('');
   }
@@ -480,6 +484,17 @@ async function stopAll() {
   refresh();
 }
 
+async function unstickSession(name) {
+  const btn = document.querySelector('.btn-unstick[onclick*="' + name + '"]');
+  if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spinner spinner-sm"></span> Nudging\u2026'; }
+  const res = await api('POST', '/unstick', { name });
+  if (btn) {
+    btn.innerHTML = (res.ok ? ICN.check : ICN.warn) + ' ' + (res.message || 'Done');
+    setTimeout(() => { btn.disabled = false; btn.innerHTML = ICN.bolt + ' Nudge'; }, 3000);
+  }
+  setTimeout(refresh, 2000);
+}
+
 async function restartSession(name) {
   const btn = document.querySelector('.btn-restart[onclick*="' + name + '"]');
   if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spinner spinner-sm"></span> Restarting\u2026'; }
@@ -555,13 +570,225 @@ async function refreshSchedules() {
   }
 }
 
+/* --- Run Results Dashboard --- */
+
+function _safeName(name) {
+  return (name || '').replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase();
+}
+
+function normalizeRun(run) {
+  // Status - try many field names
+  if (!run.status && run.completed_at) run.status = 'completed';
+  if (!run.status && run.end_time) run.status = 'completed';
+  if (!run.status && run.run_end) run.status = 'completed';
+  if (!run.status && run.result) run.status = 'completed';
+  if (!run.status && run.total_applications > 0) run.status = 'completed';
+  if (!run.status && run.started_at) run.status = 'running';
+  // Duration - try many field pairs
+  if (run.duration_minutes == null) {
+    var start = run.started_at || run.start_time || run.run_start || run.started;
+    var end = run.completed_at || run.end_time || run.run_end || run.ended;
+    if (start && end) run.duration_minutes = Math.round((new Date(end) - new Date(start)) / 60000);
+  }
+  // Summary - try many field names
+  if (!run.summary && run.result && typeof run.result === 'string') run.summary = run.result;
+  if (!run.summary && run.session_notes && typeof run.session_notes === 'string') {
+    run.summary = run.session_notes.length > 120 ? run.session_notes.substring(0, 117) + '...' : run.session_notes;
+  }
+  if (!run.summary && run.total_applications != null) {
+    run.summary = 'Applied to ' + run.total_applications + ' jobs';
+  }
+  if (!run.summary && run.applications_submitted != null) {
+    run.summary = 'Applied to ' + run.applications_submitted + ' jobs';
+  }
+  if (!run.summary && run.applications && run.applications.length > 0) {
+    var applied = run.applications.filter(function(a) { return a.status === 'applied'; }).length;
+    run.summary = 'Applied to ' + applied + ' jobs';
+  }
+  // Timestamps - try many field names
+  if (!run.started) run.started = run.started_at || run.start_time || run.run_start || run.date || run.run_date;
+  // Session/ID
+  if (!run.session && run.run_id) run.session = run.run_id;
+  return run;
+}
+
+function runStatusIcon(status) {
+  if (status === 'error' || status === 'failed') return '<span class="run-status-err">\u2717</span>';
+  if (status === 'running') return '<span class="run-status-run">' + ICN.loader + '</span>';
+  return '<span class="run-status-ok">\u2713</span>';
+}
+
+function formatRunTimestamp(iso) {
+  if (!iso) return '';
+  var d = new Date(iso);
+  return d.toLocaleDateString('en-US', {month: 'short', day: 'numeric'}) + ', ' +
+    String(d.getHours()).padStart(2,'0') + ':' + String(d.getMinutes()).padStart(2,'0');
+}
+
+function renderRunResults(runs, jobName) {
+  if (!runs || runs.length === 0) return '';
+  var html = '<div class="run-results"><div class="run-results-title">Recent Runs</div>';
+  runs.forEach(function(run, i) {
+    run = normalizeRun(run);
+    run._jobName = jobName;
+    var prefix = i < runs.length - 1 ? '\u251C\u2500' : '\u2514\u2500';
+    var ts = formatRunTimestamp(run.started);
+    var dur = run.duration_minutes != null ? Math.round(run.duration_minutes) + 'min' : '';
+    var summary = run.summary || '';
+    var statusIcon = runStatusIcon(run.status);
+    var viewRef = run._filename || run.session || '';
+    html += '<div class="run-row">' +
+      '<span class="run-tree">' + prefix + '</span> ' +
+      '<span class="run-ts">' + escHtml(ts) + '</span> ' +
+      statusIcon + ' ' +
+      (dur ? '<span class="run-dur">' + escHtml(dur) + '</span> ' : '') +
+      '<span class="run-summary">' + escHtml(summary) + '</span>' +
+      '<button class="btn-sm btn-run-view" onclick="showRunDetail(\'' + escHtml(jobName.replace(/'/g, "\\'")) + '\', \'' + escHtml(viewRef.replace(/'/g, "\\'")) + '\')">View</button>' +
+    '</div>';
+  });
+  html += '</div>';
+  return html;
+}
+
+async function loadRunsForSchedule(scheduleName) {
+  var jobName = _safeName(scheduleName);
+  try {
+    var runs = await api('GET', '/jobs/' + encodeURIComponent(jobName) + '/runs?limit=10');
+    return { runs: runs, jobName: jobName };
+  } catch(e) {
+    return { runs: [], jobName: jobName };
+  }
+}
+
+async function showRunDetail(jobName, sessionOrFilename) {
+  document.getElementById('run-detail-modal').style.display = 'flex';
+  var content = document.getElementById('run-detail-content');
+  content.innerHTML = '<div class="empty">' + ICN.loader + ' Loading\u2026</div>';
+
+  try {
+    var run = await api('GET', '/jobs/' + encodeURIComponent(jobName) + '/runs/' + encodeURIComponent(sessionOrFilename));
+    run = normalizeRun(run);
+    if (!run.metrics && run.applications_submitted != null) {
+      run.metrics = {applied: run.applications_submitted, evaluated: run.jobs_evaluated || 0, skipped: run.jobs_skipped || 0, searches: run.searches_run || 0};
+    }
+    if (!run.items && run.applications) run.items = run.applications;
+    if (!run.items && run.jobs_applied) run.items = run.jobs_applied;
+    var statusCls = run.status === 'error' || run.status === 'failed' ? 'run-badge-error' : run.status === 'running' ? 'run-badge-running' : 'run-badge-ok';
+    var statusLabel = run.status || 'complete';
+    var dur = run.duration_minutes != null ? Math.round(run.duration_minutes) + ' min' : '';
+    var ts = formatRunTimestamp(run.started);
+
+    var html = '<h3>' + escHtml(jobName) + '</h3>' +
+      '<div class="run-detail-meta">' +
+        (ts ? '<span>' + escHtml(ts) + '</span>' : '') +
+        (dur ? '<span>' + escHtml(dur) + '</span>' : '') +
+        '<span class="run-badge ' + statusCls + '">' + statusLabel.toUpperCase() + '</span>' +
+      '</div>';
+
+    // Build metrics from whatever fields exist
+    if (!run.metrics && run.applications) {
+      var applied = run.applications.filter(function(a) { return a.status === 'applied'; }).length;
+      var skippedArr = run.skipped || [];
+      run.metrics = { applied: applied, skipped: Array.isArray(skippedArr) ? skippedArr.length : (run.jobs_skipped || 0), searches: run.searches_run || run.keywords_used ? (run.keywords_used || []).length : 0 };
+    }
+    if (!run.metrics && run.applications_submitted != null) {
+      run.metrics = {applied: run.applications_submitted, evaluated: run.jobs_evaluated || 0, skipped: run.jobs_skipped || 0, searches: run.searches_run || 0};
+    }
+    // Merge applications into items
+    if (!run.items && run.applications) run.items = run.applications;
+    if (!run.items && run.jobs_applied) run.items = run.jobs_applied;
+
+    if (run.metrics) {
+      html += '<div class="run-metrics">';
+      for (var k in run.metrics) {
+        html += '<div class="run-metric"><div class="run-metric-val">' + run.metrics[k] + '</div><div class="run-metric-label">' + k + '</div></div>';
+      }
+      html += '</div>';
+    }
+
+    if (run.summary) {
+      html += '<div class="run-summary-block">' + escHtml(run.summary) + '</div>';
+    }
+
+    if (run.items && run.items.length > 0) {
+      html += '<div class="run-items-title">Items</div><div class="run-items">';
+      run.items.forEach(function(item) {
+        var title = item.title || item.role || item.job_title || item.company || JSON.stringify(item);
+        var company = item.company || '';
+        var url = item.url || item.application_url || item.link || '';
+        html += '<div class="run-item">' +
+          '<span class="run-item-check">\u2713</span> ' +
+          '<span>' + escHtml(title) + (company ? ' \u2014 ' + escHtml(company) : '') + '</span>' +
+          (url ? ' <a href="' + escHtml(url) + '" target="_blank" class="run-item-link">Open \u2197</a>' : '') +
+        '</div>';
+      });
+      html += '</div>';
+    }
+
+    if (run.key_findings && run.key_findings.length > 0) {
+      html += '<div class="run-items-title">Key Findings</div><div class="run-items">';
+      run.key_findings.forEach(function(f) {
+        html += '<div class="run-item"><span class="run-item-bullet">\u2022</span> ' + escHtml(f) + '</div>';
+      });
+      html += '</div>';
+    }
+
+    // Log button
+    var sessionName = run.session || run.run_id || '';
+    if (sessionName) {
+      html += '<button class="btn-sm btn-edit" style="margin-top:0.75rem;" onclick="loadRunLog(\'' + escHtml(jobName.replace(/'/g, "\\'")) + '\', \'' + escHtml(sessionName.replace(/'/g, "\\'")) + '\')">View Session Log</button>';
+      html += '<pre class="run-log" id="run-log-content" style="display:none;"></pre>';
+    }
+
+    content.innerHTML = html;
+  } catch(e) {
+    content.innerHTML = '<div class="empty">Failed to load run details</div>';
+  }
+}
+
+async function loadRunLog(jobName, sessionName) {
+  var logEl = document.getElementById('run-log-content');
+  if (!logEl) return;
+  if (logEl.style.display !== 'none') { logEl.style.display = 'none'; return; }
+  logEl.style.display = 'block';
+  logEl.textContent = 'Loading log\u2026';
+  try {
+    // Try session-name based log first, then timestamp-based
+    var data = await api('GET', '/jobs/' + encodeURIComponent(jobName) + '/logs/' + encodeURIComponent(sessionName + '.log') + '?tail=200');
+    if (data.content) {
+      logEl.textContent = data.content;
+      logEl.scrollTop = logEl.scrollHeight;
+    } else {
+      logEl.textContent = 'No log content.';
+    }
+  } catch(e) {
+    logEl.textContent = 'Log not available.';
+  }
+}
+
+function closeRunDetail() {
+  document.getElementById('run-detail-modal').style.display = 'none';
+}
+
 function renderScheduleCards(schedules) {
   const el = document.getElementById('schedules');
   if (schedules.length === 0) {
     el.innerHTML = '<div class="empty">No scheduled tasks</div>';
     return;
   }
-  el.innerHTML = schedules.map(s => {
+  // First render immediately, then load runs async
+  el.innerHTML = schedules.map(s => _renderScheduleCard(s, '')).join('');
+  // Load runs for each schedule
+  schedules.forEach(function(s) {
+    loadRunsForSchedule(s.name).then(function(result) {
+      var runsHtml = renderRunResults(result.runs, result.jobName);
+      var slot = document.getElementById('runs-' + s.id);
+      if (slot) slot.innerHTML = runsHtml;
+    });
+  });
+}
+
+function _renderScheduleCard(s, runsHtml) {
     const hint = formatCronHint(s.cron);
     const lastRun = s.last_run ? formatRelativeTime(s.last_run) : 'Never';
     const nextRun = s.next_run ? formatRelativeTime(s.next_run) : 'N/A';
@@ -584,13 +811,13 @@ function renderScheduleCards(schedules) {
         (s.workdir ? '<div>' + ICN.folder + ' ' + escHtml(s.workdir) + '</div>' : '') +
       '</div>' +
       (historyHtml ? '<div class="schedule-history">' + historyHtml + '</div>' : '') +
+      '<div id="runs-' + s.id + '">' + runsHtml + '</div>' +
       '<div class="schedule-actions">' +
         '<button class="btn-sm btn-edit" onclick="openEditSchedule(\'' + s.id + '\')">' + ICN.edit + ' Edit</button>' +
         '<button class="btn-sm btn-fire" onclick="fireSchedule(\'' + s.id + '\')">' + ICN.play + ' Run Now</button>' +
         '<button class="btn-sm btn-del" onclick="deleteSchedule(\'' + s.id + '\')">' + ICN.trash + ' Delete</button>' +
       '</div>' +
     '</div>';
-  }).join('');
 }
 
 function applyCronPreset() {
@@ -995,6 +1222,48 @@ function formatRelativeTime(iso) {
 function updateCronPreview() {
   const expr = document.getElementById('sched-cron').value.trim();
   document.getElementById('cron-preview').textContent = expr ? formatCronHint(expr) : '';
+}
+
+// --- Session Preview ---
+var _previewInterval = null;
+var _previewSession = null;
+
+function openPreview(sessionName) {
+  _previewSession = sessionName;
+  document.getElementById('session-preview-modal').style.display = 'flex';
+  document.getElementById('preview-title').textContent = sessionName;
+  document.getElementById('preview-output').textContent = 'Loading\u2026';
+  document.getElementById('preview-auto-refresh').checked = true;
+  refreshPreview();
+  _previewInterval = setInterval(refreshPreview, 3000);
+}
+
+async function refreshPreview() {
+  if (!_previewSession) return;
+  try {
+    var data = await api('GET', '/sessions/' + encodeURIComponent(_previewSession) + '/preview');
+    var pre = document.getElementById('preview-output');
+    var text = (data.output || '').replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').replace(/\x1b\][^\x07]*\x07/g, '').replace(/\x1b[^[]/g, '');
+    pre.textContent = text;
+    pre.scrollTop = pre.scrollHeight;
+  } catch(e) {
+    document.getElementById('preview-output').textContent = 'Session not available.';
+  }
+}
+
+function togglePreviewRefresh(on) {
+  if (on && !_previewInterval) {
+    _previewInterval = setInterval(refreshPreview, 3000);
+  } else if (!on && _previewInterval) {
+    clearInterval(_previewInterval);
+    _previewInterval = null;
+  }
+}
+
+function closePreview() {
+  document.getElementById('session-preview-modal').style.display = 'none';
+  if (_previewInterval) { clearInterval(_previewInterval); _previewInterval = null; }
+  _previewSession = null;
 }
 
 loadProjects();

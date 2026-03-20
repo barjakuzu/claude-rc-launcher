@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Claude RC Launcher</title>
-<link rel="stylesheet" href="static/style.css?v=6">
+<link rel="stylesheet" href="static/style.css?v=17">
 </head>
 <body>
 <div class="toast-container" id="toast-container"></div>
@@ -13,6 +13,7 @@
     <h1>Claude RC</h1>
     <div class="subtitle">Session Launcher <span id="version-label-top" class="version-inline"></span></div>
   </div>
+  <a href="/logout" class="logout-btn" title="Logout">Logout</a>
 
   <div class="col-left">
   <div class="tab-content active" id="tab-launch">
@@ -368,6 +369,31 @@
   </div>
 </div>
 
-<script src="static/app.js?v=9"></script>
+<!-- Run Detail Modal -->
+<div id="run-detail-modal" class="modal-overlay" style="display:none;" onclick="if(event.target===this)closeRunDetail()">
+  <div class="modal run-detail-modal">
+    <div id="run-detail-content"></div>
+    <div class="modal-actions">
+      <button class="btn-modal-cancel" onclick="closeRunDetail()">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- Session Preview Modal -->
+<div id="session-preview-modal" class="modal-overlay" style="display:none;" onclick="if(event.target===this)closePreview()">
+  <div class="preview-content">
+    <div class="preview-header">
+      <h3 id="preview-title">Session Preview</h3>
+      <div class="preview-controls">
+        <label class="preview-auto-label"><input type="checkbox" id="preview-auto-refresh" checked onchange="togglePreviewRefresh(this.checked)"> Auto-refresh</label>
+        <button class="btn-sm btn-edit" onclick="refreshPreview()">Refresh</button>
+        <button class="btn-sm btn-stop" onclick="closePreview()">Close</button>
+      </div>
+    </div>
+    <pre id="preview-output" class="preview-terminal"></pre>
+  </div>
+</div>
+
+<script src="static/app.js?v=18"></script>
 </body>
 </html>

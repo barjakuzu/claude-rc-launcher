@@ -359,22 +359,6 @@ def setup_session(session_name, display_name, mode):
         print(f"  {session_name}: timed out waiting for Claude prompt")
         return
 
-    # Check if another session already has remote-control active
-    # (only one RC session allowed per account — a second one destabilizes both)
-    existing_rc = get_active_rc_session()
-    if existing_rc and existing_rc != session_name:
-        print(f"  {session_name}: skipping /remote-control — {existing_rc} already has it active")
-        _store_session_error(session_name,
-            f"Remote control not started: {existing_rc} already has an active connection. "
-            "Only one remote-control session is allowed at a time. "
-            "Stop that session first, or use it instead.")
-        # Still rename the session
-        time.sleep(1)
-        subprocess.run(["tmux", "send-keys", "-t", session_name, "-l", f"/rename {display_name}"], capture_output=True)
-        time.sleep(0.5)
-        subprocess.run(["tmux", "send-keys", "-t", session_name, "Enter"], capture_output=True)
-        return
-
     # Wait for CLI to fully initialize after showing prompt
     # (prompt appears before internal WebSocket/API connections are ready)
     print(f"  {session_name}: prompt found, waiting for CLI to fully initialize...")
@@ -476,6 +460,41 @@ def setup_session(session_name, display_name, mode):
         print(f"  {session_name}: attempt {attempt + 1} failed, waiting before retry...")
         time.sleep(5)
     print(f"  {session_name}: timed out after 3 attempts")
+
+
+def unstick_session(name):
+    """Detect if a session is stuck at an interactive menu and send Enter to accept default.
+    Returns a dict with 'unstuck' bool and 'detail' message."""
+    if not session_exists(name):
+        return {"unstuck": False, "detail": "Session does not exist"}
+    if get_session_status(name) == "dead":
+        return {"unstuck": False, "detail": "Session process is dead"}
+
+    # Capture current pane content
+    try:
+        r = subprocess.run(
+            ["tmux", "capture-pane", "-t", name, "-p", "-S", "-30"],
+            capture_output=True, text=True, timeout=5,
+        )
+        text = r.stdout
+    except Exception:
+        return {"unstuck": False, "detail": "Could not read session output"}
+
+    # Detect known menu patterns that block Remote Control
+    menu_patterns = [
+        "Enter to select",           # Plan mode interview menus
+        "Would you like to proceed",  # Plan execution confirmation
+        "Review your answers",        # Plan interview summary
+        "Bypass Permissions",         # Trust prompt
+        "Do you trust",               # Trust folder prompt
+    ]
+    found = [p for p in menu_patterns if p in text]
+    if not found:
+        return {"unstuck": False, "detail": "No stuck menu detected"}
+
+    # Send Enter to accept the default option
+    subprocess.run(["tmux", "send-keys", "-t", name, "Enter"], capture_output=True)
+    return {"unstuck": True, "detail": f"Sent Enter (detected: {found[0]})"}
 
 
 def stop_session(name):

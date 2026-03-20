@@ -146,15 +146,78 @@ def next_cron_run(expr, after_dt=None):
     return None
 
 
+# --- Session lifecycle tracking ---
+
+_active_scheduled_sessions = {}  # session_name -> {schedule_id, started_at, schedule_safe_name}
+
+
+def _monitor_scheduled_sessions():
+    """Check if any tracked scheduled sessions have ended."""
+    if not _active_scheduled_sessions:
+        return
+
+    ended = []
+    for session_name, info in _active_scheduled_sessions.items():
+        # Check if tmux session still exists
+        result = subprocess.run(
+            ["tmux", "has-session", "-t", session_name],
+            capture_output=True
+        )
+        if result.returncode != 0:
+            # Session ended
+            ended.append(session_name)
+            duration = (datetime.now() - info["started_at"]).total_seconds() / 60
+
+            # Try to read the run report if it exists
+            runs_dir = os.path.expanduser(f"~/.claude-rc/jobs/{info['schedule_safe_name']}/runs")
+            summary = f"Session ended after {int(duration)} minutes"
+
+            # Look for a run report written by the session
+            if os.path.isdir(runs_dir):
+                reports = sorted(os.listdir(runs_dir), reverse=True)
+                if reports:
+                    try:
+                        with open(os.path.join(runs_dir, reports[0])) as f:
+                            import json as _json
+                            report = _json.load(f)
+                            if report.get("summary"):
+                                summary = report["summary"]
+                    except Exception:
+                        pass
+
+            add_history_entry(
+                info["schedule_id"],
+                "completed",
+                summary,
+                duration_minutes=round(duration, 1)
+            )
+
+    for name in ended:
+        del _active_scheduled_sessions[name]
+
+
 # --- Fire mechanism ---
 
 def _fire_schedule(schedule):
     """Spawn a new Claude session for a scheduled task."""
     name = schedule.get("name", "task")
-    # Generate unique session name
+    # Generate unique session name (include date to prevent collisions across days)
     safe_name = re.sub(r'[^a-zA-Z0-9_-]', '', name.replace(" ", "-"))
-    ts = time.strftime("%H%M%S")
+    ts = time.strftime("%m%d-%H%M%S")
     session_name = f"{SESSION_PREFIX}sched-{safe_name}-{ts}"
+
+    # Kill stale sessions from previous runs of this schedule
+    stale_prefix = f"{SESSION_PREFIX}sched-{safe_name}-"
+    result = subprocess.run(
+        ["tmux", "list-sessions", "-F", "#{session_name}"],
+        capture_output=True, text=True,
+    )
+    if result.returncode == 0:
+        for line in result.stdout.strip().splitlines():
+            sname = line.strip()
+            if sname.startswith(stale_prefix) and sname != session_name:
+                subprocess.run(["tmux", "kill-session", "-t", sname], capture_output=True)
+                print(f"  Scheduler: killed stale session {sname}")
 
     workdir = schedule.get("workdir", "/tmp")
     mode = schedule.get("mode", "c")
@@ -171,6 +234,7 @@ def _fire_schedule(schedule):
     # Build prompt text
     prompt = schedule.get("prompt", "")
     instructions_file = schedule.get("instructions_file")
+    use_file_ref = False
     if instructions_file and os.path.isfile(instructions_file):
         # Restrict to files under home directory or workdir
         real_path = os.path.realpath(instructions_file)
@@ -178,11 +242,18 @@ def _fire_schedule(schedule):
         if workdir:
             allowed_roots.append(os.path.realpath(workdir))
         if any(real_path.startswith(root + os.sep) or real_path == root for root in allowed_roots):
-            try:
-                with open(instructions_file, "r") as f:
-                    prompt = f.read()
-            except Exception as e:
-                print(f"  Scheduler: failed to read instructions file: {e}")
+            # For large files, send a reference instead of the content
+            # tmux send-keys has a ~4KB limit
+            file_size = os.path.getsize(instructions_file)
+            if file_size > 3000:
+                prompt = f"Read and execute the instructions in {instructions_file} - this is your task. Follow every section exactly. Start now."
+                use_file_ref = True
+            else:
+                try:
+                    with open(instructions_file, "r") as f:
+                        prompt = f.read()
+                except Exception as e:
+                    print(f"  Scheduler: failed to read instructions file: {e}")
         else:
             print(f"  Scheduler: instructions_file outside allowed directories: {instructions_file}")
 
@@ -225,6 +296,16 @@ def _fire_schedule(schedule):
         if not session_exists(session_name):
             add_history_entry(schedule["id"], "error", "Session died during setup")
             return
+
+        # Pipe tmux output to a log file
+        log_dir = os.path.expanduser(f"~/.claude-rc/jobs/{safe_name}/logs")
+        os.makedirs(log_dir, exist_ok=True)
+        log_file = os.path.join(log_dir, f"{session_name}.log")
+        subprocess.run(
+            ["tmux", "pipe-pane", "-t", session_name, f"cat >> {log_file}"],
+            capture_output=True,
+        )
+
         # Wait a moment for /rename to complete
         time.sleep(2)
         # Send the prompt via tmux send-keys
@@ -237,6 +318,14 @@ def _fire_schedule(schedule):
             ["tmux", "send-keys", "-t", session_name, "Enter"],
             capture_output=True,
         )
+
+        # Register session for lifecycle monitoring
+        _active_scheduled_sessions[session_name] = {
+            "schedule_id": schedule["id"],
+            "started_at": datetime.now(),
+            "schedule_safe_name": safe_name,
+        }
+
         add_history_entry(schedule["id"], "ok", f"Session {session_name} started")
         print(f"  Scheduler: task '{name}' prompt sent to {session_name}")
 
@@ -282,6 +371,9 @@ def _scheduler_loop():
 
             print(f"  Scheduler: cron match for '{schedule.get('name')}'")
             _fire_schedule(schedule)
+
+        # Check if any tracked scheduled sessions have ended
+        _monitor_scheduled_sessions()
 
 
 def start_scheduler():

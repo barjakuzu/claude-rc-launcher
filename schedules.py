@@ -89,19 +89,23 @@ def delete_schedule(schedule_id):
     return False
 
 
-def add_history_entry(schedule_id, status, message):
-    """Add a history entry to a schedule, capped at 20 entries."""
+def add_history_entry(schedule_id, status, message, **kwargs):
+    """Add a history entry to a schedule, capped at 50 entries."""
     from datetime import datetime
     schedules = load_schedules()
     for s in schedules:
         if s.get("id") == schedule_id:
             history = s.get("history", [])
-            history.append({
+            entry = {
                 "timestamp": datetime.now().isoformat(),
                 "status": status,
                 "message": message,
-            })
-            s["history"] = history[-20:]
+            }
+            # Add any extra fields (e.g. duration_minutes, summary)
+            for k, v in kwargs.items():
+                entry[k] = v
+            history.append(entry)
+            s["history"] = history[-50:]
             s["last_run"] = datetime.now().isoformat()
             save_schedules(schedules)
             return

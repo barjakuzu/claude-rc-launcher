@@ -6,9 +6,11 @@ import http.server
 import json
 import os
 import re
+import secrets
 import subprocess
 import threading
 import time
+from http.cookies import SimpleCookie
 from urllib.parse import urlparse, parse_qs
 
 from config import (
@@ -18,7 +20,7 @@ from config import (
 from sessions import (
     list_rc_sessions, session_exists, setup_session, stop_session,
     restart_session, list_resumable_sessions, resume_session,
-    get_all_session_errors,
+    get_all_session_errors, unstick_session,
 )
 from tunnel import (
     cloudflared_available, start_tunnel, stop_tunnel, get_tunnel_status,
@@ -47,10 +49,34 @@ def _parse_projects():
     return projects
 
 
+_auth_tokens = set()  # valid session cookie tokens
+
+
 def _check_auth(handler):
-    """Return True if auth passes (or auth not configured)."""
+    """Return True if auth passes (cookie, Basic Auth, or auth not configured)."""
     if not AUTH_USER or not AUTH_PASS:
         return True
+    # Check session cookie first
+    cookie_header = handler.headers.get("Cookie", "")
+    if cookie_header:
+        cookie = SimpleCookie()
+        cookie.load(cookie_header)
+        if "rc_session" in cookie and cookie["rc_session"].value in _auth_tokens:
+            return True
+    # Fall back to Basic Auth (for curl/API)
+    auth_header = handler.headers.get("Authorization", "")
+    if auth_header.startswith("Basic "):
+        try:
+            decoded = base64.b64decode(auth_header[6:]).decode("utf-8")
+            user, password = decoded.split(":", 1)
+            return hmac.compare_digest(user, AUTH_USER) and hmac.compare_digest(password, AUTH_PASS)
+        except Exception:
+            pass
+    return False
+
+
+def _check_basic_auth(handler):
+    """Check only Basic Auth header. Returns True if valid."""
     auth_header = handler.headers.get("Authorization", "")
     if not auth_header.startswith("Basic "):
         return False
@@ -63,12 +89,48 @@ def _check_auth(handler):
 
 
 def _send_auth_required(handler):
-    """Send 401 response requesting basic auth."""
-    handler.send_response(401)
-    handler.send_header("WWW-Authenticate", 'Basic realm="Claude RC Launcher"')
-    handler.send_header("Content-Type", "text/plain")
-    handler.end_headers()
-    handler.wfile.write(b"Authentication required")
+    """Send 401 or redirect to login depending on request type."""
+    accept = handler.headers.get("Accept", "")
+    # API/curl requests get 401 JSON; browser requests get redirected to login
+    if "text/html" in accept and not handler.headers.get("Authorization"):
+        handler.send_response(302)
+        handler.send_header("Location", "/login")
+        handler.end_headers()
+    else:
+        handler.send_response(401)
+        handler.send_header("WWW-Authenticate", 'Basic realm="Claude RC Launcher"')
+        handler.send_header("Content-Type", "text/plain")
+        handler.end_headers()
+        handler.wfile.write(b"Authentication required")
+
+
+_LOGIN_HTML = """<!DOCTYPE html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Claude RC — Login</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#0a0a0a;color:#e2e8f0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh}
+.login-card{background:#141414;border:1px solid #2a2a2a;border-radius:16px;padding:40px;width:100%;max-width:380px;text-align:center}
+.login-card h1{font-size:22px;margin-bottom:6px;color:#e2e8f0}
+.login-card p{font-size:13px;color:#64748b;margin-bottom:28px}
+.field{margin-bottom:16px;text-align:left}
+.field label{display:block;font-size:12px;color:#94a3b8;margin-bottom:4px}
+.field input{width:100%;padding:10px 12px;background:#1a1a1a;border:1px solid #2a2a2a;border-radius:8px;color:#e2e8f0;font-size:14px;outline:none;color-scheme:dark}
+.field input:focus{border-color:#555}
+.field input:-webkit-autofill{-webkit-box-shadow:0 0 0 30px #1a1a1a inset !important;-webkit-text-fill-color:#e2e8f0 !important;border-color:#2a2a2a !important}
+.btn{width:100%;padding:12px;background:#222;color:#e2e8f0;border:1px solid #333;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;margin-top:8px}
+.btn:hover{background:#333}
+.error{color:#ef4444;font-size:13px;margin-bottom:12px;display:none}
+</style></head><body>
+<form class="login-card" method="POST" action="/login">
+<h1>Claude RC</h1><p>Session Launcher</p>
+<div class="error" id="err">Invalid credentials</div>
+<div class="field"><label>Username</label><input name="user" type="text" autofocus required></div>
+<div class="field"><label>Password</label><input name="pass" type="password" required></div>
+<button type="submit" class="btn">Sign In</button>
+</form>
+<script>if(location.search.includes('err=1'))document.getElementById('err').style.display='block'</script>
+</body></html>"""
 
 
 def _load_html(auth_header=""):
@@ -148,6 +210,23 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return {}
 
     def do_GET(self):
+        # Login/logout routes — no auth required
+        raw_path = self.path.split('?')[0]
+        if raw_path in ("/login", "/rc/login"):
+            return self._html(_LOGIN_HTML)
+        if raw_path in ("/logout", "/rc/logout"):
+            cookie_header = self.headers.get("Cookie", "")
+            if cookie_header:
+                cookie = SimpleCookie()
+                cookie.load(cookie_header)
+                if "rc_session" in cookie:
+                    _auth_tokens.discard(cookie["rc_session"].value)
+            self.send_response(302)
+            self.send_header("Location", "/login")
+            self.send_header("Set-Cookie", "rc_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax")
+            self.end_headers()
+            return
+
         if not _check_auth(self):
             return _send_auth_required(self)
 
@@ -173,6 +252,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if errors:
                 resp["errors"] = errors
             self._json(resp)
+
+        elif path.startswith("/sessions/") and path.endswith("/preview"):
+            name = path[len("/sessions/"):-len("/preview")]
+            if not name or ".." in name:
+                self.send_error(404)
+                return
+            result = subprocess.run(
+                ["tmux", "capture-pane", "-t", name, "-p", "-S", "-50"],
+                capture_output=True, text=True,
+            )
+            if result.returncode != 0:
+                self._json({"error": "Session not found"}, 404)
+                return
+            self._json({"name": name, "output": result.stdout, "status": "running"})
 
         elif path == "/projects":
             projects = _parse_projects()
@@ -260,10 +353,39 @@ class Handler(http.server.BaseHTTPRequestHandler):
             else:
                 self._json({"running": False, "url": None})
 
+        elif path.startswith("/jobs/"):
+            self._handle_job_route(path)
+
         else:
             self.send_error(404)
 
     def do_POST(self):
+        # Login route — no auth required
+        raw_path = self.path.split('?')[0]
+        if raw_path in ("/login", "/rc/login"):
+            length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(length).decode("utf-8") if length else ""
+            params = dict(p.split("=", 1) for p in body.split("&") if "=" in p)
+            from urllib.parse import unquote_plus
+            user = unquote_plus(params.get("user", ""))
+            password = unquote_plus(params.get("pass", ""))
+            if (AUTH_USER and AUTH_PASS and
+                    hmac.compare_digest(user, AUTH_USER) and
+                    hmac.compare_digest(password, AUTH_PASS)):
+                token = secrets.token_hex(32)
+                _auth_tokens.add(token)
+                self.send_response(302)
+                self.send_header("Location", "/")
+                secure = "Secure; " if self.headers.get("X-Forwarded-Proto") == "https" else ""
+                self.send_header("Set-Cookie",
+                    f"rc_session={token}; Path=/; HttpOnly; SameSite=Lax; {secure}Max-Age=604800")
+                self.end_headers()
+            else:
+                self.send_response(302)
+                self.send_header("Location", "/login?err=1")
+                self.end_headers()
+            return
+
         if not _check_auth(self):
             return _send_auth_required(self)
 
@@ -350,6 +472,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if session_exists(name):
                 stop_session(name)
             self._json({"ok": True, "message": "Stopped"})
+
+        elif path == "/unstick":
+            body = self._read_body()
+            name = body.get("name", "").strip()
+            if not name or not name.startswith(SESSION_PREFIX):
+                self._json({"ok": False, "message": "Invalid session name"}, 400)
+                return
+            result = unstick_session(name)
+            self._json({"ok": result["unstuck"], "message": result["detail"]})
 
         elif path == "/stop-all":
             for s in list_rc_sessions():
@@ -545,11 +676,93 @@ class Handler(http.server.BaseHTTPRequestHandler):
         else:
             self.send_error(404)
 
+    def _handle_job_route(self, path):
+        """Route /jobs/{name}/runs and /jobs/{name}/logs sub-endpoints."""
+        from config import RC_HOME
+        qs = parse_qs(urlparse(self.path).query)
+        clean_path = path.split("?")[0]
+        parts = clean_path[len("/jobs/"):].split("/")
+        if len(parts) < 2:
+            self.send_error(404)
+            return
+        job_name = parts[0]
+        sub = parts[1]
+        # Sanitize job name
+        if not re.match(r'^[a-zA-Z0-9_-]+$', job_name):
+            self.send_error(400)
+            return
+        jobs_dir = os.path.join(RC_HOME, "jobs", job_name)
+
+        if sub == "runs":
+            runs_dir = os.path.join(jobs_dir, "runs")
+            if len(parts) == 3:
+                # GET /jobs/{name}/runs/{filename} — single run report
+                filename = parts[2]
+                if not re.match(r'^[a-zA-Z0-9_.T:-]+$', filename):
+                    self.send_error(400)
+                    return
+                filepath = os.path.join(runs_dir, filename)
+                if not os.path.isfile(filepath):
+                    self.send_error(404)
+                    return
+                try:
+                    with open(filepath) as f:
+                        data = json.load(f)
+                    data["_filename"] = filename
+                    self._json(data)
+                except Exception:
+                    self.send_error(500)
+            else:
+                # GET /jobs/{name}/runs — list run reports
+                if not os.path.isdir(runs_dir):
+                    self._json([])
+                    return
+                limit = int(qs.get("limit", ["10"])[0])
+                files = sorted(os.listdir(runs_dir), reverse=True)[:limit]
+                runs = []
+                for fname in files:
+                    try:
+                        with open(os.path.join(runs_dir, fname)) as f:
+                            data = json.load(f)
+                        data["_filename"] = fname
+                        runs.append(data)
+                    except Exception:
+                        pass
+                self._json(runs)
+
+        elif sub == "logs":
+            logs_dir = os.path.join(jobs_dir, "logs")
+            if len(parts) < 3:
+                self.send_error(404)
+                return
+            filename = parts[2]
+            if not re.match(r'^[a-zA-Z0-9_.-]+$', filename):
+                self.send_error(400)
+                return
+            filepath = os.path.join(logs_dir, filename)
+            if not os.path.isfile(filepath):
+                self.send_error(404)
+                return
+            tail = int(qs.get("tail", ["100"])[0])
+            try:
+                import subprocess as sp
+                r = sp.run(["wc", "-l", filepath], capture_output=True, text=True, timeout=5)
+                total_lines = int(r.stdout.strip().split()[0]) if r.returncode == 0 else 0
+                r = sp.run(["tail", "-n", str(tail), filepath], capture_output=True, text=True, timeout=10)
+                # Strip ANSI escape codes
+                clean = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', r.stdout)
+                self._json({"filename": filename, "content": clean, "total_lines": total_lines})
+            except Exception:
+                self.send_error(500)
+        else:
+            self.send_error(404)
+
     def log_message(self, fmt, *args):
         path = self.path.split("?")[0]
         if path in ("/rc/sessions", "/rc/tunnel/status", "/rc/projects",
                      "/rc/browse", "/rc/schedules", "/rc/version",
                      "/rc/resume/sessions") or \
-                path.startswith("/rc/static/") or path.startswith("/static/"):
+                path.startswith("/rc/static/") or path.startswith("/static/") or \
+                path.startswith("/rc/jobs/") or "/preview" in path:
             return
         print(f"  {self.command} {self.path} → {args[1] if len(args) > 1 else ''}")
