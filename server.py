@@ -51,6 +51,32 @@ def _parse_projects():
 
 _auth_tokens = set()  # valid session cookie tokens
 
+# Rate limiting for login attempts: {ip: [(timestamp, ...)] }
+_login_attempts = {}
+_LOGIN_MAX_ATTEMPTS = 5
+_LOGIN_WINDOW = 300      # 5 minutes
+_LOGIN_LOCKOUT = 900     # 15 minutes
+
+
+def _is_rate_limited(ip):
+    """Check if an IP is rate-limited for login attempts."""
+    now = time.time()
+    attempts = _login_attempts.get(ip, [])
+    # Clean old attempts
+    attempts = [t for t in attempts if now - t < _LOGIN_LOCKOUT]
+    _login_attempts[ip] = attempts
+    # Count recent attempts within window
+    recent = [t for t in attempts if now - t < _LOGIN_WINDOW]
+    return len(recent) >= _LOGIN_MAX_ATTEMPTS
+
+
+def _record_failed_login(ip):
+    """Record a failed login attempt."""
+    now = time.time()
+    if ip not in _login_attempts:
+        _login_attempts[ip] = []
+    _login_attempts[ip].append(now)
+
 
 def _check_auth(handler):
     """Return True if auth passes (cookie, Basic Auth, or auth not configured)."""
@@ -104,32 +130,36 @@ def _send_auth_required(handler):
         handler.wfile.write(b"Authentication required")
 
 
-_LOGIN_HTML = """<!DOCTYPE html>
+def _login_html(csrf_token="", error=""):
+    """Generate the login page HTML with CSRF token."""
+    err_style = "display:block" if error else "display:none"
+    err_msg = error or "Invalid credentials"
+    return f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Claude RC — Login</title>
 <style>
-*{margin:0;padding:0;box-sizing:border-box}
-body{background:#0a0a0a;color:#e2e8f0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh}
-.login-card{background:#141414;border:1px solid #2a2a2a;border-radius:16px;padding:40px;width:100%;max-width:380px;text-align:center}
-.login-card h1{font-size:22px;margin-bottom:6px;color:#e2e8f0}
-.login-card p{font-size:13px;color:#64748b;margin-bottom:28px}
-.field{margin-bottom:16px;text-align:left}
-.field label{display:block;font-size:12px;color:#94a3b8;margin-bottom:4px}
-.field input{width:100%;padding:10px 12px;background:#1a1a1a;border:1px solid #2a2a2a;border-radius:8px;color:#e2e8f0;font-size:14px;outline:none;color-scheme:dark}
-.field input:focus{border-color:#555}
-.field input:-webkit-autofill{-webkit-box-shadow:0 0 0 30px #1a1a1a inset !important;-webkit-text-fill-color:#e2e8f0 !important;border-color:#2a2a2a !important}
-.btn{width:100%;padding:12px;background:#222;color:#e2e8f0;border:1px solid #333;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;margin-top:8px}
-.btn:hover{background:#333}
-.error{color:#ef4444;font-size:13px;margin-bottom:12px;display:none}
+*{{margin:0;padding:0;box-sizing:border-box}}
+body{{background:#0a0a0a;color:#e2e8f0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh}}
+.login-card{{background:#141414;border:1px solid #2a2a2a;border-radius:16px;padding:40px;width:100%;max-width:380px;text-align:center}}
+.login-card h1{{font-size:22px;margin-bottom:6px;color:#e2e8f0}}
+.login-card p{{font-size:13px;color:#64748b;margin-bottom:28px}}
+.field{{margin-bottom:16px;text-align:left}}
+.field label{{display:block;font-size:12px;color:#94a3b8;margin-bottom:4px}}
+.field input{{width:100%;padding:10px 12px;background:#1a1a1a;border:1px solid #2a2a2a;border-radius:8px;color:#e2e8f0;font-size:14px;outline:none;color-scheme:dark}}
+.field input:focus{{border-color:#555}}
+.field input:-webkit-autofill{{-webkit-box-shadow:0 0 0 30px #1a1a1a inset !important;-webkit-text-fill-color:#e2e8f0 !important;border-color:#2a2a2a !important}}
+.btn{{width:100%;padding:12px;background:#222;color:#e2e8f0;border:1px solid #333;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;margin-top:8px}}
+.btn:hover{{background:#333}}
+.error{{color:#ef4444;font-size:13px;margin-bottom:12px;{err_style}}}
 </style></head><body>
 <form class="login-card" method="POST" action="/login">
+<input type="hidden" name="csrf" value="{csrf_token}">
 <h1>Claude RC</h1><p>Session Launcher</p>
-<div class="error" id="err">Invalid credentials</div>
+<div class="error">{err_msg}</div>
 <div class="field"><label>Username</label><input name="user" type="text" autofocus required></div>
 <div class="field"><label>Password</label><input name="pass" type="password" required></div>
 <button type="submit" class="btn">Sign In</button>
 </form>
-<script>if(location.search.includes('err=1'))document.getElementById('err').style.display='block'</script>
 </body></html>"""
 
 
@@ -213,7 +243,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
         # Login/logout routes — no auth required
         raw_path = self.path.split('?')[0]
         if raw_path in ("/login", "/rc/login"):
-            return self._html(_LOGIN_HTML)
+            csrf = secrets.token_hex(16)
+            error = "Invalid credentials" if "err=1" in self.path else ""
+            if "err=2" in self.path:
+                error = "Too many attempts. Try again later."
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Cache-Control", "no-cache, must-revalidate")
+            self.send_header("Set-Cookie", f"csrf={csrf}; Path=/; HttpOnly; SameSite=Strict")
+            self.end_headers()
+            self.wfile.write(_login_html(csrf, error).encode())
+            return
         if raw_path in ("/logout", "/rc/logout"):
             cookie_header = self.headers.get("Cookie", "")
             if cookie_header:
@@ -363,12 +403,34 @@ class Handler(http.server.BaseHTTPRequestHandler):
         # Login route — no auth required
         raw_path = self.path.split('?')[0]
         if raw_path in ("/login", "/rc/login"):
+            client_ip = self.headers.get("X-Real-IP", self.client_address[0])
+            # Rate limiting
+            if _is_rate_limited(client_ip):
+                self.send_response(302)
+                self.send_header("Location", "/login?err=2")
+                self.end_headers()
+                return
             length = int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(length).decode("utf-8") if length else ""
             params = dict(p.split("=", 1) for p in body.split("&") if "=" in p)
             from urllib.parse import unquote_plus
             user = unquote_plus(params.get("user", ""))
             password = unquote_plus(params.get("pass", ""))
+            csrf_form = unquote_plus(params.get("csrf", ""))
+            # Validate CSRF token from cookie
+            csrf_ok = False
+            cookie_header = self.headers.get("Cookie", "")
+            if cookie_header:
+                cookie = SimpleCookie()
+                cookie.load(cookie_header)
+                if "csrf" in cookie and hmac.compare_digest(cookie["csrf"].value, csrf_form):
+                    csrf_ok = True
+            if not csrf_ok:
+                _record_failed_login(client_ip)
+                self.send_response(302)
+                self.send_header("Location", "/login?err=1")
+                self.end_headers()
+                return
             if (AUTH_USER and AUTH_PASS and
                     hmac.compare_digest(user, AUTH_USER) and
                     hmac.compare_digest(password, AUTH_PASS)):
@@ -379,8 +441,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 secure = "Secure; " if self.headers.get("X-Forwarded-Proto") == "https" else ""
                 self.send_header("Set-Cookie",
                     f"rc_session={token}; Path=/; HttpOnly; SameSite=Lax; {secure}Max-Age=604800")
+                # Clear CSRF cookie
+                self.send_header("Set-Cookie", "csrf=; Path=/; Max-Age=0; HttpOnly")
                 self.end_headers()
             else:
+                _record_failed_login(client_ip)
                 self.send_response(302)
                 self.send_header("Location", "/login?err=1")
                 self.end_headers()

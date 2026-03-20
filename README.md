@@ -205,6 +205,45 @@ Edit `~/.claude-rc/env`:
 - **Teammate** — skip permissions + teammate mode
 - **Safe** — normal permission checks apply
 
+## Security
+
+- **Login page** with cookie-based sessions (no browser Basic Auth dialogs)
+- **CSRF protection** on the login form (double-submit cookie pattern)
+- **Rate limiting** — 5 failed login attempts per IP locks out for 15 minutes
+- **HttpOnly, SameSite cookies** — session tokens can't be read by JavaScript or sent cross-site
+- **Basic Auth fallback** — still works for curl/API access
+- Credentials stored in `~/.claude-rc/env` with restricted file permissions (600)
+- Always use HTTPS in production (via Cloudflare Tunnel or nginx reverse proxy with SSL)
+
+### Post-Installation Checklist
+
+1. Change default credentials: edit `~/.claude-rc/env` and restart the service
+2. Set up HTTPS: use the **Share** button (Cloudflare Tunnel) or put behind an nginx reverse proxy with SSL
+3. (Optional) Install [playwright-cli](https://www.npmjs.com/package/@anthropic-ai/claude-code-playwright) for browser automation in scheduled tasks
+4. (Optional) Set up [Vaultwarden](https://github.com/dani-garcia/vaultwarden) for secure credential management in automated tasks
+
+## Optional Integrations
+
+### Browser Automation (playwright-cli)
+
+For scheduled tasks that involve browser automation (job applications, web scraping, form filling):
+
+```bash
+npm install -g @anthropic-ai/claude-code-playwright
+```
+
+The launcher itself does **not** require playwright-cli — only scheduled tasks that automate browsers need it. See the [Browser Automation](#browser-automation) section above for details.
+
+### Credential Management (Vaultwarden / Bitwarden)
+
+For scheduled tasks that need to log into external services, we recommend using a self-hosted credential vault instead of hardcoding passwords:
+
+- **[Vaultwarden](https://github.com/dani-garcia/vaultwarden)** — lightweight self-hosted Bitwarden server
+- Use the `bw` CLI to fetch credentials at runtime: `bw get password "ServiceName"`
+- This keeps secrets out of task instructions and version control
+
+Not required for the launcher itself — only for automated tasks that interact with authenticated services.
+
 ## Uninstall
 
 ```bash
