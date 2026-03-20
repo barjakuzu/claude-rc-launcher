@@ -392,10 +392,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     latest = Handler._update_cache.get('latest')
             except Exception:
                 pass
+            # Compare semver: update only if latest > current
+            update_available = False
+            if latest and latest != VERSION:
+                try:
+                    cur = tuple(int(x) for x in VERSION.split('.'))
+                    lat = tuple(int(x) for x in latest.split('.'))
+                    update_available = lat > cur
+                except (ValueError, TypeError):
+                    update_available = False
             self._json({
                 "current": VERSION,
                 "latest": latest,
-                "update_available": latest is not None and latest != VERSION,
+                "update_available": update_available,
             })
 
         elif path == "/schedules":
