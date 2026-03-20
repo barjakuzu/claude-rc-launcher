@@ -627,7 +627,12 @@ function formatRunTimestamp(iso) {
 
 function renderRunResults(runs, jobName) {
   if (!runs || runs.length === 0) return '';
-  var html = '<div class="run-results"><div class="run-results-title">Recent Runs</div>';
+  var id = 'runs-' + jobName.replace(/[^a-zA-Z0-9]/g, '-');
+  var html = '<div class="run-results">' +
+    '<div class="run-results-title" onclick="toggleRuns(\'' + id + '\', this)" style="cursor:pointer">' +
+      '<span class="run-toggle" id="toggle-' + id + '">\u25B6</span> Recent Runs (' + runs.length + ')' +
+    '</div>' +
+    '<div class="run-results-body" id="' + id + '" style="display:none">';
   runs.forEach(function(run, i) {
     run = normalizeRun(run);
     run._jobName = jobName;
@@ -646,8 +651,21 @@ function renderRunResults(runs, jobName) {
       '<button class="btn-sm btn-run-view" onclick="showRunDetail(\'' + escHtml(jobName.replace(/'/g, "\\'")) + '\', \'' + escHtml(viewRef.replace(/'/g, "\\'")) + '\')">View</button>' +
     '</div>';
   });
-  html += '</div>';
+  html += '</div></div>';
   return html;
+}
+
+function toggleRuns(id, titleEl) {
+  var body = document.getElementById(id);
+  var toggle = document.getElementById('toggle-' + id);
+  if (!body) return;
+  if (body.style.display === 'none') {
+    body.style.display = 'block';
+    if (toggle) toggle.textContent = '\u25BC';
+  } else {
+    body.style.display = 'none';
+    if (toggle) toggle.textContent = '\u25B6';
+  }
 }
 
 async function loadRunsForSchedule(scheduleName) {
