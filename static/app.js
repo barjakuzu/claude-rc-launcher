@@ -1282,11 +1282,29 @@ function checkForUpdate() {
   api('GET', '/update-check').then(function(d) {
     if (!el) return;
     if (d.update_available) {
-      el.innerHTML = '<a href="https://github.com/barjakuzu/claude-rc-launcher/releases" target="_blank" class="update-available">v' + escHtml(d.latest) + ' available</a>';
+      el.innerHTML = '<button class="update-available" onclick="doUpdate()">v' + escHtml(d.latest) + ' \u2014 Update</button>';
     } else {
       el.innerHTML = '<span class="update-current">up to date</span>';
       setTimeout(function() { el.innerHTML = ''; }, 5000);
     }
   }).catch(function() { if (el) el.innerHTML = ''; });
 }
+
+async function doUpdate() {
+  var el = document.getElementById('update-status');
+  if (el) el.innerHTML = '<span class="update-checking">updating\u2026</span>';
+  try {
+    var d = await api('POST', '/update');
+    if (d.ok) {
+      if (el) el.innerHTML = '<span class="update-current">' + escHtml(d.message) + '</span>';
+      setTimeout(function() { window.location.reload(); }, 3000);
+    } else {
+      if (el) el.innerHTML = '<span class="update-error">' + escHtml(d.message) + '</span>';
+    }
+  } catch(e) {
+    // Server restarting — reload after a moment
+    setTimeout(function() { window.location.reload(); }, 3000);
+  }
+}
+
 checkForUpdate();

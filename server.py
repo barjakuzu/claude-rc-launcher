@@ -372,15 +372,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._json({"version": VERSION})
 
         elif path == "/update-check":
-            # Check latest version from GitHub (cached for 1 hour)
+            # Check latest version from GitHub API (cached for 10 min)
             import urllib.request
             latest = None
             try:
                 if not hasattr(Handler, '_update_cache') or \
-                        time.time() - Handler._update_cache.get('ts', 0) > 3600:
+                        time.time() - Handler._update_cache.get('ts', 0) > 600:
                     req = urllib.request.Request(
-                        "https://raw.githubusercontent.com/barjakuzu/claude-rc-launcher/main/config.py",
-                        headers={"User-Agent": "claude-rc-launcher"},
+                        "https://api.github.com/repos/barjakuzu/claude-rc-launcher/contents/config.py",
+                        headers={"User-Agent": "claude-rc-launcher",
+                                 "Accept": "application/vnd.github.v3.raw"},
                     )
                     with urllib.request.urlopen(req, timeout=5) as resp:
                         for line in resp.read().decode().splitlines():
@@ -663,6 +664,42 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._json({"ok": True, "message": "Deleted"})
             else:
                 self._json({"ok": False, "message": "Schedule not found"}, 404)
+
+        elif path == "/update":
+            # Pull latest code from git and restart the service
+            app_dir = os.path.dirname(os.path.abspath(__file__))
+            git_dir = os.path.join(app_dir, ".git")
+            if not os.path.isdir(git_dir):
+                self._json({"ok": False, "message": "Not a git install. Re-run the install script."}, 400)
+                return
+            # Get old version
+            old_ver = VERSION
+            # Git pull
+            result = subprocess.run(
+                ["git", "-C", app_dir, "pull", "--ff-only"],
+                capture_output=True, text=True, timeout=30,
+            )
+            if result.returncode != 0:
+                self._json({"ok": False, "message": f"git pull failed: {result.stderr.strip()}"}, 500)
+                return
+            # Read new version
+            new_ver = old_ver
+            try:
+                cfg_path = os.path.join(app_dir, "config.py")
+                with open(cfg_path) as f:
+                    for line in f:
+                        if line.startswith("VERSION"):
+                            new_ver = line.split('"')[1]
+                            break
+            except Exception:
+                pass
+            self._json({"ok": True, "old": old_ver, "new": new_ver,
+                         "message": f"Updated {old_ver} → {new_ver}. Restarting..."})
+            # Schedule restart in background so the response gets sent first
+            def _restart():
+                time.sleep(1)
+                os.execv("/usr/bin/systemctl", ["systemctl", "restart", "claude-rc-launcher"])
+            threading.Thread(target=_restart, daemon=True).start()
 
         elif path == "/schedules/fire":
             body = self._read_body()
