@@ -1,399 +1,470 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Claude RC Launcher</title>
-<link rel="stylesheet" href="static/style.css?v=18">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Claude RC Launcher</title>
+  <link rel="stylesheet" href="static/style.css?v=18">
 </head>
+
 <body>
-<div class="toast-container" id="toast-container"></div>
-<div class="container">
-  <div class="logo">
-    <h1>Claude RC</h1>
-    <div class="subtitle">Session Launcher <span id="version-label-top" class="version-inline"></span> <span id="update-status" class="update-status"></span></div>
-  </div>
-  <a href="/logout" class="logout-btn" title="Logout">Logout</a>
-
-  <div class="col-left">
-  <div class="tab-content active" id="tab-launch">
-  <div class="card">
-    <div class="section-title" style="margin-bottom:1rem;">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5,3 19,12 5,21 5,3"/></svg>
-      Launch New Session
+  <div class="toast-container" id="toast-container"></div>
+  <div class="container">
+    <div class="logo">
+      <h1>Claude RC</h1>
+      <div class="subtitle">Session Launcher <span id="version-label-top" class="version-inline"></span> <span
+          id="update-status" class="update-status"></span></div>
     </div>
-    <div class="form-group" id="project-group">
-      <label>Working Directory</label>
-      <div id="project-select-wrap" class="select-wrap" style="display:none;">
-        <select id="project-select" class="custom-select" onchange="onProjectChange()"></select>
-        <span class="select-arrow"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg></span>
-      </div>
-      <div id="dir-browser-wrap" class="dir-browser-wrap" style="display:none;">
-        <input type="text" id="dir-browser-input" class="dir-browser-input" readonly onclick="toggleBrowser('launch')" />
-        <div id="dir-browser" class="dir-browser">
-          <div id="dir-breadcrumb" class="dir-breadcrumb"></div>
-          <div id="dir-list" class="dir-list"></div>
-          <button class="dir-select-btn" onclick="selectDir('launch')">Use this folder</button>
+    <a href="/logout" class="logout-btn" title="Logout">Logout</a>
+
+    <div class="col-left">
+      <div class="tab-content active" id="tab-launch">
+        <div class="card">
+          <div class="section-title" style="margin-bottom:1rem;">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polygon points="5,3 19,12 5,21 5,3" />
+            </svg>
+            Launch New Session :)
+          </div>
+          <div class="form-group" id="project-group">
+            <label>Working Directory</label>
+            <div id="project-select-wrap" class="select-wrap" style="display:none;">
+              <select id="project-select" class="custom-select" onchange="onProjectChange()"></select>
+              <span class="select-arrow"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M6 9l6 6 6-6" />
+                </svg></span>
+            </div>
+            <div id="dir-browser-wrap" class="dir-browser-wrap" style="display:none;">
+              <input type="text" id="dir-browser-input" class="dir-browser-input" readonly
+                onclick="toggleBrowser('launch')" />
+              <div id="dir-browser" class="dir-browser">
+                <div id="dir-breadcrumb" class="dir-breadcrumb"></div>
+                <div id="dir-list" class="dir-list"></div>
+                <button class="dir-select-btn" onclick="selectDir('launch')">Use this folder</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label for="session-name">Session Name</label>
+            <input type="text" id="session-name" placeholder="" />
+          </div>
+
+          <div class="form-group">
+            <label>Launch Mode</label>
+            <div class="mode-radios" id="mode-radios">
+              <label class="mode-radio selected" data-mode="c" onclick="selectMode('c')">
+                <input type="radio" name="launch-mode" value="c" checked hidden>
+                <span class="mode-radio-dot"></span>
+                <div class="mode-radio-content">
+                  <strong>Standard RC</strong>
+                  <span>Unrestricted mode, skip permissions and approval prompts.</span>
+                </div>
+              </label>
+              <label class="mode-radio" data-mode="ci" onclick="selectMode('ci')">
+                <input type="radio" name="launch-mode" value="ci" hidden>
+                <span class="mode-radio-dot"></span>
+                <div class="mode-radio-content">
+                  <strong>Teammate</strong>
+                  <span>In-process teammate mode, skip permissions. Best for collaborative tasks.</span>
+                </div>
+              </label>
+              <label class="mode-radio" data-mode="safe" onclick="selectMode('safe')">
+                <input type="radio" name="launch-mode" value="safe" hidden>
+                <span class="mode-radio-dot"></span>
+                <div class="mode-radio-content">
+                  <strong>Safe Mode</strong>
+                  <span>Standard permissions with approval prompts. Safer defaults for untrusted workspaces.</span>
+                </div>
+              </label>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label for="model-select">Model</label>
+            <div class="select-wrap">
+              <select id="model-select" class="custom-select">
+                <option value="">Default (Opus 4.6)</option>
+                <option value="2">Sonnet 4.6</option>
+                <option value="3">Haiku 4.5</option>
+              </select>
+              <span class="select-arrow"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M6 9l6 6 6-6" />
+                </svg></span>
+            </div>
+          </div>
+
+          <button class="btn-launch mode-c" id="btn-launch" onclick="startSession()">
+            <svg viewBox="0 0 24 24" fill="currentColor">
+              <path d="M8 5v14l11-7z" />
+            </svg>
+            Launch Session
+          </button>
         </div>
       </div>
-    </div>
 
-    <div class="form-group">
-      <label for="session-name">Session Name</label>
-      <input type="text" id="session-name" placeholder="" />
-    </div>
-
-    <div class="form-group">
-      <label>Launch Mode</label>
-      <div class="mode-radios" id="mode-radios">
-        <label class="mode-radio selected" data-mode="c" onclick="selectMode('c')">
-          <input type="radio" name="launch-mode" value="c" checked hidden>
-          <span class="mode-radio-dot"></span>
-          <div class="mode-radio-content">
-            <strong>Standard RC</strong>
-            <span>Unrestricted mode, skip permissions and approval prompts.</span>
-          </div>
-        </label>
-        <label class="mode-radio" data-mode="ci" onclick="selectMode('ci')">
-          <input type="radio" name="launch-mode" value="ci" hidden>
-          <span class="mode-radio-dot"></span>
-          <div class="mode-radio-content">
-            <strong>Teammate</strong>
-            <span>In-process teammate mode, skip permissions. Best for collaborative tasks.</span>
-          </div>
-        </label>
-        <label class="mode-radio" data-mode="safe" onclick="selectMode('safe')">
-          <input type="radio" name="launch-mode" value="safe" hidden>
-          <span class="mode-radio-dot"></span>
-          <div class="mode-radio-content">
-            <strong>Safe Mode</strong>
-            <span>Standard permissions with approval prompts. Safer defaults for untrusted workspaces.</span>
-          </div>
-        </label>
+      <div class="tab-content" id="tab-remote">
+        <div id="share-section"></div>
+        <div class="version" id="version-label"></div>
       </div>
     </div>
 
-    <div class="form-group">
-      <label for="model-select">Model</label>
-      <div class="select-wrap">
-        <select id="model-select" class="custom-select">
-          <option value="">Default (Opus 4.6)</option>
-          <option value="2">Sonnet 4.6</option>
-          <option value="3">Haiku 4.5</option>
-        </select>
-        <span class="select-arrow"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg></span>
+    <div class="col-right">
+      <!-- Desktop workspace chrome -->
+      <div class="workspace-bar">
+        <div class="workspace-header">
+          <div class="section-title">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="2" y="3" width="20" height="14" rx="2" />
+              <path d="M8 21h8M12 17v4" />
+            </svg>
+            Workspace
+            <span class="session-count-badge count-badge" style="display:none;"></span>
+          </div>
+          <div class="sessions-header-actions">
+            <button class="btn-resume" onclick="openResumeModal()">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M1 4v6h6" />
+                <path d="M3.51 15a9 9 0 102.13-9.36L1 10" />
+              </svg>
+              Resume
+            </button>
+            <button class="btn-stop-all-btn btn-stop" style="display:none;" onclick="stopAll()">
+              <svg viewBox="0 0 24 24" fill="currentColor">
+                <rect x="6" y="6" width="12" height="12" rx="1" />
+              </svg>
+              Stop All
+            </button>
+          </div>
+        </div>
+        <div class="workspace-tabs">
+          <button class="ws-tab active" data-ws="sessions" onclick="switchWsTab('sessions')">Running Sessions</button>
+          <button class="ws-tab" data-ws="schedules" onclick="switchWsTab('schedules')">Scheduled Tasks</button>
+        </div>
+      </div>
+
+      <div class="tab-content ws-active" id="tab-sessions">
+        <div class="sessions-header mobile-header">
+          <div class="section-title">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="2" y="3" width="20" height="14" rx="2" />
+              <path d="M8 21h8M12 17v4" />
+            </svg>
+            Running Sessions
+            <span class="session-count-badge count-badge" style="display:none;"></span>
+          </div>
+          <div class="sessions-header-actions">
+            <button class="btn-resume" onclick="openResumeModal()">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M1 4v6h6" />
+                <path d="M3.51 15a9 9 0 102.13-9.36L1 10" />
+              </svg>
+              Resume
+            </button>
+            <button class="btn-stop-all-btn btn-stop" style="display:none;" onclick="stopAll()">
+              <svg viewBox="0 0 24 24" fill="currentColor">
+                <rect x="6" y="6" width="12" height="12" rx="1" />
+              </svg>
+              Stop All
+            </button>
+          </div>
+        </div>
+        <div id="sessions"></div>
+      </div>
+
+      <div class="tab-content" id="tab-schedules">
+        <div id="schedules-header" class="sessions-header mobile-header">
+          <div class="section-title">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="12" cy="12" r="10" />
+              <path d="M12 6v6l4 2" />
+            </svg>
+            Scheduled Tasks
+          </div>
+          <button class="btn-sm btn-edit" onclick="openNewSchedule()">+ Add</button>
+        </div>
+        <div class="sched-add-desktop">
+          <button class="btn-sm btn-edit" onclick="openNewSchedule()">+ Add</button>
+        </div>
+        <div id="schedules"></div>
       </div>
     </div>
+  </div>
 
-    <button class="btn-launch mode-c" id="btn-launch" onclick="startSession()">
-      <svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
-      Launch Session
+  <nav class="tab-bar">
+    <button class="tab-btn active" data-tab="launch" onclick="switchTab('launch')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <polygon points="13,2 3,14 12,14 11,22 21,10 12,10 13,2" />
+      </svg>
+      Launch
     </button>
-  </div>
-  </div>
+    <button class="tab-btn" data-tab="sessions" onclick="switchTab('sessions')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <rect x="2" y="3" width="20" height="14" rx="2" />
+        <path d="M8 21h8M12 17v4" />
+      </svg>
+      Sessions
+    </button>
+    <button class="tab-btn" data-tab="schedules" onclick="switchTab('schedules')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <circle cx="12" cy="12" r="10" />
+        <path d="M12 6v6l4 2" />
+      </svg>
+      Schedules
+    </button>
+    <button class="tab-btn" data-tab="remote" onclick="switchTab('remote')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <circle cx="12" cy="12" r="10" />
+        <path d="M2 12h20M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z" />
+      </svg>
+      Remote
+    </button>
+  </nav>
 
-  <div class="tab-content" id="tab-remote">
-  <div id="share-section"></div>
-  <div class="version" id="version-label"></div>
-  </div>
-  </div>
-
-  <div class="col-right">
-  <!-- Desktop workspace chrome -->
-  <div class="workspace-bar">
-    <div class="workspace-header">
-      <div class="section-title">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
-        Workspace
-        <span class="session-count-badge count-badge" style="display:none;"></span>
-      </div>
-      <div class="sessions-header-actions">
-        <button class="btn-resume" onclick="openResumeModal()">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 4v6h6"/><path d="M3.51 15a9 9 0 102.13-9.36L1 10"/></svg>
-          Resume
-        </button>
-        <button class="btn-stop-all-btn btn-stop" style="display:none;" onclick="stopAll()">
-          <svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="1"/></svg>
-          Stop All
-        </button>
-      </div>
-    </div>
-    <div class="workspace-tabs">
-      <button class="ws-tab active" data-ws="sessions" onclick="switchWsTab('sessions')">Running Sessions</button>
-      <button class="ws-tab" data-ws="schedules" onclick="switchWsTab('schedules')">Scheduled Tasks</button>
-    </div>
-  </div>
-
-  <div class="tab-content ws-active" id="tab-sessions">
-  <div class="sessions-header mobile-header">
-    <div class="section-title">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
-      Running Sessions
-      <span class="session-count-badge count-badge" style="display:none;"></span>
-    </div>
-    <div class="sessions-header-actions">
-      <button class="btn-resume" onclick="openResumeModal()">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 4v6h6"/><path d="M3.51 15a9 9 0 102.13-9.36L1 10"/></svg>
-        Resume
-      </button>
-      <button class="btn-stop-all-btn btn-stop" style="display:none;" onclick="stopAll()">
-        <svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="1"/></svg>
-        Stop All
-      </button>
-    </div>
-  </div>
-  <div id="sessions"></div>
-  </div>
-
-  <div class="tab-content" id="tab-schedules">
-  <div id="schedules-header" class="sessions-header mobile-header">
-    <div class="section-title">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
-      Scheduled Tasks
-    </div>
-    <button class="btn-sm btn-edit" onclick="openNewSchedule()">+ Add</button>
-  </div>
-  <div class="sched-add-desktop">
-    <button class="btn-sm btn-edit" onclick="openNewSchedule()">+ Add</button>
-  </div>
-  <div id="schedules"></div>
-  </div>
-  </div>
-</div>
-
-<nav class="tab-bar">
-  <button class="tab-btn active" data-tab="launch" onclick="switchTab('launch')">
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="13,2 3,14 12,14 11,22 21,10 12,10 13,2"/></svg>
-    Launch
-  </button>
-  <button class="tab-btn" data-tab="sessions" onclick="switchTab('sessions')">
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
-    Sessions
-  </button>
-  <button class="tab-btn" data-tab="schedules" onclick="switchTab('schedules')">
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
-    Schedules
-  </button>
-  <button class="tab-btn" data-tab="remote" onclick="switchTab('remote')">
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z"/></svg>
-    Remote
-  </button>
-</nav>
-
-<!-- Schedule Modal -->
-<div id="schedule-modal" class="modal-overlay" style="display:none;" onclick="if(event.target===this)closeModal()">
-  <div class="modal">
-    <h3 id="modal-title">New Schedule</h3>
-    <div class="form-group">
-      <label>Task Name</label>
-      <input type="text" id="sched-name" placeholder="Daily job applications" />
-    </div>
-    <div class="form-group">
-      <label>Schedule</label>
-      <div class="select-wrap" style="margin-bottom:0.4rem;">
-        <select id="sched-cron-preset" class="custom-select" onchange="applyCronPreset()">
-          <option value="">Custom cron expression</option>
-          <option value="* * * * *">Every minute</option>
-          <option value="*/5 * * * *">Every 5 minutes</option>
-          <option value="*/15 * * * *">Every 15 minutes</option>
-          <option value="*/30 * * * *">Every 30 minutes</option>
-          <option value="0 * * * *">Every hour</option>
-          <option value="0 */2 * * *">Every 2 hours</option>
-          <option value="0 */6 * * *">Every 6 hours</option>
-          <option value="0 9 * * *">Daily at 9:00 AM</option>
-          <option value="0 12 * * *">Daily at noon</option>
-          <option value="0 0 * * *">Daily at midnight</option>
-          <option value="0 9 * * 1-5">Weekdays at 9:00 AM</option>
-          <option value="0 9 * * 1">Weekly on Monday at 9:00 AM</option>
-          <option value="0 0 1 * *">Monthly on the 1st</option>
-        </select>
-        <span class="select-arrow"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg></span>
-      </div>
-      <input type="text" id="sched-cron" class="input-mono" placeholder="0 9 * * 1-5" oninput="updateCronPreview(); document.getElementById('sched-cron-preset').value='';" />
-      <div class="cron-preview" id="cron-preview"></div>
-    </div>
-    <div class="form-group">
-      <label>Working Directory</label>
-      <div id="sched-project-wrap" class="select-wrap" style="display:none;">
-        <select id="sched-project-select" class="custom-select" onchange="onSchedProjectChange()"></select>
-        <span class="select-arrow"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg></span>
-      </div>
-      <div id="sched-dir-browser-wrap" class="dir-browser-wrap" style="display:none;">
-        <input type="text" id="sched-dir-browser-input" class="dir-browser-input" readonly onclick="toggleBrowser('sched')" />
-        <div id="sched-dir-browser" class="dir-browser">
-          <div id="sched-dir-breadcrumb" class="dir-breadcrumb"></div>
-          <div id="sched-dir-list" class="dir-list"></div>
-          <button class="dir-select-btn" onclick="selectDir('sched')">Use this folder</button>
-        </div>
-      </div>
-      <input type="text" id="sched-workdir" placeholder="/home/user/project" />
-    </div>
-    <div class="form-group">
-      <label>Launch Mode</label>
-      <div class="select-wrap">
-        <select id="sched-mode" class="custom-select">
-          <option value="c">Standard RC / skip permissions</option>
-          <option value="ci">Teammate (in-process) / skip permissions</option>
-          <option value="safe">Standard RC / with permissions</option>
-        </select>
-        <span class="select-arrow"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg></span>
-      </div>
-    </div>
-    <div class="form-group">
-      <label>Model</label>
-      <div class="select-wrap">
-        <select id="sched-model" class="custom-select">
-          <option value="">Default (Opus 4.6)</option>
-          <option value="2">Sonnet 4.6</option>
-          <option value="3">Haiku 4.5</option>
-        </select>
-        <span class="select-arrow"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg></span>
-      </div>
-    </div>
-    <div class="form-group">
-      <label>Prompt / Instructions</label>
-      <textarea id="sched-prompt" rows="5" placeholder="What should Claude do when this schedule fires?"></textarea>
-    </div>
-    <div class="form-group">
-      <label>Instructions File <span style="color:#475569;font-weight:400;text-transform:none;">(optional, overrides prompt)</span></label>
-      <input type="text" id="sched-file" placeholder="/path/to/instructions.md" />
-    </div>
-    <div class="modal-actions">
-      <button class="btn-modal-cancel" onclick="closeModal()">Cancel</button>
-      <button class="btn-modal-save" onclick="saveSchedule()">Save</button>
-    </div>
-  </div>
-</div>
-
-<!-- Wizard Modal -->
-<div id="wizard-modal" class="modal-overlay" style="display:none;" onclick="if(event.target===this)closeWizard()">
-  <div class="modal">
-    <h3>New Scheduled Task</h3>
-    <div class="wizard-steps">
-      <div class="wizard-dot active" id="wdot-0"></div>
-      <div class="wizard-dot" id="wdot-1"></div>
-      <div class="wizard-dot" id="wdot-2"></div>
-      <div class="wizard-dot" id="wdot-3"></div>
-    </div>
-
-    <div class="wizard-step active" id="wstep-0">
-      <h4>What should Claude do?</h4>
+  <!-- Schedule Modal -->
+  <div id="schedule-modal" class="modal-overlay" style="display:none;" onclick="if(event.target===this)closeModal()">
+    <div class="modal">
+      <h3 id="modal-title">New Schedule</h3>
       <div class="form-group">
-        <textarea id="wiz-description" rows="4" placeholder="e.g. Apply to jobs on LinkedIn, Check server health and fix issues, Review PRs and leave feedback"></textarea>
+        <label>Task Name</label>
+        <input type="text" id="sched-name" placeholder="Daily job applications" />
       </div>
-      <div class="wizard-nav">
-        <button class="btn-modal-cancel" onclick="closeWizard()">Cancel</button>
-        <button class="btn-wizard-next" onclick="wizardNext()" id="wiz-next-0">Next</button>
+      <div class="form-group">
+        <label>Schedule</label>
+        <div class="select-wrap" style="margin-bottom:0.4rem;">
+          <select id="sched-cron-preset" class="custom-select" onchange="applyCronPreset()">
+            <option value="">Custom cron expression</option>
+            <option value="* * * * *">Every minute</option>
+            <option value="*/5 * * * *">Every 5 minutes</option>
+            <option value="*/15 * * * *">Every 15 minutes</option>
+            <option value="*/30 * * * *">Every 30 minutes</option>
+            <option value="0 * * * *">Every hour</option>
+            <option value="0 */2 * * *">Every 2 hours</option>
+            <option value="0 */6 * * *">Every 6 hours</option>
+            <option value="0 9 * * *">Daily at 9:00 AM</option>
+            <option value="0 12 * * *">Daily at noon</option>
+            <option value="0 0 * * *">Daily at midnight</option>
+            <option value="0 9 * * 1-5">Weekdays at 9:00 AM</option>
+            <option value="0 9 * * 1">Weekly on Monday at 9:00 AM</option>
+            <option value="0 0 1 * *">Monthly on the 1st</option>
+          </select>
+          <span class="select-arrow"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M6 9l6 6 6-6" />
+            </svg></span>
+        </div>
+        <input type="text" id="sched-cron" class="input-mono" placeholder="0 9 * * 1-5"
+          oninput="updateCronPreview(); document.getElementById('sched-cron-preset').value='';" />
+        <div class="cron-preview" id="cron-preview"></div>
       </div>
-    </div>
-
-    <div class="wizard-step" id="wstep-1">
-      <h4>How often?</h4>
-      <div class="preset-grid" id="wiz-preset-grid"></div>
-      <div class="wizard-nav">
-        <button class="btn-wizard-back" onclick="wizardBack()">Back</button>
-        <button class="btn-wizard-next" onclick="wizardNext()" id="wiz-next-1">Next</button>
-      </div>
-    </div>
-
-    <div class="wizard-step" id="wstep-2">
-      <h4>Where?</h4>
       <div class="form-group">
         <label>Working Directory</label>
-        <div id="wiz-project-wrap" class="select-wrap" style="display:none;">
-          <select id="wiz-project-select" class="custom-select" onchange="onWizProjectChange()"></select>
-          <span class="select-arrow"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg></span>
+        <div id="sched-project-wrap" class="select-wrap" style="display:none;">
+          <select id="sched-project-select" class="custom-select" onchange="onSchedProjectChange()"></select>
+          <span class="select-arrow"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M6 9l6 6 6-6" />
+            </svg></span>
         </div>
-        <div id="wiz-dir-browser-wrap" class="dir-browser-wrap" style="display:none;">
-          <input type="text" id="wiz-dir-browser-input" class="dir-browser-input" readonly onclick="toggleBrowser('wiz')" />
-          <div id="wiz-dir-browser" class="dir-browser">
-            <div id="wiz-dir-breadcrumb" class="dir-breadcrumb"></div>
-            <div id="wiz-dir-list" class="dir-list"></div>
-            <button class="dir-select-btn" onclick="selectDir('wiz')">Use this folder</button>
+        <div id="sched-dir-browser-wrap" class="dir-browser-wrap" style="display:none;">
+          <input type="text" id="sched-dir-browser-input" class="dir-browser-input" readonly
+            onclick="toggleBrowser('sched')" />
+          <div id="sched-dir-browser" class="dir-browser">
+            <div id="sched-dir-breadcrumb" class="dir-breadcrumb"></div>
+            <div id="sched-dir-list" class="dir-list"></div>
+            <button class="dir-select-btn" onclick="selectDir('sched')">Use this folder</button>
           </div>
         </div>
-        <input type="text" id="wiz-workdir" placeholder="/home/user/project" />
+        <input type="text" id="sched-workdir" placeholder="/home/user/project" />
       </div>
       <div class="form-group">
         <label>Launch Mode</label>
         <div class="select-wrap">
-          <select id="wiz-mode" class="custom-select">
+          <select id="sched-mode" class="custom-select">
             <option value="c">Standard RC / skip permissions</option>
             <option value="ci">Teammate (in-process) / skip permissions</option>
             <option value="safe">Standard RC / with permissions</option>
           </select>
-          <span class="select-arrow"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg></span>
+          <span class="select-arrow"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M6 9l6 6 6-6" />
+            </svg></span>
         </div>
       </div>
       <div class="form-group">
-        <label>Task Name</label>
-        <input type="text" id="wiz-name" placeholder="Auto-generated from description" />
+        <label>Model</label>
+        <div class="select-wrap">
+          <select id="sched-model" class="custom-select">
+            <option value="">Default (Opus 4.6)</option>
+            <option value="2">Sonnet 4.6</option>
+            <option value="3">Haiku 4.5</option>
+          </select>
+          <span class="select-arrow"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M6 9l6 6 6-6" />
+            </svg></span>
+        </div>
       </div>
-      <div class="wizard-nav">
-        <button class="btn-wizard-back" onclick="wizardBack()">Back</button>
-        <button class="btn-wizard-create" onclick="wizardCreate()" id="wiz-create-btn">
-          <svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
-          Create with Claude
-        </button>
+      <div class="form-group">
+        <label>Prompt / Instructions</label>
+        <textarea id="sched-prompt" rows="5" placeholder="What should Claude do when this schedule fires?"></textarea>
       </div>
-    </div>
-
-    <div class="wizard-step" id="wstep-3">
-      <div class="wizard-ready">
-        <div class="ready-icon">&check;</div>
-        <h4>Session ready</h4>
-        <p>Open the session below to refine your task prompt with Claude. Once you're happy, Claude will save the schedule for you.</p>
-        <div class="session-url" id="wiz-session-url" style="text-align:left;"></div>
-        <a id="wiz-open-link" class="btn-wizard-open" href="#" target="_blank">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
-          Open Session
-        </a>
+      <div class="form-group">
+        <label>Instructions File <span style="color:#475569;font-weight:400;text-transform:none;">(optional, overrides
+            prompt)</span></label>
+        <input type="text" id="sched-file" placeholder="/path/to/instructions.md" />
       </div>
-      <div class="wizard-nav" style="margin-top:1.5rem;">
-        <button class="btn-modal-cancel" onclick="closeWizard();refresh();">Done</button>
+      <div class="modal-actions">
+        <button class="btn-modal-cancel" onclick="closeModal()">Cancel</button>
+        <button class="btn-modal-save" onclick="saveSchedule()">Save</button>
       </div>
     </div>
   </div>
-</div>
 
-<!-- Resume Modal -->
-<div id="resume-modal" class="modal-overlay" style="display:none;" onclick="if(event.target===this)closeResumeModal()">
-  <div class="modal resume-modal">
-    <h3>Resume Past Session</h3>
-    <div id="resume-list" class="resume-list">
-      <div class="empty">Loading...</div>
-    </div>
-    <div class="modal-actions">
-      <button class="btn-modal-cancel" onclick="closeResumeModal()">Close</button>
-    </div>
-  </div>
-</div>
+  <!-- Wizard Modal -->
+  <div id="wizard-modal" class="modal-overlay" style="display:none;" onclick="if(event.target===this)closeWizard()">
+    <div class="modal">
+      <h3>New Scheduled Task</h3>
+      <div class="wizard-steps">
+        <div class="wizard-dot active" id="wdot-0"></div>
+        <div class="wizard-dot" id="wdot-1"></div>
+        <div class="wizard-dot" id="wdot-2"></div>
+        <div class="wizard-dot" id="wdot-3"></div>
+      </div>
 
-<!-- Run Detail Modal -->
-<div id="run-detail-modal" class="modal-overlay" style="display:none;" onclick="if(event.target===this)closeRunDetail()">
-  <div class="modal run-detail-modal">
-    <div id="run-detail-content"></div>
-    <div class="modal-actions">
-      <button class="btn-modal-cancel" onclick="closeRunDetail()">Close</button>
-    </div>
-  </div>
-</div>
+      <div class="wizard-step active" id="wstep-0">
+        <h4>What should Claude do?</h4>
+        <div class="form-group">
+          <textarea id="wiz-description" rows="4"
+            placeholder="e.g. Apply to jobs on LinkedIn, Check server health and fix issues, Review PRs and leave feedback"></textarea>
+        </div>
+        <div class="wizard-nav">
+          <button class="btn-modal-cancel" onclick="closeWizard()">Cancel</button>
+          <button class="btn-wizard-next" onclick="wizardNext()" id="wiz-next-0">Next</button>
+        </div>
+      </div>
 
-<!-- Session Preview Modal -->
-<div id="session-preview-modal" class="modal-overlay" style="display:none;" onclick="if(event.target===this)closePreview()">
-  <div class="preview-content">
-    <div class="preview-header">
-      <h3 id="preview-title">Session Preview</h3>
-      <div class="preview-controls">
-        <label class="preview-auto-label"><input type="checkbox" id="preview-auto-refresh" checked onchange="togglePreviewRefresh(this.checked)"> Auto-refresh</label>
-        <button class="btn-sm btn-edit" onclick="refreshPreview()">Refresh</button>
-        <button class="btn-sm btn-stop" onclick="closePreview()">Close</button>
+      <div class="wizard-step" id="wstep-1">
+        <h4>How often?</h4>
+        <div class="preset-grid" id="wiz-preset-grid"></div>
+        <div class="wizard-nav">
+          <button class="btn-wizard-back" onclick="wizardBack()">Back</button>
+          <button class="btn-wizard-next" onclick="wizardNext()" id="wiz-next-1">Next</button>
+        </div>
+      </div>
+
+      <div class="wizard-step" id="wstep-2">
+        <h4>Where?</h4>
+        <div class="form-group">
+          <label>Working Directory</label>
+          <div id="wiz-project-wrap" class="select-wrap" style="display:none;">
+            <select id="wiz-project-select" class="custom-select" onchange="onWizProjectChange()"></select>
+            <span class="select-arrow"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M6 9l6 6 6-6" />
+              </svg></span>
+          </div>
+          <div id="wiz-dir-browser-wrap" class="dir-browser-wrap" style="display:none;">
+            <input type="text" id="wiz-dir-browser-input" class="dir-browser-input" readonly
+              onclick="toggleBrowser('wiz')" />
+            <div id="wiz-dir-browser" class="dir-browser">
+              <div id="wiz-dir-breadcrumb" class="dir-breadcrumb"></div>
+              <div id="wiz-dir-list" class="dir-list"></div>
+              <button class="dir-select-btn" onclick="selectDir('wiz')">Use this folder</button>
+            </div>
+          </div>
+          <input type="text" id="wiz-workdir" placeholder="/home/user/project" />
+        </div>
+        <div class="form-group">
+          <label>Launch Mode</label>
+          <div class="select-wrap">
+            <select id="wiz-mode" class="custom-select">
+              <option value="c">Standard RC / skip permissions</option>
+              <option value="ci">Teammate (in-process) / skip permissions</option>
+              <option value="safe">Standard RC / with permissions</option>
+            </select>
+            <span class="select-arrow"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M6 9l6 6 6-6" />
+              </svg></span>
+          </div>
+        </div>
+        <div class="form-group">
+          <label>Task Name</label>
+          <input type="text" id="wiz-name" placeholder="Auto-generated from description" />
+        </div>
+        <div class="wizard-nav">
+          <button class="btn-wizard-back" onclick="wizardBack()">Back</button>
+          <button class="btn-wizard-create" onclick="wizardCreate()" id="wiz-create-btn">
+            <svg viewBox="0 0 24 24" fill="currentColor">
+              <path d="M8 5v14l11-7z" />
+            </svg>
+            Create with Claude
+          </button>
+        </div>
+      </div>
+
+      <div class="wizard-step" id="wstep-3">
+        <div class="wizard-ready">
+          <div class="ready-icon">&check;</div>
+          <h4>Session ready</h4>
+          <p>Open the session below to refine your task prompt with Claude. Once you're happy, Claude will save the
+            schedule for you.</p>
+          <div class="session-url" id="wiz-session-url" style="text-align:left;"></div>
+          <a id="wiz-open-link" class="btn-wizard-open" href="#" target="_blank">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6" />
+              <polyline points="15 3 21 3 21 9" />
+              <line x1="10" y1="14" x2="21" y2="3" />
+            </svg>
+            Open Session
+          </a>
+        </div>
+        <div class="wizard-nav" style="margin-top:1.5rem;">
+          <button class="btn-modal-cancel" onclick="closeWizard();refresh();">Done</button>
+        </div>
       </div>
     </div>
-    <pre id="preview-output" class="preview-terminal"></pre>
   </div>
-</div>
 
-<script src="static/app.js?v=21"></script>
+  <!-- Resume Modal -->
+  <div id="resume-modal" class="modal-overlay" style="display:none;"
+    onclick="if(event.target===this)closeResumeModal()">
+    <div class="modal resume-modal">
+      <h3>Resume Past Session</h3>
+      <div id="resume-list" class="resume-list">
+        <div class="empty">Loading...</div>
+      </div>
+      <div class="modal-actions">
+        <button class="btn-modal-cancel" onclick="closeResumeModal()">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Run Detail Modal -->
+  <div id="run-detail-modal" class="modal-overlay" style="display:none;"
+    onclick="if(event.target===this)closeRunDetail()">
+    <div class="modal run-detail-modal">
+      <div id="run-detail-content"></div>
+      <div class="modal-actions">
+        <button class="btn-modal-cancel" onclick="closeRunDetail()">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Session Preview Modal -->
+  <div id="session-preview-modal" class="modal-overlay" style="display:none;"
+    onclick="if(event.target===this)closePreview()">
+    <div class="preview-content">
+      <div class="preview-header">
+        <h3 id="preview-title">Session Preview</h3>
+        <div class="preview-controls">
+          <label class="preview-auto-label"><input type="checkbox" id="preview-auto-refresh" checked
+              onchange="togglePreviewRefresh(this.checked)"> Auto-refresh</label>
+          <button class="btn-sm btn-edit" onclick="refreshPreview()">Refresh</button>
+          <button class="btn-sm btn-stop" onclick="closePreview()">Close</button>
+        </div>
+      </div>
+      <pre id="preview-output" class="preview-terminal"></pre>
+    </div>
+  </div>
+
+  <script src="static/app.js?v=21"></script>
 </body>
+
 </html>
