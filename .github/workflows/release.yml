@@ -1,0 +1,74 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  check-version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      changed: ${{ steps.check.outputs.changed }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Get current version
+        id: version
+        run: |
+          VER=$(python3 -c "exec(open('config.py').read()); print(VERSION)")
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+
+      - name: Check if version changed
+        id: check
+        run: |
+          git show HEAD~1:config.py > /tmp/old_config.py 2>/dev/null || echo 'VERSION = "0.0.0"' > /tmp/old_config.py
+          OLD_VER=$(python3 -c "exec(open('/tmp/old_config.py').read()); print(VERSION)")
+          NEW_VER=$(python3 -c "exec(open('config.py').read()); print(VERSION)")
+          if [ "$OLD_VER" != "$NEW_VER" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "Version changed: $OLD_VER → $NEW_VER"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "Version unchanged: $NEW_VER"
+          fi
+
+  release:
+    needs: check-version
+    if: needs.check-version.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VER="${{ needs.check-version.outputs.version }}"
+          # Generate changelog from commits since last tag
+          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          if [ -n "$LAST_TAG" ]; then
+            CHANGELOG=$(git log ${LAST_TAG}..HEAD --pretty=format:"- %s" --no-merges | grep -v "Co-Authored-By")
+          else
+            CHANGELOG=$(git log --pretty=format:"- %s" -20 --no-merges | grep -v "Co-Authored-By")
+          fi
+          
+          gh release create "v${VER}" \
+            --title "v${VER}" \
+            --notes "## Changes
+
+          ${CHANGELOG}
+
+          ## Install / Update
+
+          \`\`\`bash
+          # New install
+          curl -fsSL https://raw.githubusercontent.com/barjakuzu/claude-rc-launcher/main/install.sh | bash
+
+          # Update existing
+          claude-rc update
+          \`\`\`"
