@@ -371,6 +371,33 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif path == "/version":
             self._json({"version": VERSION})
 
+        elif path == "/update-check":
+            # Check latest version from GitHub (cached for 1 hour)
+            import urllib.request
+            latest = None
+            try:
+                if not hasattr(Handler, '_update_cache') or \
+                        time.time() - Handler._update_cache.get('ts', 0) > 3600:
+                    req = urllib.request.Request(
+                        "https://raw.githubusercontent.com/barjakuzu/claude-rc-launcher/main/config.py",
+                        headers={"User-Agent": "claude-rc-launcher"},
+                    )
+                    with urllib.request.urlopen(req, timeout=5) as resp:
+                        for line in resp.read().decode().splitlines():
+                            if line.startswith("VERSION"):
+                                latest = line.split('"')[1]
+                                break
+                    Handler._update_cache = {'ts': time.time(), 'latest': latest}
+                else:
+                    latest = Handler._update_cache.get('latest')
+            except Exception:
+                pass
+            self._json({
+                "current": VERSION,
+                "latest": latest,
+                "update_available": latest is not None and latest != VERSION,
+            })
+
         elif path == "/schedules":
             schedules = load_schedules()
             # Enrich with next_run

@@ -1274,3 +1274,13 @@ fetch('/rc/version').then(r=>r.json()).then(d => {
   const vt = document.getElementById('version-label-top');
   if (vt) vt.textContent = 'v' + d.version;
 }).catch(()=>{});
+
+// Check for updates on load
+api('GET', '/update-check').then(d => {
+  if (d.update_available) {
+    var banner = document.createElement('div');
+    banner.className = 'update-banner';
+    banner.innerHTML = 'Update available: <strong>v' + escHtml(d.latest) + '</strong> (current: v' + escHtml(d.current) + ') &mdash; <a href="https://github.com/barjakuzu/claude-rc-launcher" target="_blank">View on GitHub</a>';
+    document.body.insertBefore(banner, document.body.firstChild);
+  }
+}).catch(()=>{});

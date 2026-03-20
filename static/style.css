@@ -398,6 +398,12 @@
   @keyframes toast-in { from { opacity: 0; transform: translateY(-10px); } to { opacity: 1; transform: translateY(0); } }
   @keyframes toast-out { from { opacity: 1; } to { opacity: 0; transform: translateY(-10px); } }
 
+  /* Update banner */
+  .update-banner { background: #1a2332; color: #94a3b8; font-size: 12px; text-align: center; padding: 8px 16px; border-bottom: 1px solid #2a3a4a; }
+  .update-banner a { color: #60a5fa; text-decoration: none; }
+  .update-banner a:hover { text-decoration: underline; }
+  .update-banner strong { color: #e2e8f0; }
+
   /* Logout */
   .logout-btn { position: absolute; top: 16px; right: 16px; color: #64748b; font-size: 12px; text-decoration: none; padding: 4px 10px; border: 1px solid #333; border-radius: 6px; }
   .logout-btn:hover { color: #e2e8f0; border-color: #555; }

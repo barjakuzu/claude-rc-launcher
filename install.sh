@@ -163,13 +163,11 @@ else
     fi
 fi
 
-# Clean up non-runtime files from app directory
-rm -f "$APP_DIR/README.md" "$APP_DIR/Dockerfile" "$APP_DIR/docker-compose.yml" \
-      "$APP_DIR/install.sh" "$APP_DIR/uninstall.sh" "$APP_DIR/.env.example" \
+# Clean up non-runtime files from app directory (keep .git for updates)
+rm -f "$APP_DIR/Dockerfile" "$APP_DIR/docker-compose.yml" \
+      "$APP_DIR/.env.example" \
       "$APP_DIR/claude-rc.service" "$APP_DIR/com.claude-rc.launcher.plist" \
-      "$APP_DIR/.gitignore" "$APP_DIR/LICENSE" "$APP_DIR/screenshot.png" \
-      "$APP_DIR/launcher.gif" "$APP_DIR/nginx.example.conf"
-rm -rf "$APP_DIR/.git"
+      "$APP_DIR/screenshot.png" "$APP_DIR/launcher.gif" "$APP_DIR/nginx.example.conf"
 
 # ── Create logs directory ────────────────────────────────────────────
 
@@ -276,15 +274,26 @@ CONFIG="$RC_HOME/env"
 if [ "${1:-}" = "update" ]; then
     echo "Updating claude-rc..."
     if [ -d "$APP_DIR/.git" ]; then
+        OLD_VER="$(python3 -c "exec(open('$APP_DIR/config.py').read()); print(VERSION)" 2>/dev/null || echo "?")"
         git -C "$APP_DIR" pull --ff-only
-        echo "Updated. Restart the service to apply changes:"
-        case "$(uname -s)" in
-            Darwin) echo "  launchctl unload ~/Library/LaunchAgents/com.claude-rc.launcher.plist"
-                    echo "  launchctl load ~/Library/LaunchAgents/com.claude-rc.launcher.plist" ;;
-            *)      echo "  systemctl --user restart claude-rc" ;;
-        esac
+        NEW_VER="$(python3 -c "exec(open('$APP_DIR/config.py').read()); print(VERSION)" 2>/dev/null || echo "?")"
+        if [ "$OLD_VER" = "$NEW_VER" ]; then
+            echo "Already up to date (v${NEW_VER})."
+        else
+            echo "Updated: v${OLD_VER} → v${NEW_VER}"
+            echo "Restarting service..."
+            case "$(uname -s)" in
+                Darwin) launchctl unload ~/Library/LaunchAgents/com.claude-rc.launcher.plist 2>/dev/null
+                        launchctl load ~/Library/LaunchAgents/com.claude-rc.launcher.plist 2>/dev/null ;;
+                *)      systemctl --user restart claude-rc 2>/dev/null || \
+                        sudo systemctl restart claude-rc-launcher 2>/dev/null || \
+                        echo "Restart the service manually to apply changes." ;;
+            esac
+            echo "Done."
+        fi
     else
-        echo "Not a git install. Re-run the install script to update."
+        echo "Re-running installer to update..."
+        curl -fsSL https://raw.githubusercontent.com/barjakuzu/claude-rc-launcher/main/install.sh | bash
     fi
     exit 0
 fi
@@ -472,4 +481,63 @@ if command -v cloudflared > /dev/null 2>&1; then
 else
     info "Run:  claude-rc"
     info "Then open http://localhost:${PORT:-8200} and click Share for a remote URL"
+fi
+
+# ── Custom Domain (optional) ─────────────────────────────────────
+
+echo ""
+info "Remote access options:"
+echo "  1. Cloudflare Tunnel (default) — click Share in the UI for a random URL"
+echo "  2. Custom domain — point your domain to this server via nginx + SSL"
+echo ""
+if command -v nginx > /dev/null 2>&1 && command -v certbot > /dev/null 2>&1; then
+    if prompt_yn "Set up a custom domain? (requires DNS pointed to this server) (y/N)" "n"; then
+        CUSTOM_DOMAIN="$(prompt_value "Enter your domain (e.g. claude.example.com): " "")"
+        if [ -n "$CUSTOM_DOMAIN" ]; then
+            NGINX_CONF="/etc/nginx/sites-available/claude-rc"
+            cat > "$NGINX_CONF" <<NGINXEOF
+server {
+    listen 80;
+    server_name ${CUSTOM_DOMAIN};
+    location /.well-known/acme-challenge/ { root /var/www/html; }
+    location / { return 301 https://\\\$host\\\$request_uri; }
+}
+server {
+    listen 443 ssl;
+    server_name ${CUSTOM_DOMAIN};
+    ssl_certificate /etc/letsencrypt/live/${CUSTOM_DOMAIN}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/${CUSTOM_DOMAIN}/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers HIGH:!aNULL:!MD5;
+    ssl_prefer_server_ciphers on;
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    location / {
+        proxy_pass http://127.0.0.1:${PORT:-8200};
+        proxy_set_header Host \\\$host;
+        proxy_set_header X-Real-IP \\\$remote_addr;
+        proxy_set_header X-Forwarded-For \\\$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+    }
+}
+NGINXEOF
+            ln -sf "$NGINX_CONF" /etc/nginx/sites-enabled/claude-rc
+            if nginx -t 2>/dev/null; then
+                systemctl reload nginx 2>/dev/null || true
+                info "Getting SSL certificate for ${CUSTOM_DOMAIN}..."
+                certbot --nginx -d "$CUSTOM_DOMAIN" --non-interactive --agree-tos --register-unsafely-without-email 2>/dev/null && \
+                    ok "Custom domain ready: https://${CUSTOM_DOMAIN}" || \
+                    warn "certbot failed — make sure DNS for ${CUSTOM_DOMAIN} points to this server, then run: certbot --nginx -d ${CUSTOM_DOMAIN}"
+            else
+                warn "nginx config test failed. Check /etc/nginx/sites-available/claude-rc"
+            fi
+        fi
+    fi
+elif prompt_yn "Want to use a custom domain? (y/N)" "n"; then
+    echo ""
+    info "To set up a custom domain, install nginx and certbot first:"
+    echo "  sudo apt install nginx certbot python3-certbot-nginx"
+    echo ""
+    info "Then point your domain's DNS to this server and re-run the installer."
 fi
