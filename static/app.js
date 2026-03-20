@@ -1276,11 +1276,17 @@ fetch('/rc/version').then(r=>r.json()).then(d => {
 }).catch(()=>{});
 
 // Check for updates on load
-api('GET', '/update-check').then(d => {
-  if (d.update_available) {
-    var banner = document.createElement('div');
-    banner.className = 'update-banner';
-    banner.innerHTML = 'Update available: <strong>v' + escHtml(d.latest) + '</strong> (current: v' + escHtml(d.current) + ') &mdash; <a href="https://github.com/barjakuzu/claude-rc-launcher" target="_blank">View on GitHub</a>';
-    document.body.insertBefore(banner, document.body.firstChild);
-  }
-}).catch(()=>{});
+function checkForUpdate() {
+  var el = document.getElementById('update-status');
+  if (el) el.innerHTML = '<span class="update-checking">checking\u2026</span>';
+  api('GET', '/update-check').then(function(d) {
+    if (!el) return;
+    if (d.update_available) {
+      el.innerHTML = '<a href="https://github.com/barjakuzu/claude-rc-launcher/releases" target="_blank" class="update-available">v' + escHtml(d.latest) + ' available</a>';
+    } else {
+      el.innerHTML = '<span class="update-current">up to date</span>';
+      setTimeout(function() { el.innerHTML = ''; }, 5000);
+    }
+  }).catch(function() { if (el) el.innerHTML = ''; });
+}
+checkForUpdate();
