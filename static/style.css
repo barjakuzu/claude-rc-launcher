@@ -418,4 +418,8 @@
   .preview-header h3 { margin: 0; font-size: 13px; color: #94a3b8; font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 50%; }
   .preview-controls { display: flex; align-items: center; gap: 8px; }
   .preview-auto-label { font-size: 11px; color: #64748b; display: flex; align-items: center; gap: 4px; cursor: pointer; }
-  .preview-terminal { background: #0a0a0a; color: #c8d6e5; font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace; font-size: 11px; line-height: 1.35; padding: 12px; margin: 0; overflow: auto; flex: 1; min-height: 250px; max-height: 72vh; white-space: pre-wrap; word-wrap: break-word; }
+  .preview-terminal { background: #0a0a0a; color: #c8d6e5; font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace; font-size: 11px; line-height: 1.35; padding: 12px; margin: 0; overflow: auto; flex: 1; min-height: 250px; max-height: 72vh; white-space: pre-wrap; word-wrap: break-word; scrollbar-width: thin; scrollbar-color: #333 #0a0a0a; }
+  .preview-terminal::-webkit-scrollbar { width: 8px; }
+  .preview-terminal::-webkit-scrollbar-track { background: #0a0a0a; }
+  .preview-terminal::-webkit-scrollbar-thumb { background: #333; border-radius: 4px; }
+  .preview-terminal::-webkit-scrollbar-thumb:hover { background: #444; }
