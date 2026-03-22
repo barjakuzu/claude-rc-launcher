@@ -44,6 +44,7 @@ let tunnelState = { available: false, running: false, url: null, auth_configured
 let stoppingSet = new Set();
 let shownErrors = new Set();
 let editingScheduleId = null;
+let expandedRuns = new Set();
 
 function selectMode(mode) {
   document.querySelectorAll('.mode-radio').forEach(el => {
@@ -628,11 +629,12 @@ function formatRunTimestamp(iso) {
 function renderRunResults(runs, jobName) {
   if (!runs || runs.length === 0) return '';
   var id = 'runs-' + jobName.replace(/[^a-zA-Z0-9]/g, '-');
+  var isOpen = expandedRuns.has(id);
   var html = '<div class="run-results">' +
     '<div class="run-results-title" onclick="toggleRuns(\'' + id + '\', this)" style="cursor:pointer">' +
-      '<span class="run-toggle" id="toggle-' + id + '">\u25B6</span> Recent Runs (' + runs.length + ')' +
+      '<span class="run-toggle" id="toggle-' + id + '">' + (isOpen ? '\u25BC' : '\u25B6') + '</span> Recent Runs (' + runs.length + ')' +
     '</div>' +
-    '<div class="run-results-body" id="' + id + '" style="display:none">';
+    '<div class="run-results-body" id="' + id + '" style="display:' + (isOpen ? 'block' : 'none') + '">';
   runs.forEach(function(run, i) {
     run = normalizeRun(run);
     run._jobName = jobName;
@@ -662,9 +664,11 @@ function toggleRuns(id, titleEl) {
   if (body.style.display === 'none') {
     body.style.display = 'block';
     if (toggle) toggle.textContent = '\u25BC';
+    expandedRuns.add(id);
   } else {
     body.style.display = 'none';
     if (toggle) toggle.textContent = '\u25B6';
+    expandedRuns.delete(id);
   }
 }
 
