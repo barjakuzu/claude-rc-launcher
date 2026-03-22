@@ -210,6 +210,9 @@
   .run-item { font-size: 0.78rem; color: #cbd5e1; padding: 0.25rem 0; display: flex; align-items: flex-start; gap: 0.35rem; line-height: 1.4; }
   .run-item-check { color: #4ade80; flex-shrink: 0; }
   .run-item-bullet { color: #64748b; flex-shrink: 0; }
+  .run-item-skip { color: #ef4444; flex-shrink: 0; }
+  .run-item-skipped { opacity: 0.7; flex-wrap: wrap; }
+  .run-item-reason { font-size: 0.68rem; color: #64748b; width: 100%; padding-left: 1.1rem; margin-top: 0.1rem; }
   .run-item-link { color: #71717a; text-decoration: none; font-size: 0.7rem; white-space: nowrap; }
   .run-item-link:hover { color: #a3a3a3; text-decoration: underline; }
   .run-log { background: #0a0a0a; border: 1px solid rgba(255,255,255,0.04); border-radius: 8px; padding: 0.75rem; margin-top: 0.5rem; font-size: 0.68rem; color: #8b8b96; max-height: 300px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; font-family: 'SF Mono', 'Fira Code', monospace; scrollbar-width: thin; scrollbar-color: #333 transparent; }
@@ -411,7 +414,9 @@
   .update-current { color: #4ade80; }
   .update-checking { color: #64748b; }
 
-  /* Logout */
+  /* Refresh + Logout */
+  .refresh-btn { position: absolute; top: 16px; right: 80px; background: none; color: #64748b; font-size: 16px; padding: 2px 8px; border: 1px solid #333; border-radius: 6px; cursor: pointer; }
+  .refresh-btn:hover { color: #e2e8f0; border-color: #555; }
   .logout-btn { position: absolute; top: 16px; right: 16px; color: #64748b; font-size: 12px; text-decoration: none; padding: 4px 10px; border: 1px solid #333; border-radius: 6px; }
   .logout-btn:hover { color: #e2e8f0; border-color: #555; }
 

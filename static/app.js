@@ -733,18 +733,38 @@ async function showRunDetail(jobName, sessionOrFilename) {
     }
 
     if (run.items && run.items.length > 0) {
-      html += '<div class="run-items-title">Items</div><div class="run-items">';
-      run.items.forEach(function(item) {
-        var title = item.title || item.role || item.job_title || item.company || JSON.stringify(item);
-        var company = item.company || '';
-        var url = item.url || item.application_url || item.link || '';
-        html += '<div class="run-item">' +
-          '<span class="run-item-check">\u2713</span> ' +
-          '<span>' + escHtml(title) + (company ? ' \u2014 ' + escHtml(company) : '') + '</span>' +
-          (url ? ' <a href="' + escHtml(url) + '" target="_blank" class="run-item-link">Open \u2197</a>' : '') +
-        '</div>';
-      });
-      html += '</div>';
+      var appliedItems = run.items.filter(function(i) { return i.status !== 'skipped'; });
+      var skippedItems = run.items.filter(function(i) { return i.status === 'skipped'; });
+      if (appliedItems.length > 0) {
+        html += '<div class="run-items-title">Applied</div><div class="run-items">';
+        appliedItems.forEach(function(item) {
+          var title = item.title || item.role || item.job_title || item.company || JSON.stringify(item);
+          var company = item.company || '';
+          var url = item.url || item.application_url || item.link || '';
+          html += '<div class="run-item">' +
+            '<span class="run-item-check">\u2713</span> ' +
+            '<span>' + escHtml(title) + (company ? ' \u2014 ' + escHtml(company) : '') + '</span>' +
+            (url ? ' <a href="' + escHtml(url) + '" target="_blank" class="run-item-link">Open \u2197</a>' : '') +
+          '</div>';
+        });
+        html += '</div>';
+      }
+      if (skippedItems.length > 0) {
+        html += '<div class="run-items-title">Skipped</div><div class="run-items">';
+        skippedItems.forEach(function(item) {
+          var title = item.title || item.role || item.job_title || item.company || JSON.stringify(item);
+          var company = item.company || '';
+          var reason = item.reason || '';
+          var url = item.url || item.application_url || item.link || '';
+          html += '<div class="run-item run-item-skipped">' +
+            '<span class="run-item-skip">\u2717</span> ' +
+            '<span>' + escHtml(title) + (company ? ' \u2014 ' + escHtml(company) : '') + '</span>' +
+            (url ? ' <a href="' + escHtml(url) + '" target="_blank" class="run-item-link">Open \u2197</a>' : '') +
+            (reason ? '<div class="run-item-reason">' + escHtml(reason) + '</div>' : '') +
+          '</div>';
+        });
+        html += '</div>';
+      }
     }
 
     if (run.key_findings && run.key_findings.length > 0) {
@@ -1290,7 +1310,6 @@ function closePreview() {
 
 loadProjects();
 refresh();
-setInterval(refresh, 5000);
 fetch('/rc/version').then(r=>r.json()).then(d => {
   document.getElementById('version-label').textContent = 'v' + d.version;
   const vt = document.getElementById('version-label-top');
