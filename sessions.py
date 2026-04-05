@@ -342,16 +342,22 @@ def setup_session(session_name, display_name, mode):
             time.sleep(2)
             continue
         # Look for Claude's interactive prompt "❯ " (but not menu items like "❯ 1.")
+        # The prompt line starts with ❯ and may have trailing content rendered
+        # on the right (e.g. Chisel companion ASCII art: "❯ {spaces} [ ◉  ◉ ]").
         for line in text.split("\n"):
             stripped = line.strip()
-            # Match standalone prompt: line is just "❯" or "❯ " (empty input)
-            if stripped in ("❯", "\u276f"):
-                prompt_found = True
-                break
-            # Match "❯ " not followed by a digit (which would be a menu item)
-            if re.search(r'[❯\u276f]\s*$', stripped):
-                prompt_found = True
-                break
+            # Must start with ❯
+            if not stripped or stripped[0] not in ("❯", "\u276f"):
+                continue
+            # What follows the ❯?
+            rest = stripped[1:].lstrip()
+            # Menu items look like "❯ 1. Option" — first non-space char is a digit
+            if rest and rest[0].isdigit():
+                continue
+            # Anything else starting with ❯ (empty, whitespace-only, or with
+            # right-side companion art) is the interactive prompt.
+            prompt_found = True
+            break
         if prompt_found:
             prompt_found = True
             break
