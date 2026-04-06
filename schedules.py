@@ -55,7 +55,7 @@ def create_schedule(data):
         "model": data.get("model"),
         "enabled": data.get("enabled", True),
         "last_run": None,
-        "created_at": datetime.now().isoformat(),
+        "created_at": datetime.now().isoformat() + 'Z',
         "history": [],
     }
     schedules = load_schedules()
@@ -97,7 +97,7 @@ def add_history_entry(schedule_id, status, message, **kwargs):
         if s.get("id") == schedule_id:
             history = s.get("history", [])
             entry = {
-                "timestamp": datetime.now().isoformat(),
+                "timestamp": datetime.now().isoformat() + 'Z',
                 "status": status,
                 "message": message,
             }
@@ -106,6 +106,6 @@ def add_history_entry(schedule_id, status, message, **kwargs):
                 entry[k] = v
             history.append(entry)
             s["history"] = history[-50:]
-            s["last_run"] = datetime.now().isoformat()
+            s["last_run"] = datetime.now().isoformat() + 'Z'
             save_schedules(schedules)
             return

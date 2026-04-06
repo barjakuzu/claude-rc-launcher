@@ -139,7 +139,7 @@ def next_cron_run(expr, after_dt=None):
     for _ in range(525600):
         try:
             if cron_matches(expr, dt):
-                return dt.isoformat()
+                return dt.isoformat() + 'Z'
         except ValueError:
             return None
         dt += timedelta(minutes=1)

@@ -621,7 +621,7 @@ function runStatusIcon(status) {
 
 function formatRunTimestamp(iso) {
   if (!iso) return '';
-  var d = new Date(iso);
+  var d = parseUTC(iso);
   return d.toLocaleDateString('en-US', {month: 'short', day: 'numeric'}) + ', ' +
     String(d.getHours()).padStart(2,'0') + ':' + String(d.getMinutes()).padStart(2,'0');
 }
@@ -1211,6 +1211,13 @@ async function fireSchedule(id) {
   refresh();
 }
 
+function utcHourToLocal(h) {
+  // Convert a UTC hour (0-23) to local hour by using a Date object
+  var d = new Date();
+  d.setUTCHours(parseInt(h), 0, 0, 0);
+  return d.getHours();
+}
+
 function formatCronHint(expr) {
   if (!expr) return '';
   const parts = expr.trim().split(/\s+/);
@@ -1222,7 +1229,10 @@ function formatCronHint(expr) {
   if (min === '*' && hour === '*') timeStr = 'Every minute';
   else if (min.startsWith('*/')) timeStr = 'Every ' + min.slice(2) + ' minutes';
   else if (hour === '*') timeStr = 'Every hour at :' + min.padStart(2,'0');
-  else timeStr = 'At ' + hour + ':' + min.padStart(2,'0');
+  else {
+    const localHour = utcHourToLocal(hour);
+    timeStr = 'At ' + localHour + ':' + min.padStart(2,'0');
+  }
 
   let dayStr = '';
   if (dom === '*' && dow === '*') dayStr = '';
@@ -1240,9 +1250,17 @@ function formatCronHint(expr) {
   return timeStr + dayStr + monStr;
 }
 
+function parseUTC(iso) {
+  // Backend timestamps are UTC but lack 'Z' suffix — force UTC parsing
+  if (iso && !iso.endsWith('Z') && !iso.includes('+') && !iso.includes('-', 10)) {
+    return new Date(iso + 'Z');
+  }
+  return new Date(iso);
+}
+
 function formatRelativeTime(iso) {
   if (!iso) return 'N/A';
-  const d = new Date(iso);
+  const d = parseUTC(iso);
   const now = new Date();
   const diffMs = now - d;
   const absDiff = Math.abs(diffMs);
