@@ -7,8 +7,9 @@ import threading
 import time
 from datetime import datetime, timedelta
 
+import stats
 from config import SESSION_PREFIX, CLAUDE_BIN, RC_FLAGS, MODEL_MAP
-from sessions import session_exists, setup_session, get_url
+from sessions import session_exists, setup_session, get_url, list_rc_sessions
 from schedules import load_schedules, save_schedules, add_history_entry
 
 
@@ -344,6 +345,12 @@ def _scheduler_loop():
         time.sleep(seconds_to_next)
 
         now = datetime.now().replace(second=0, microsecond=0)
+
+        try:
+            stats.sample_tokens(lambda: sum(s.get("tokens", 0) for s in list_rc_sessions()))
+        except Exception:
+            pass
+
         schedules = load_schedules()
 
         for schedule in schedules:

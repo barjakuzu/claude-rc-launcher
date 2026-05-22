@@ -7,6 +7,7 @@ import json
 import os
 import re
 import secrets
+import stats
 import subprocess
 import threading
 import time
@@ -436,6 +437,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         elif path == "/version":
             self._json({"version": VERSION})
+
+        elif path == "/stats":
+            sess = list_rc_sessions()
+            s = stats.system_stats()
+            s["token_history"] = stats.token_history()
+            s["tokens_now"] = sum(x.get("tokens", 0) for x in sess)
+            s["sessions"] = len(sess)
+            self._json(s)
 
         elif path == "/update-check":
             # Check latest version from GitHub API (cached for 10 min)
@@ -973,7 +982,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         path = self.path.split("?")[0]
         if path in ("/rc/sessions", "/rc/tunnel/status", "/rc/projects",
                      "/rc/browse", "/rc/schedules", "/rc/version",
-                     "/rc/resume/sessions") or \
+                     "/rc/resume/sessions", "/rc/stats", "/rc/overview") or \
                 path.startswith("/rc/static/") or path.startswith("/static/") or \
                 path.startswith("/rc/jobs/") or "/preview" in path:
             return
