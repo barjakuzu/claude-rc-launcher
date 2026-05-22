@@ -6,7 +6,6 @@ import type { Schedule } from '../types';
 
 export interface ScheduledRowProps {
   s: Schedule;
-  hue: number;
 }
 
 export function ScheduledRow({ s }: ScheduledRowProps) {

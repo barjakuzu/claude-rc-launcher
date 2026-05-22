@@ -196,7 +196,7 @@ export function PanelContent({ device, tab, setTab, mobile = false }: PanelConte
                 </div>
               )
               : scheduled.map((s) => (
-                <ScheduledRow key={s.id} s={s} hue={hue} />
+                <ScheduledRow key={s.id} s={s} />
               ))}
           </div>
         )}

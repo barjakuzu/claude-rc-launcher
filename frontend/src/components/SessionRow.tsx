@@ -1,5 +1,6 @@
 // SessionRow.tsx — RSessionRow ported from variant-ops-refined.jsx lines 553-583.
 import type { CSSProperties } from 'react';
+import { useState } from 'react';
 import { RT, FONT_MONO, tintFor } from '../tokens';
 import { Icons, CapBar, StatusPill } from './primitives';
 import { btn } from './btn';
@@ -18,6 +19,7 @@ function truncate(s: string, n: number): string {
 }
 
 export function SessionRow({ s, hue, deviceId, onChanged }: SessionRowProps) {
+  const [pending, setPending] = useState(false);
   const hueColor = tintFor(hue, 0.66, 0.08);
 
   // Compute dir: basename of workdir.
@@ -56,13 +58,25 @@ export function SessionRow({ s, hue, deviceId, onChanged }: SessionRowProps) {
   };
 
   const handleRefresh = async () => {
-    try { await api.restart(deviceId, s.name); } catch {/* ignore */}
-    onChanged();
+    setPending(true);
+    try {
+      await api.restart(deviceId, s.name);
+    } catch {/* ignore */}
+    finally {
+      setPending(false);
+      onChanged();
+    }
   };
 
   const handleStop = async () => {
-    try { await api.stop(deviceId, s.name); } catch {/* ignore */}
-    onChanged();
+    setPending(true);
+    try {
+      await api.stop(deviceId, s.name);
+    } catch {/* ignore */}
+    finally {
+      setPending(false);
+      onChanged();
+    }
   };
 
   const miniStyle: CSSProperties = btn('mini');
@@ -132,10 +146,20 @@ export function SessionRow({ s, hue, deviceId, onChanged }: SessionRowProps) {
         >
           <Icons.link size={10} stroke={RT.textDim} />
         </button>
-        <button style={miniStyle} title="Restart session" onClick={handleRefresh}>
+        <button
+          disabled={pending}
+          style={{ ...miniStyle, opacity: pending ? 0.6 : 1 }}
+          title="Restart session"
+          onClick={handleRefresh}
+        >
           <Icons.refresh size={10} stroke={RT.green} />
         </button>
-        <button style={miniStyle} title="Stop session" onClick={handleStop}>
+        <button
+          disabled={pending}
+          style={{ ...miniStyle, opacity: pending ? 0.6 : 1 }}
+          title="Stop session"
+          onClick={handleStop}
+        >
           <Icons.stop size={9} stroke={RT.red} />
         </button>
         {/* ⋯ menu stub — wired in Task 12 */}
