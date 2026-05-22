@@ -2,9 +2,11 @@
 
 import os
 import platform
+import threading
 
 _HISTORY = []      # last N summed-token samples
 _MAX = 12
+_lock = threading.Lock()
 
 def sample_tokens(total_fn):
     """Append the current summed-token total (from total_fn()) to the ring buffer."""
@@ -12,13 +14,15 @@ def sample_tokens(total_fn):
         val = int(total_fn())
     except Exception:
         val = 0
-    _HISTORY.append(val)
-    if len(_HISTORY) > _MAX:
-        del _HISTORY[: len(_HISTORY) - _MAX]
+    with _lock:
+        _HISTORY.append(val)
+        if len(_HISTORY) > _MAX:
+            del _HISTORY[: len(_HISTORY) - _MAX]
 
 def token_history():
     """Return a copy of the token history (oldest -> newest)."""
-    return list(_HISTORY)
+    with _lock:
+        return list(_HISTORY)
 
 def _os_pretty():
     try:
