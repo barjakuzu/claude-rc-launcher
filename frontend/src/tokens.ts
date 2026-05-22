@@ -1,6 +1,6 @@
 // tokens.ts — design tokens and shared helpers.
 
-export const FONT_SANS = "'Geist', system-ui, sans-serif";
+export const FONT_SANS = "'Inter', system-ui, sans-serif";
 export const FONT_SERIF = "'Instrument Serif', Georgia, serif";
 export const FONT_MONO = "'Geist Mono', ui-monospace, SFMono-Regular, monospace";
 

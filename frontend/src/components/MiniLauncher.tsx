@@ -96,7 +96,7 @@ export function MiniLauncher({ deviceId, deviceName, mobile = false, onLaunched 
     borderRadius: 6,
     padding: '7px 9px',
     fontFamily: FONT_MONO,
-    fontSize: 11,
+    fontSize: 12,
     outline: 'none',
   };
 
@@ -104,7 +104,7 @@ export function MiniLauncher({ deviceId, deviceName, mobile = false, onLaunched 
     <div style={{ position: 'relative', flex: 'none', padding: '12px 14px', borderBottom: `1px solid ${RT.border}`, background: RT.bg }}>
       {/* Label row */}
       <div style={{
-        fontSize: 9,
+        fontSize: 10,
         color: RT.textLow,
         letterSpacing: '.14em',
         textTransform: 'uppercase',
@@ -146,7 +146,7 @@ export function MiniLauncher({ deviceId, deviceName, mobile = false, onLaunched 
             borderRadius: 6,
             cursor: pending ? 'not-allowed' : 'pointer',
             fontFamily: 'inherit',
-            fontSize: 11,
+            fontSize: 12,
             fontWeight: 600,
             display: 'inline-flex',
             alignItems: 'center',
@@ -172,7 +172,7 @@ export function MiniLauncher({ deviceId, deviceName, mobile = false, onLaunched 
             border: 'none',
             cursor: 'pointer',
             padding: '0 2px',
-            fontSize: 10,
+            fontSize: 11,
             color: RT.textLow,
             fontFamily: FONT_MONO,
             letterSpacing: '.04em',
@@ -203,13 +203,13 @@ export function MiniLauncher({ deviceId, deviceName, mobile = false, onLaunched 
         }}>
           {/* Model select */}
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <label style={{ fontSize: 10, color: RT.textLow, fontFamily: FONT_MONO, flex: 'none', width: 64 }}>
+            <label style={{ fontSize: 11, color: RT.textLow, fontFamily: FONT_MONO, flex: 'none', width: 64 }}>
               Model
             </label>
             <select
               value={model}
               onChange={(e) => setModel(e.target.value as ModelLabel | '')}
-              style={{ ...fieldStyle, flex: 1, fontSize: 10, padding: '5px 8px' }}
+              style={{ ...fieldStyle, flex: 1, fontSize: 11, padding: '5px 8px' }}
             >
               <option value="">Default (Opus)</option>
               <option value="2">Sonnet 4.6</option>
@@ -219,39 +219,39 @@ export function MiniLauncher({ deviceId, deviceName, mobile = false, onLaunched 
 
           {/* Name input */}
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <label style={{ fontSize: 10, color: RT.textLow, fontFamily: FONT_MONO, flex: 'none', width: 64 }}>
+            <label style={{ fontSize: 11, color: RT.textLow, fontFamily: FONT_MONO, flex: 'none', width: 64 }}>
               Name
             </label>
             <input
               value={name}
               onChange={(e) => setName(e.target.value)}
               placeholder="auto-generated"
-              style={{ ...fieldStyle, flex: 1, fontSize: 10, padding: '5px 8px' }}
+              style={{ ...fieldStyle, flex: 1, fontSize: 11, padding: '5px 8px' }}
             />
           </div>
 
           {/* Workdir + Browse button */}
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <label style={{ fontSize: 10, color: RT.textLow, fontFamily: FONT_MONO, flex: 'none', width: 64 }}>
+            <label style={{ fontSize: 11, color: RT.textLow, fontFamily: FONT_MONO, flex: 'none', width: 64 }}>
               Workdir
             </label>
             <input
               value={workdir}
               onChange={(e) => setWorkdir(e.target.value)}
               placeholder="/path/to/project"
-              style={{ ...fieldStyle, flex: 1, fontSize: 10, padding: '5px 8px' }}
+              style={{ ...fieldStyle, flex: 1, fontSize: 11, padding: '5px 8px' }}
             />
             <button
               onClick={() => setShowBrowser(true)}
               style={{
                 ...btn('tinyText'),
-                fontSize: 10,
+                fontSize: 11,
                 padding: '5px 10px',
                 gap: 4,
                 flex: 'none',
               }}
             >
-              <Icons.folder size={11} stroke={RT.textDim} />
+              <Icons.folder size={12} stroke={RT.textDim} />
               Browse…
             </button>
           </div>
@@ -264,7 +264,7 @@ export function MiniLauncher({ deviceId, deviceName, mobile = false, onLaunched 
               alignItems: 'center',
               gap: 6,
               cursor: 'pointer',
-              fontSize: 10,
+              fontSize: 11,
               color: RT.textDim,
               fontFamily: FONT_MONO,
               userSelect: 'none',
@@ -285,7 +285,7 @@ export function MiniLauncher({ deviceId, deviceName, mobile = false, onLaunched 
       {error && (
         <div style={{
           marginTop: 6,
-          fontSize: 10,
+          fontSize: 11,
           color: RT.red,
           fontFamily: FONT_MONO,
           lineHeight: 1.4,

@@ -61,7 +61,7 @@ function MobileStrip({ cards }: MobileStripProps) {
           <div style={{ fontSize: 8, color: RT.textLow, letterSpacing: '.14em', textTransform: 'uppercase', fontFamily: FONT_MONO }}>{c.label}</div>
           <div style={{ display: 'flex', alignItems: 'baseline', gap: 4, marginTop: 3 }}>
             {c.dot && <Dot color={c.dot} size={5} pulse />}
-            <div style={{ fontFamily: FONT_MONO, fontSize: 14, fontWeight: 500 }}>{c.value}</div>
+            <div style={{ fontFamily: FONT_MONO, fontSize: 15, fontWeight: 500 }}>{c.value}</div>
           </div>
         </div>
       ))}
@@ -127,17 +127,17 @@ function DeviceCardItem({ card, layout, active, onOpen }: DeviceCardProps) {
         </div>
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
-            <div style={{ fontSize: 13, fontWeight: 600, letterSpacing: '-.005em', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{card.name}</div>
+            <div style={{ fontSize: 14, fontWeight: 600, letterSpacing: '-.005em', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{card.name}</div>
             <Dot color={card.online ? RT.green : RT.textLow} size={6} pulse={card.online} />
           </div>
-          <div style={{ fontSize: 10, color: RT.textLow, fontFamily: FONT_MONO, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', marginTop: 2 }}>{card.hostname || card.id}</div>
+          <div style={{ fontSize: 11, color: RT.textLow, fontFamily: FONT_MONO, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', marginTop: 2 }}>{card.hostname || card.id}</div>
         </div>
       </div>
 
       {/* Meta row: os + load/offline (replaces region + lastActivity) */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontFamily: FONT_MONO, fontSize: 10, color: RT.textDim, flexWrap: 'wrap' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontFamily: FONT_MONO, fontSize: 11, color: RT.textDim, flexWrap: 'wrap' }}>
         <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
-          <Icons.globe size={9} stroke={RT.textLow} /> {card.os || 'unknown'}
+          <Icons.globe size={10} stroke={RT.textLow} /> {card.os || 'unknown'}
         </span>
         <span style={{ color: RT.textLow }}>·</span>
         <span>{card.online ? `${card.loadPct}% load` : 'offline'}</span>
@@ -149,15 +149,15 @@ function DeviceCardItem({ card, layout, active, onOpen }: DeviceCardProps) {
           <Sparkline data={card.spark} w={200} h={28} color={hueColor} fillOpacity={0.10} dotEnd />
         </div>
         <div style={{ textAlign: 'right' }}>
-          <div style={{ fontFamily: FONT_MONO, fontSize: 14, fontWeight: 500, letterSpacing: '-.01em' }}>{fmtK(card.tokens)}</div>
-          <div style={{ fontSize: 9, color: RT.textLow, fontFamily: FONT_MONO, letterSpacing: '.06em' }}>TOKENS</div>
+          <div style={{ fontFamily: FONT_MONO, fontSize: 15, fontWeight: 500, letterSpacing: '-.01em' }}>{fmtK(card.tokens)}</div>
+          <div style={{ fontSize: 10, color: RT.textLow, fontFamily: FONT_MONO, letterSpacing: '.06em' }}>TOKENS</div>
         </div>
       </div>
 
       {/* CPU load bar + load + sessions (replaces token-cap bar) */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
         <CapBar pct={card.loadPct} height={3} bg="rgba(255,255,255,.04)" color={hueColor} />
-        <div style={{ fontSize: 10, fontFamily: FONT_MONO, color: RT.textDim, whiteSpace: 'nowrap' }}>
+        <div style={{ fontSize: 11, fontFamily: FONT_MONO, color: RT.textDim, whiteSpace: 'nowrap' }}>
           {card.loadPct}% load · {card.sessions} sess
         </div>
       </div>
@@ -176,18 +176,18 @@ export function Grid({ cards, layout, openId, onOpen }: GridProps) {
       {layout.mobile && <MobileStrip cards={cards} />}
 
       <div style={{ display: 'flex', alignItems: 'center', marginBottom: 12, gap: 10 }}>
-        <div style={{ fontSize: 10, color: RT.textDim, letterSpacing: '.14em', textTransform: 'uppercase', fontFamily: FONT_MONO }}>
+        <div style={{ fontSize: 11, color: RT.textDim, letterSpacing: '.14em', textTransform: 'uppercase', fontFamily: FONT_MONO }}>
           Devices · {cards.length}
         </div>
         {!layout.mobile && (
-          <div style={{ fontSize: 10, color: RT.textLow, fontFamily: FONT_MONO }}>sorted by activity</div>
+          <div style={{ fontSize: 11, color: RT.textLow, fontFamily: FONT_MONO }}>sorted by activity</div>
         )}
         <div style={{ flex: 1 }} />
         <button style={{ ...btn('tinyText'), fontFamily: FONT_SANS }}>{layout.mobile ? '+' : '+ Add'}</button>
       </div>
 
       {cards.length === 0 ? (
-        <div style={{ padding: 40, textAlign: 'center', color: RT.textLow, fontFamily: FONT_MONO, fontSize: 12 }}>loading…</div>
+        <div style={{ padding: 40, textAlign: 'center', color: RT.textLow, fontFamily: FONT_MONO, fontSize: 13 }}>loading…</div>
       ) : (
         <div style={{ display: 'grid', gridTemplateColumns: `repeat(${cols}, 1fr)`, gap: layout.mobile ? 10 : 12 }}>
           {cards.map((c) => (

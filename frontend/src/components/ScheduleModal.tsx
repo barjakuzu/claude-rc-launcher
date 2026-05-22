@@ -39,12 +39,12 @@ const fieldStyle: React.CSSProperties = {
   padding: '7px 10px',
   color: RT.text,
   fontFamily: FONT_MONO,
-  fontSize: 12,
+  fontSize: 13,
   outline: 'none',
 };
 
 const labelStyle: React.CSSProperties = {
-  fontSize: 11,
+  fontSize: 12,
   color: RT.textDim,
   marginBottom: 4,
   display: 'block',
@@ -63,10 +63,11 @@ export function ScheduleModal({ deviceId, initial, onClose, onSaved }: ScheduleM
   useEffect(() => () => { mounted.current = false; }, []);
 
   // Form state — prefilled from `initial` when editing
-  const [name,    setName]    = useState(initial?.name    ?? '');
-  const [cron,    setCron]    = useState(initial?.cron    ?? '');
-  const [prompt,  setPrompt]  = useState(initial?.prompt  ?? '');
-  const [workdir, setWorkdir] = useState(initial?.workdir ?? '');
+  const [name,             setName]             = useState(initial?.name             ?? '');
+  const [cron,             setCron]             = useState(initial?.cron             ?? '');
+  const [prompt,           setPrompt]           = useState(initial?.prompt           ?? '');
+  const [instructionsFile, setInstructionsFile] = useState(initial?.instructions_file ?? '');
+  const [workdir,          setWorkdir]          = useState(initial?.workdir          ?? '');
   const [mode,    setMode]    = useState<ModeKey>(
     API_TO_MODE[initial?.mode ?? ''] ?? 'STANDARD',
   );
@@ -95,6 +96,7 @@ export function ScheduleModal({ deviceId, initial, onClose, onSaved }: ScheduleM
         name,
         cron,
         prompt,
+        instructions_file: instructionsFile || undefined,
         workdir,
         mode:    MODE_TO_API[mode],
         model:   MODEL_TO_API[model],
@@ -165,10 +167,10 @@ export function ScheduleModal({ deviceId, initial, onClose, onSaved }: ScheduleM
           alignItems: 'center',
           gap: 8,
         }}>
-          <div style={{ flex: 1, fontSize: 13, fontWeight: 600 }}>
+          <div style={{ flex: 1, fontSize: 14, fontWeight: 600 }}>
             {initial ? 'Edit schedule' : 'New schedule'}
           </div>
-          <button onClick={onClose} style={{ ...btn('mini'), width: 22, height: 22, fontSize: 11 }}>
+          <button onClick={onClose} style={{ ...btn('mini'), width: 22, height: 22, fontSize: 12 }}>
             ✕
           </button>
         </div>
@@ -205,7 +207,7 @@ export function ScheduleModal({ deviceId, initial, onClose, onSaved }: ScheduleM
                   width: 'auto',
                   flex: 'none',
                   cursor: 'pointer',
-                  fontSize: 11,
+                  fontSize: 12,
                   paddingRight: 6,
                 }}
               >
@@ -225,6 +227,20 @@ export function ScheduleModal({ deviceId, initial, onClose, onSaved }: ScheduleM
               placeholder="Describe the task Claude should run…"
               rows={4}
               style={{ ...fieldStyle, resize: 'vertical', lineHeight: 1.5 }}
+            />
+            <div style={{ fontSize: 11, color: RT.textLow, marginTop: 5, fontFamily: FONT_MONO }}>
+              Task/prompt OR an instructions file path — the schedule runs whichever is set.
+            </div>
+          </div>
+
+          {/* Instructions file */}
+          <div>
+            <label style={labelStyle}>Instructions file</label>
+            <input
+              value={instructionsFile}
+              onChange={(e) => setInstructionsFile(e.target.value)}
+              placeholder="/root/.claude-rc/jobs/my-task/instructions.md"
+              style={fieldStyle}
             />
           </div>
 
@@ -277,7 +293,7 @@ export function ScheduleModal({ deviceId, initial, onClose, onSaved }: ScheduleM
           </div>
 
           {/* Enabled */}
-          <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 12, color: RT.textDim }}>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 13, color: RT.textDim }}>
             <input
               type="checkbox"
               checked={enabled}
@@ -290,7 +306,7 @@ export function ScheduleModal({ deviceId, initial, onClose, onSaved }: ScheduleM
           {/* Inline error */}
           {error && (
             <div style={{
-              fontSize: 11,
+              fontSize: 12,
               color: RT.red,
               background: 'oklch(0.62 0.12 25 / 0.10)',
               border: `1px solid oklch(0.62 0.12 25 / 0.30)`,
@@ -321,7 +337,7 @@ export function ScheduleModal({ deviceId, initial, onClose, onSaved }: ScheduleM
               padding: '7px 14px',
               cursor: 'pointer',
               color: RT.textDim,
-              fontSize: 12,
+              fontSize: 13,
               fontFamily: 'inherit',
             }}
           >
@@ -337,7 +353,7 @@ export function ScheduleModal({ deviceId, initial, onClose, onSaved }: ScheduleM
               padding: '7px 16px',
               cursor: pending ? 'wait' : 'pointer',
               color: RT.bg,
-              fontSize: 12,
+              fontSize: 13,
               fontFamily: 'inherit',
               fontWeight: 600,
               opacity: pending ? 0.6 : 1,

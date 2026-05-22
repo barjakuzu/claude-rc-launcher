@@ -34,19 +34,19 @@ export function MobileDetail({ device, tab, setTab, onClose }: MobileDetailProps
         gap: 10,
       }}>
         <button onClick={onClose} style={{ ...btn('icon'), width: 30, height: 30 }}>
-          <Icons.back size={14} stroke={RT.textDim} />
+          <Icons.back size={16} stroke={RT.textDim} />
         </button>
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <Dot color={device.online ? RT.green : RT.textLow} size={7} pulse={device.online} />
-            <div style={{ fontSize: 14, fontWeight: 600 }}>{device.name}</div>
+            <div style={{ fontSize: 15, fontWeight: 600 }}>{device.name}</div>
           </div>
-          <div style={{ fontSize: 11, color: RT.textLow, fontFamily: FONT_MONO, marginTop: 1 }}>
+          <div style={{ fontSize: 12, color: RT.textLow, fontFamily: FONT_MONO, marginTop: 1 }}>
             {device.hostname}
           </div>
         </div>
         <button style={btn('icon')}>
-          <Icons.more size={14} stroke={RT.textDim} />
+          <Icons.more size={16} stroke={RT.textDim} />
         </button>
       </div>
 

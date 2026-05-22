@@ -129,14 +129,14 @@ export function PanelContent({ device, tab, setTab, mobile = false }: PanelConte
                 onClick={() => setResumeOpen(true)}
                 style={{ ...btn('tinyText'), gap: 5 }}
               >
-                <Icons.refresh size={10} stroke="currentColor" />
+                <Icons.refresh size={13} stroke="currentColor" />
                 Resume…
               </button>
             </div>
 
             {sessions.length === 0
               ? (
-                <div style={{ padding: 40, textAlign: 'center', color: RT.textLow, fontSize: 12 }}>
+                <div style={{ padding: 40, textAlign: 'center', color: RT.textLow, fontSize: 13 }}>
                   {device.online ? 'No active sessions.' : 'Device offline.'}
                 </div>
               )
@@ -169,14 +169,14 @@ export function PanelContent({ device, tab, setTab, mobile = false }: PanelConte
                   gap: 5,
                 }}
               >
-                <Icons.plus size={11} stroke="currentColor" />
+                <Icons.plus size={13} stroke="currentColor" />
                 New schedule
               </button>
             </div>
 
             {scheduled.length === 0
               ? (
-                <div style={{ padding: 32, textAlign: 'center', color: RT.textLow, fontSize: 12 }}>
+                <div style={{ padding: 32, textAlign: 'center', color: RT.textLow, fontSize: 13 }}>
                   No scheduled tasks.
                 </div>
               )
@@ -264,12 +264,12 @@ function PanelHeader({ device, onClose }: PanelHeaderProps) {
       {/* Name + hostname */}
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <div style={{ fontSize: 14, fontWeight: 600, letterSpacing: '-.005em' }}>
+          <div style={{ fontSize: 15, fontWeight: 600, letterSpacing: '-.005em' }}>
             {device.name}
           </div>
           <Dot color={device.online ? RT.green : RT.textLow} size={6} pulse={device.online} />
         </div>
-        <div style={{ fontSize: 10, color: RT.textLow, fontFamily: FONT_MONO, marginTop: 2 }}>
+        <div style={{ fontSize: 11, color: RT.textLow, fontFamily: FONT_MONO, marginTop: 2 }}>
           {device.hostname}
         </div>
       </div>
@@ -277,7 +277,7 @@ function PanelHeader({ device, onClose }: PanelHeaderProps) {
       {/* Close button */}
       <button
         onClick={onClose}
-        style={{ ...btn('icon'), width: 24, height: 24, color: RT.textDim, fontSize: 12 }}
+        style={{ ...btn('icon'), width: 28, height: 28, color: RT.textDim, fontSize: 14 }}
       >
         ✕
       </button>

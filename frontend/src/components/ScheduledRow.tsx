@@ -58,11 +58,11 @@ export function ScheduledRow({ s, deviceId, onChanged, onEdit }: ScheduledRowPro
     }}>
       {/* Name + enabled badge */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-        <div style={{ fontSize: 12, fontWeight: 600, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+        <div style={{ fontSize: 13, fontWeight: 600, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
           {s.name}
         </div>
         <span style={{
-          fontSize: 9,
+          fontSize: 10,
           fontFamily: FONT_MONO,
           letterSpacing: '.06em',
           textTransform: 'uppercase',
@@ -78,14 +78,14 @@ export function ScheduledRow({ s, deviceId, onChanged, onEdit }: ScheduledRowPro
 
       {/* Cron + next run */}
       <div style={{
-        fontSize: 10,
+        fontSize: 11,
         fontFamily: FONT_MONO,
         color: RT.textDim,
         display: 'flex',
         alignItems: 'center',
         gap: 6,
       }}>
-        <Icons.clock size={9} stroke={RT.textLow} />
+        <Icons.clock size={10} stroke={RT.textLow} />
         <span>{s.cron}</span>
         {s.next_run && (
           <span style={{ color: RT.textLow }}>
@@ -108,8 +108,8 @@ export function ScheduledRow({ s, deviceId, onChanged, onEdit }: ScheduledRowPro
           }}
         >
           {s.enabled
-            ? <Icons.pause size={11} />
-            : <Icons.play size={11} />
+            ? <Icons.pause size={14} />
+            : <Icons.play size={14} />
           }
         </button>
 
@@ -124,7 +124,7 @@ export function ScheduledRow({ s, deviceId, onChanged, onEdit }: ScheduledRowPro
             color: RT.green,
           }}
         >
-          <Icons.forward size={11} />
+          <Icons.forward size={14} />
         </button>
 
         {/* Edit */}
@@ -138,7 +138,7 @@ export function ScheduledRow({ s, deviceId, onChanged, onEdit }: ScheduledRowPro
             color: RT.textDim,
           }}
         >
-          <Icons.terminal size={11} />
+          <Icons.terminal size={14} />
         </button>
 
         {/* Delete */}
@@ -152,7 +152,7 @@ export function ScheduledRow({ s, deviceId, onChanged, onEdit }: ScheduledRowPro
             color: RT.red,
           }}
         >
-          <Icons.stop size={11} />
+          <Icons.stop size={14} />
         </button>
       </div>
     </div>

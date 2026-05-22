@@ -37,11 +37,11 @@ export function Strip({ cards }: StripProps) {
     }}>
       {cells.map((c, i) => (
         <div key={c.label} style={{ padding: '0 22px', borderLeft: i === 0 ? 'none' : `1px solid ${RT.border}` }}>
-          <div style={{ fontSize: 9, color: RT.textLow, letterSpacing: '.14em', textTransform: 'uppercase', fontFamily: FONT_MONO, marginBottom: 6 }}>{c.label}</div>
+          <div style={{ fontSize: 10, color: RT.textLow, letterSpacing: '.14em', textTransform: 'uppercase', fontFamily: FONT_MONO, marginBottom: 6 }}>{c.label}</div>
           <div style={{ display: 'flex', alignItems: 'baseline', gap: 7 }}>
             {c.dot && <Dot color={c.dot} size={6} pulse />}
-            <div style={{ fontSize: 20, fontWeight: 500, letterSpacing: '-.02em', fontFamily: FONT_MONO, lineHeight: 1 }}>{c.value}</div>
-            {c.sub && <div style={{ fontSize: 10, color: RT.textLow, fontFamily: FONT_MONO }}>{c.sub}</div>}
+            <div style={{ fontSize: 22, fontWeight: 500, letterSpacing: '-.02em', fontFamily: FONT_MONO, lineHeight: 1 }}>{c.value}</div>
+            {c.sub && <div style={{ fontSize: 11, color: RT.textLow, fontFamily: FONT_MONO }}>{c.sub}</div>}
           </div>
           {c.bar != null && (
             <div style={{ marginTop: 7 }}>

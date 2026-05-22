@@ -169,7 +169,7 @@ export function StatusPill({ status }: StatusPillProps) {
   };
   const m: PillMeta = map[status] || { label: status, color: RT.textLow, pulse: false };
   return (
-    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 9, color: m.color, letterSpacing: '.06em', textTransform: 'uppercase', fontFamily: FONT_MONO }}>
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 10, color: m.color, letterSpacing: '.06em', textTransform: 'uppercase', fontFamily: FONT_MONO }}>
       <Dot color={m.color} size={5} pulse={m.pulse} />
       {m.label}
     </span>

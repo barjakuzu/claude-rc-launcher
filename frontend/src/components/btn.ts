@@ -16,9 +16,9 @@ export function btn(kind: BtnKind): CSSProperties {
     ...base,
     background: RT.panel,
     border: `1px solid ${RT.border}`,
-    borderRadius: 6,
-    width: 26,
-    height: 26,
+    borderRadius: 7,
+    width: 32,
+    height: 32,
     padding: 0,
     color: RT.textDim,
   };
@@ -27,9 +27,9 @@ export function btn(kind: BtnKind): CSSProperties {
     background: 'transparent',
     color: RT.textDim,
     border: `1px solid ${RT.border}`,
-    borderRadius: 4,
-    width: 22,
-    height: 22,
+    borderRadius: 6,
+    width: 28,
+    height: 28,
     padding: 0,
   };
   if (kind === 'tinyText') return {
@@ -37,9 +37,9 @@ export function btn(kind: BtnKind): CSSProperties {
     background: RT.panel,
     border: `1px solid ${RT.border}`,
     borderRadius: 6,
-    padding: '5px 10px',
+    padding: '7px 12px',
     color: RT.text,
-    fontSize: 11,
+    fontSize: 13,
     fontWeight: 500,
     gap: '5px',
   } as CSSProperties;

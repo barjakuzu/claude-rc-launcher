@@ -70,14 +70,14 @@ function DropItem({ active, onClick, hue, online, primary, secondary, badge, rig
           : <div style={{ width: 8, height: 8, borderRadius: 2, background: RT.borderHi }} />)}
       </div>
       <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ fontSize: 12, fontWeight: 500, color: muted ? RT.textDim : RT.text, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{primary}</div>
+        <div style={{ fontSize: 13, fontWeight: 500, color: muted ? RT.textDim : RT.text, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{primary}</div>
         {secondary && (
-          <div style={{ fontSize: 10, fontFamily: FONT_MONO, color: RT.textLow, marginTop: 2, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{secondary}</div>
+          <div style={{ fontSize: 11, fontFamily: FONT_MONO, color: RT.textLow, marginTop: 2, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{secondary}</div>
         )}
       </div>
       {right}
       {badge != null && (
-        <span style={{ fontSize: 10, fontFamily: FONT_MONO, color: RT.textDim, background: RT.bgRaised, border: `1px solid ${RT.border}`, padding: '1px 6px', borderRadius: 4 }}>{badge}</span>
+        <span style={{ fontSize: 11, fontFamily: FONT_MONO, color: RT.textDim, background: RT.bgRaised, border: `1px solid ${RT.border}`, padding: '1px 6px', borderRadius: 4 }}>{badge}</span>
       )}
     </button>
   );
@@ -117,7 +117,7 @@ function MachineSelector({ cards, openId, setOpenId, layout }: MachineSelectorPr
           display: 'inline-flex',
           alignItems: 'center',
           gap: 9,
-          fontSize: 12,
+          fontSize: 13,
           fontWeight: 500,
           minWidth: layout.mobile ? 200 : 220,
         }}
@@ -171,8 +171,8 @@ function MachineSelector({ cards, openId, setOpenId, layout }: MachineSelectorPr
                 secondary={`${c.hostname || c.id}${c.os ? ' · ' + c.os : ''}`}
                 right={
                   <div style={{ textAlign: 'right' }}>
-                    <div style={{ fontFamily: FONT_MONO, fontSize: 11 }}>{fmtK(c.tokens)}</div>
-                    <div style={{ fontFamily: FONT_MONO, fontSize: 10, color: RT.textLow }}>{c.sessions} sess</div>
+                    <div style={{ fontFamily: FONT_MONO, fontSize: 12 }}>{fmtK(c.tokens)}</div>
+                    <div style={{ fontFamily: FONT_MONO, fontSize: 11, color: RT.textLow }}>{c.sessions} sess</div>
                   </div>
                 }
               />
@@ -240,7 +240,7 @@ function VersionChip() {
           cursor: updating ? 'wait' : 'pointer',
           color: RT.amber,
           fontFamily: FONT_MONO,
-          fontSize: 10,
+          fontSize: 11,
           fontWeight: 600,
           whiteSpace: 'nowrap',
           opacity: updating ? 0.7 : 1,
@@ -252,7 +252,7 @@ function VersionChip() {
   }
 
   return vLabel ? (
-    <span style={{ fontFamily: FONT_MONO, fontSize: 10, color: RT.textLow, letterSpacing: '.06em' }}>
+    <span style={{ fontFamily: FONT_MONO, fontSize: 11, color: RT.textLow, letterSpacing: '.06em' }}>
       {vLabel}
     </span>
   ) : null;
@@ -301,7 +301,7 @@ function GlobalMenu({ openId, onRefresh }: GlobalMenuProps) {
     cursor: 'pointer',
     color: RT.text,
     fontFamily: FONT_SANS,
-    fontSize: 12,
+    fontSize: 13,
     display: 'flex',
     alignItems: 'center',
     gap: 9,
@@ -314,7 +314,7 @@ function GlobalMenu({ openId, onRefresh }: GlobalMenuProps) {
         onClick={() => setOpen((o) => !o)}
         title="Menu"
       >
-        <Icons.more size={12} stroke={RT.textDim} />
+        <Icons.more size={14} stroke={RT.textDim} />
       </button>
 
       {open && (
@@ -407,14 +407,14 @@ export function Header({ cards, openId, setOpenId, layout, onRefresh }: HeaderPr
             alignItems: 'center',
             justifyContent: 'center',
             fontFamily: FONT_MONO,
-            fontSize: 10,
+            fontSize: 11,
             fontWeight: 600,
             letterSpacing: '.02em',
             color: RT.text,
           }}>rc</div>
           {!layout.mobile && (
             <>
-              <div style={{ fontSize: 13, fontWeight: 600, letterSpacing: '-.005em' }}>Claude RC</div>
+              <div style={{ fontSize: 14, fontWeight: 600, letterSpacing: '-.005em' }}>Claude RC</div>
               <VersionChip />
             </>
           )}
@@ -438,12 +438,12 @@ export function Header({ cards, openId, setOpenId, layout, onRefresh }: HeaderPr
             gap: 8,
             width: 260,
             fontFamily: FONT_MONO,
-            fontSize: 11,
+            fontSize: 12,
             color: RT.textLow,
           }}>
-            <Icons.search size={11} stroke={RT.textLow} />
+            <Icons.search size={12} stroke={RT.textLow} />
             <span style={{ flex: 1 }}>Search sessions, tasks…</span>
-            <span style={{ padding: '0px 5px', border: `1px solid ${RT.border}`, borderRadius: 3, fontSize: 10 }}>⌘K</span>
+            <span style={{ padding: '0px 5px', border: `1px solid ${RT.border}`, borderRadius: 3, fontSize: 11 }}>⌘K</span>
           </div>
         )}
 
@@ -453,7 +453,7 @@ export function Header({ cards, openId, setOpenId, layout, onRefresh }: HeaderPr
           title="Share tunnel"
           onClick={() => setShareOpen(true)}
         >
-          <Icons.share size={12} stroke={RT.textDim} />
+          <Icons.share size={14} stroke={RT.textDim} />
         </button>
 
         {/* Global ⋯ menu (stop all, refresh, logout, classic UI) */}

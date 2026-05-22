@@ -36,7 +36,7 @@ export function PanelTabs({ tab, setTab, sessionCount, scheduledCount }: PanelTa
             color: tab === id ? RT.text : RT.textLow,
             borderBottom: `2px solid ${tab === id ? RT.accent : 'transparent'}`,
             fontFamily: FONT_MONO,
-            fontSize: 11,
+            fontSize: 12,
             fontWeight: 500,
             letterSpacing: '.04em',
             textTransform: 'uppercase',

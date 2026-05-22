@@ -120,7 +120,7 @@ export function SessionRow({ s, hue, deviceId, onChanged, onPreview }: SessionRo
     cursor: 'pointer',
     color: RT.text,
     fontFamily: 'inherit',
-    fontSize: 11,
+    fontSize: 12,
     display: 'flex',
     alignItems: 'center',
     gap: 7,
@@ -140,7 +140,7 @@ export function SessionRow({ s, hue, deviceId, onChanged, onPreview }: SessionRo
       {/* Title row */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
         <div style={{
-          fontSize: 12,
+          fontSize: 13,
           fontWeight: 600,
           flex: 1,
           minWidth: 0,
@@ -158,12 +158,12 @@ export function SessionRow({ s, hue, deviceId, onChanged, onPreview }: SessionRo
         display: 'flex',
         alignItems: 'center',
         gap: 8,
-        fontSize: 10,
+        fontSize: 11,
         fontFamily: FONT_MONO,
         color: RT.textDim,
       }}>
         <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3, whiteSpace: 'nowrap' }}>
-          <Icons.folder size={9} stroke={RT.textLow} /> {dir}
+          <Icons.folder size={10} stroke={RT.textLow} /> {dir}
         </span>
         <CapBar pct={pct} height={2} bg="rgba(255,255,255,.04)" color={hueColor} />
         <span style={{ whiteSpace: 'nowrap', color: RT.textDim }}>{tokensLabel}</span>
@@ -174,7 +174,7 @@ export function SessionRow({ s, hue, deviceId, onChanged, onPreview }: SessionRo
         <div style={{
           flex: 1,
           fontFamily: FONT_MONO,
-          fontSize: 10,
+          fontSize: 11,
           color: RT.textLow,
           whiteSpace: 'nowrap',
           overflow: 'hidden',
@@ -183,14 +183,14 @@ export function SessionRow({ s, hue, deviceId, onChanged, onPreview }: SessionRo
           {sessionIdDisplay}
         </div>
         <button style={miniStyle} title="Copy session ID" onClick={handleCopy}>
-          <Icons.copy size={10} stroke={RT.textDim} />
+          <Icons.copy size={14} stroke={RT.textDim} />
         </button>
         <button
           style={{ ...miniStyle, opacity: s.url ? 1 : 0.4, cursor: s.url ? 'pointer' : 'default' }}
           title="Open session URL"
           onClick={handleLink}
         >
-          <Icons.link size={10} stroke={RT.textDim} />
+          <Icons.link size={14} stroke={RT.textDim} />
         </button>
         <button
           disabled={pending}
@@ -198,7 +198,7 @@ export function SessionRow({ s, hue, deviceId, onChanged, onPreview }: SessionRo
           title="Restart session"
           onClick={handleRefresh}
         >
-          <Icons.refresh size={10} stroke={RT.green} />
+          <Icons.refresh size={14} stroke={RT.green} />
         </button>
         <button
           disabled={pending}
@@ -206,7 +206,7 @@ export function SessionRow({ s, hue, deviceId, onChanged, onPreview }: SessionRo
           title="Stop session"
           onClick={handleStop}
         >
-          <Icons.stop size={9} stroke={RT.red} />
+          <Icons.stop size={14} stroke={RT.red} />
         </button>
 
         {/* ⋯ menu */}
@@ -217,7 +217,7 @@ export function SessionRow({ s, hue, deviceId, onChanged, onPreview }: SessionRo
             disabled={pending}
             onClick={() => setMenuOpen((o) => !o)}
           >
-            <Icons.more size={10} stroke={RT.textDim} />
+            <Icons.more size={14} stroke={RT.textDim} />
           </button>
 
           {menuOpen && (
