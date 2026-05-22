@@ -8,6 +8,7 @@ import { PanelTabs } from './PanelTabs';
 import type { PanelTab } from './PanelTabs';
 import { SessionRow } from './SessionRow';
 import { ScheduledRow } from './ScheduledRow';
+import { ScheduleModal } from './ScheduleModal';
 import { Logs } from './Logs';
 import { MiniLauncher } from './MiniLauncher';
 import { api } from '../api';
@@ -55,7 +56,7 @@ function usePanelData(deviceId: string, tab: PanelTab) {
     if (tab === 'scheduled') fetchScheduled();
   }, [tab, fetchScheduled]);
 
-  return { sessions, scheduled, reloadSessions: fetchSessions };
+  return { sessions, scheduled, reloadSessions: fetchSessions, reloadSchedules: fetchScheduled };
 }
 
 // ─── PanelContent ─────────────────────────────────────────────────────────────
@@ -69,7 +70,31 @@ export interface PanelContentProps {
 
 export function PanelContent({ device, tab, setTab, mobile = false }: PanelContentProps) {
   const hue = hueForId(device.id);
-  const { sessions, scheduled, reloadSessions } = usePanelData(device.id, tab);
+  const { sessions, scheduled, reloadSessions, reloadSchedules } = usePanelData(device.id, tab);
+
+  // Schedule modal state
+  const [modalOpen, setModalOpen] = useState(false);
+  const [editing,   setEditing]   = useState<Schedule | null>(null);
+
+  function openCreate() {
+    setEditing(null);
+    setModalOpen(true);
+  }
+
+  function openEdit(s: Schedule) {
+    setEditing(s);
+    setModalOpen(true);
+  }
+
+  function closeModal() {
+    setModalOpen(false);
+    setEditing(null);
+  }
+
+  function handleSaved() {
+    reloadSchedules();
+    closeModal();
+  }
 
   return (
     <>
@@ -116,20 +141,50 @@ export function PanelContent({ device, tab, setTab, mobile = false }: PanelConte
 
         {tab === 'scheduled' && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {/* "+ New schedule" button */}
+            <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 2 }}>
+              <button
+                onClick={openCreate}
+                style={{
+                  ...btn('tinyText'),
+                  gap: 5,
+                }}
+              >
+                <Icons.plus size={11} stroke="currentColor" />
+                New schedule
+              </button>
+            </div>
+
             {scheduled.length === 0
               ? (
-                <div style={{ padding: 40, textAlign: 'center', color: RT.textLow, fontSize: 12 }}>
+                <div style={{ padding: 32, textAlign: 'center', color: RT.textLow, fontSize: 12 }}>
                   No scheduled tasks.
                 </div>
               )
               : scheduled.map((s) => (
-                <ScheduledRow key={s.id} s={s} />
+                <ScheduledRow
+                  key={s.id}
+                  s={s}
+                  deviceId={device.id}
+                  onChanged={reloadSchedules}
+                  onEdit={openEdit}
+                />
               ))}
           </div>
         )}
 
         {tab === 'logs' && <Logs device={device} />}
       </div>
+
+      {/* Schedule create/edit modal */}
+      {modalOpen && (
+        <ScheduleModal
+          deviceId={device.id}
+          initial={editing}
+          onClose={closeModal}
+          onSaved={handleSaved}
+        />
+      )}
     </>
   );
 }

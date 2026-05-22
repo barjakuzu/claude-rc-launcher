@@ -8,5 +8,5 @@ export interface Session {
 }
 export interface Schedule {
   id: string; name: string; cron: string; enabled: boolean;
-  mode?: string; workdir?: string; next_run?: string; device?: string;
+  prompt?: string; mode?: string; model?: string; workdir?: string; next_run?: string; device?: string;
 }
