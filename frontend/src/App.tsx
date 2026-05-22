@@ -9,6 +9,9 @@ import { ensureKeyframes } from './components/primitives';
 import { Header } from './components/Header';
 import { Strip } from './components/Strip';
 import { Grid } from './components/Grid';
+import { SidePanel } from './components/SidePanel';
+import { MobileDetail } from './components/MobileDetail';
+import type { PanelTab } from './components/PanelTabs';
 
 ensureKeyframes();
 
@@ -16,8 +19,7 @@ export function App() {
   const layout = useLayout();
   const [cards, setCards] = useState<DeviceCard[]>([]);
   const [openId, setOpenId] = useState<string | null>(null);
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  const [_tab, _setTab] = useState<string>('running');
+  const [tab, setTab] = useState<PanelTab>('running');
 
   // Poll /rc/overview every 5 seconds.
   useEffect(() => {
@@ -42,6 +44,14 @@ export function App() {
     };
   }, []);
 
+  // Reset tab when switching device.
+  const handleOpen = (id: string | null) => {
+    if (id !== openId) setTab('running');
+    setOpenId(id);
+  };
+
+  const openCard: DeviceCard | undefined = cards.find((c) => c.id === openId);
+
   const onlineCount = cards.filter((c) => c.online).length;
   const totalTokens = cards.reduce((s, c) => s + c.tokens, 0);
 
@@ -60,7 +70,7 @@ export function App() {
       <Header
         cards={cards}
         openId={openId}
-        setOpenId={setOpenId}
+        setOpenId={handleOpen}
         onlineCount={onlineCount}
         totalTokens={totalTokens}
         layout={layout}
@@ -69,9 +79,29 @@ export function App() {
       {!layout.mobile && <Strip cards={cards} />}
 
       <div style={{ flex: 1, display: 'flex', overflow: 'hidden', position: 'relative' }}>
-        <Grid cards={cards} layout={layout} openId={openId} onOpen={setOpenId} />
+        <Grid cards={cards} layout={layout} openId={openId} onOpen={handleOpen} />
 
-        {/* side panel — Task 9 */}
+        {/* Side panel — desktop slides from right; mobile becomes full-screen overlay */}
+        {openCard && (
+          layout.mobile
+            ? (
+              <MobileDetail
+                device={openCard}
+                tab={tab}
+                setTab={setTab}
+                onClose={() => setOpenId(null)}
+              />
+            )
+            : (
+              <SidePanel
+                device={openCard}
+                layout={layout}
+                tab={tab}
+                setTab={setTab}
+                onClose={() => setOpenId(null)}
+              />
+            )
+        )}
       </div>
     </div>
   );
