@@ -1,6 +1,6 @@
 // primitives.tsx — UI primitives ported from docs/design-reference/tokens.jsx.
 import type { ReactNode } from 'react';
-import { FONT_MONO, RT, capColor } from '../tokens';
+import { FONT_MONO, FN, RT, capColor } from '../tokens';
 
 // Inject keyframes once.
 export function ensureKeyframes(): void {
@@ -29,7 +29,7 @@ export interface DotProps {
   pulse?: boolean;
 }
 
-export function Dot({ color = RT.green, size = 8, pulse = false }: DotProps) {
+export function Dot({ color = FN.green, size = 8, pulse = false }: DotProps) {
   const pulseStyle = pulse
     ? { boxShadow: `0 0 0 0 ${color}`, animation: 'rc-pulse 1.8s ease-out infinite' }
     : { boxShadow: `0 0 6px ${color}` };
