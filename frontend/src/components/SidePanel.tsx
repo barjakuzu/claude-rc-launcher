@@ -1,8 +1,7 @@
 // SidePanel.tsx — RSidePanel + RPanelHeader + shared PanelContent.
-// Ported from variant-ops-refined.jsx lines 393-409, 442-464.
 import { useState, useEffect, useCallback } from 'react';
-import { RT, FONT_MONO, tintFor, tintSoft, hueForId } from '../tokens';
-import { Icons, Dot, StatusPill as _StatusPill } from './primitives';
+import { RT, FONT_MONO, tintFor, tintSoft, hueForId, kindForOs } from '../tokens';
+import { Icons, Dot } from './primitives';
 import { btn } from './btn';
 import { PanelTabs } from './PanelTabs';
 import type { PanelTab } from './PanelTabs';
@@ -16,9 +15,6 @@ import { ResumeList } from './ResumeList';
 import { api } from '../api';
 import type { DeviceCard, Session, Schedule } from '../types';
 import type { Layout } from '../useLayout';
-
-// Suppress unused import warning — StatusPill is used transitively via primitives
-void _StatusPill;
 
 // ─── usePanelData ─────────────────────────────────────────────────────────────
 // Shared data-fetching hook used by both SidePanel and MobileDetail.
@@ -231,7 +227,6 @@ export function PanelContent({ device, tab, setTab, mobile = false }: PanelConte
 }
 
 // ─── PanelHeader (desktop) ────────────────────────────────────────────────────
-// Ported from variant-ops-refined.jsx lines 442-464.
 interface PanelHeaderProps {
   device: DeviceCard;
   onClose: () => void;
@@ -240,7 +235,7 @@ interface PanelHeaderProps {
 function PanelHeader({ device, onClose }: PanelHeaderProps) {
   const hue = hueForId(device.id);
   const hueColor = tintFor(hue, 0.70, 0.10);
-  const KindIcon = Icons.server; // kindForOs is in Grid; keep SidePanel self-contained
+  const KindIcon = Icons[kindForOs(device.os)] || Icons.server;
 
   return (
     <div style={{
@@ -291,7 +286,6 @@ function PanelHeader({ device, onClose }: PanelHeaderProps) {
 }
 
 // ─── SidePanel (desktop) ──────────────────────────────────────────────────────
-// Ported from variant-ops-refined.jsx lines 393-409.
 export interface SidePanelProps {
   device: DeviceCard;
   layout: Layout;

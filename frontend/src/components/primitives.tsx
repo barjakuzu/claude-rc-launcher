@@ -1,4 +1,4 @@
-// primitives.tsx — UI primitives ported from docs/design-reference/tokens.jsx.
+// primitives.tsx — shared UI primitives: Dot, Sparkline, CapBar, Icons, StatusPill.
 import type { ReactNode } from 'react';
 import { FONT_MONO, FN, RT, capColor } from '../tokens';
 
@@ -21,7 +21,6 @@ export function ensureKeyframes(): void {
   `;
   document.head.appendChild(s);
 }
-ensureKeyframes();
 
 export interface DotProps {
   color?: string;

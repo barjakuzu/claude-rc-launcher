@@ -1,5 +1,4 @@
 // Header.tsx — RHeader + MachineSelector + DropItem.
-// Ported from variant-ops-refined.jsx lines 82-237.
 import { useState, useEffect, useRef } from 'react';
 import type { DeviceCard } from '../types';
 import type { Layout } from '../useLayout';

@@ -8,6 +8,9 @@ _HISTORY = []      # last N summed-token samples
 _MAX = 12
 _lock = threading.Lock()
 
+# Cache OS string — /etc/os-release never changes at runtime.
+_OS_CACHE: str | None = None
+
 def sample_tokens(total_fn):
     """Append the current summed-token total (from total_fn()) to the ring buffer."""
     try:
@@ -24,15 +27,20 @@ def token_history():
     with _lock:
         return list(_HISTORY)
 
-def _os_pretty():
+def _os_pretty() -> str:
+    global _OS_CACHE
+    if _OS_CACHE is not None:
+        return _OS_CACHE
     try:
         with open("/etc/os-release") as f:
             for line in f:
                 if line.startswith("PRETTY_NAME="):
-                    return line.split("=", 1)[1].strip().strip('"')
+                    _OS_CACHE = line.split("=", 1)[1].strip().strip('"')
+                    return _OS_CACHE
     except OSError:
         pass
-    return platform.platform()
+    _OS_CACHE = platform.platform()
+    return _OS_CACHE
 
 def system_stats():
     """Return {loadavg:[1m,5m,15m], cores, os}."""

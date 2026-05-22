@@ -1,6 +1,5 @@
-// MobileDetail.tsx — RMobileDetail ported from variant-ops-refined.jsx lines 412-440.
-// Full-screen overlay for mobile. Reuses PanelContent from SidePanel.
-import { RT, FONT_MONO, hueForId } from '../tokens';
+// MobileDetail.tsx — full-screen overlay for mobile. Reuses PanelContent from SidePanel.
+import { RT, FONT_MONO } from '../tokens';
 import { Icons, Dot } from './primitives';
 import { btn } from './btn';
 import { PanelContent } from './SidePanel';
@@ -15,9 +14,6 @@ export interface MobileDetailProps {
 }
 
 export function MobileDetail({ device, tab, setTab, onClose }: MobileDetailProps) {
-  const hue = hueForId(device.id);
-  void hue; // hue available for future use
-
   return (
     <div style={{
       position: 'absolute',
@@ -49,8 +45,7 @@ export function MobileDetail({ device, tab, setTab, onClose }: MobileDetailProps
             {device.hostname}
           </div>
         </div>
-        {/* More button — stub, wired in Task 12 */}
-        <button style={btn('icon')} onClick={() => {/* Task 12 */}}>
+        <button style={btn('icon')}>
           <Icons.more size={14} stroke={RT.textDim} />
         </button>
       </div>

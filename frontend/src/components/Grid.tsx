@@ -1,9 +1,8 @@
 // Grid.tsx — RGrid + RMobileStrip + RDeviceCard.
-// Ported from variant-ops-refined.jsx lines 269-390.
 import { useState } from 'react';
 import type { DeviceCard } from '../types';
 import type { Layout } from '../useLayout';
-import { RT, FONT_MONO, FONT_SANS, tintFor, tintSoft, tintEdge, hueForId, fmtK } from '../tokens';
+import { RT, FONT_MONO, FONT_SANS, tintFor, tintSoft, tintEdge, hueForId, fmtK, kindForOs } from '../tokens';
 import { Dot, Sparkline, CapBar, Icons } from './primitives';
 import { btn } from './btn';
 
@@ -25,14 +24,6 @@ interface DeviceCardProps {
 
 interface MobileStripProps {
   cards: DeviceCard[];
-}
-
-// ─── os → icon kind helper ───────────────────────────────────────────────────
-
-function kindForOs(os: string): keyof typeof Icons {
-  if (/mac/i.test(os)) return 'laptop';
-  if (/ubuntu|debian|linux|pop|raspbian/i.test(os)) return 'server';
-  return 'server';
 }
 
 // ─── RMobileStrip ────────────────────────────────────────────────────────────

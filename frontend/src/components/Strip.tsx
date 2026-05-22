@@ -1,5 +1,4 @@
 // Strip.tsx — RStrip (aggregate strip). Desktop only.
-// Ported from variant-ops-refined.jsx lines 240-266.
 import type { DeviceCard } from '../types';
 import { RT, FONT_MONO, fmtK } from '../tokens';
 import { Dot, CapBar } from './primitives';

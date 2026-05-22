@@ -1,6 +1,6 @@
 // ResumeList.tsx — list and resume Claude sessions.
 import { useState, useEffect, useRef } from 'react';
-import { RT, FONT_MONO } from '../tokens';
+import { RT, FONT_MONO, fmtDate } from '../tokens';
 import { btn } from './btn';
 import { api } from '../api';
 
@@ -24,14 +24,6 @@ interface ResumeListProps {
   onResumed: () => void;
 }
 
-function fmtDate(iso: string): string {
-  try {
-    const d = new Date(iso);
-    return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
-  } catch {
-    return iso;
-  }
-}
 
 export function ResumeList({ deviceId, onClose, onResumed }: ResumeListProps) {
   const mounted = useRef(true);

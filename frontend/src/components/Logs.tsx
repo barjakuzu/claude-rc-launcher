@@ -1,5 +1,4 @@
-// Logs.tsx — logs view for the panel body, ported from variant-ops-refined.jsx lines 540-547.
-// Fetches api.stats(deviceId) and renders real values in a <pre>.
+// Logs.tsx — device health view: fetches /rc/stats and renders load, OS, token history.
 import { useState, useEffect } from 'react';
 import { RT, FONT_MONO, fmtK } from '../tokens';
 import { api } from '../api';

@@ -1,5 +1,4 @@
 // MiniLauncher.tsx — in-panel launcher with progressive disclosure.
-// Minimal row matches variant-ops-refined.jsx RMiniLauncher lines 466-498.
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { RT, FONT_MONO } from '../tokens';
 import { Icons } from './primitives';

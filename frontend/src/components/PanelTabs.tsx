@@ -1,4 +1,4 @@
-// PanelTabs.tsx — RPanelTabs ported from variant-ops-refined.jsx lines 500-521.
+// PanelTabs.tsx — tab bar (Sessions / Scheduled / Logs).
 import { RT, FONT_MONO } from '../tokens';
 
 export type PanelTab = 'running' | 'scheduled' | 'logs';

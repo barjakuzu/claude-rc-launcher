@@ -33,6 +33,7 @@ from schedules import (
 )
 from scheduler import validate_cron, next_cron_run, _fire_schedule, WIZARD_PROMPT
 from devices import get_device, list_devices_public, load_devices
+import overview
 
 
 def _parse_projects():
@@ -450,7 +451,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._json(s)
 
         elif path == "/overview":
-            import overview
             local_sess = list_rc_sessions()
             local_stats = {**stats.system_stats(), "token_history": stats.token_history()}
             local_card = {"id": "local", "name": "This machine (VM)", "base_url": ""}

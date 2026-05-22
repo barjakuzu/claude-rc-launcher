@@ -1,4 +1,4 @@
-// tokens.ts — design tokens, helpers. Ported from docs/design-reference.
+// tokens.ts — design tokens and shared helpers.
 
 export const FONT_SANS = "'Geist', system-ui, sans-serif";
 export const FONT_SERIF = "'Instrument Serif', Georgia, serif";
@@ -51,4 +51,17 @@ export const hueForId = (id: string): number => {
   let h = 0;
   for (const c of id) h = (h * 31 + c.charCodeAt(0)) % 360;
   return h;
+};
+
+// OS string → icon key ('laptop' | 'server').
+export const kindForOs = (os: string): 'laptop' | 'server' =>
+  /mac/i.test(os) ? 'laptop' : 'server';
+
+// Format an ISO date string to a short human-readable label.
+export const fmtDate = (iso: string): string => {
+  try {
+    return new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+  } catch {
+    return iso;
+  }
 };

@@ -1,4 +1,4 @@
-// SessionRow.tsx — RSessionRow ported from variant-ops-refined.jsx lines 553-583.
+// SessionRow.tsx — per-session card with actions (open, copy, restart, stop, unstick, preview).
 import type { CSSProperties } from 'react';
 import { useState, useEffect, useRef } from 'react';
 import { RT, FONT_MONO, tintFor } from '../tokens';

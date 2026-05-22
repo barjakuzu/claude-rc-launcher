@@ -1,4 +1,4 @@
-// btn.ts — button style helper. Ported from variant-ops-refined.jsx lines 646-665.
+// btn.ts — button style helper.
 import type { CSSProperties } from 'react';
 import { RT } from '../tokens';
 

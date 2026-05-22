@@ -1,5 +1,4 @@
 // App.tsx — root shell. Owns cards/openId/tab state + overview polling.
-// Ported from variant-ops-refined.jsx lines 48-79.
 import { useState, useEffect, useCallback } from 'react';
 import { RT, FONT_SANS } from './tokens';
 import { useLayout } from './useLayout';
