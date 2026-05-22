@@ -1,5 +1,5 @@
 // PreviewModal.tsx — tmux pane preview for a session.
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { RT, FONT_MONO } from '../tokens';
 import { btn } from './btn';
 import { api } from '../api';
@@ -24,7 +24,7 @@ export function PreviewModal({ deviceId, name, onClose }: PreviewModalProps) {
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const fetchPreview = async () => {
+  const fetchPreview = useCallback(async () => {
     try {
       const data = await api.preview(deviceId, name) as PreviewResult;
       if (mounted.current) {
@@ -36,7 +36,7 @@ export function PreviewModal({ deviceId, name, onClose }: PreviewModalProps) {
         setError(err instanceof Error ? err.message : 'Failed to load preview');
       }
     }
-  };
+  }, [deviceId, name]);
 
   // Fetch on mount + optional 3s auto-refresh
   useEffect(() => {
@@ -45,8 +45,7 @@ export function PreviewModal({ deviceId, name, onClose }: PreviewModalProps) {
     if (!autoRefresh) return;
     const id = setInterval(() => { if (!cancelled) fetchPreview(); }, 3000);
     return () => { cancelled = true; clearInterval(id); };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [deviceId, name, autoRefresh]);
+  }, [deviceId, name, autoRefresh, fetchPreview]);
 
   return (
     <div

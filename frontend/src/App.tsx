@@ -34,26 +34,12 @@ export function App() {
 
   // Poll /rc/overview every 5 seconds.
   useEffect(() => {
-    let cancelled = false;
-
-    const load = async () => {
-      try {
-        const data = await api.overview();
-        if (!cancelled && data?.devices) {
-          setCards(data.devices as DeviceCard[]);
-        }
-      } catch {
-        // Network error — keep existing cards.
-      }
-    };
-
-    load();
-    const interval = setInterval(load, 5000);
+    loadOverview();
+    const interval = setInterval(loadOverview, 5000);
     return () => {
-      cancelled = true;
       clearInterval(interval);
     };
-  }, []);
+  }, [loadOverview]);
 
   // Reset tab when switching device.
   const handleOpen = (id: string | null) => {
