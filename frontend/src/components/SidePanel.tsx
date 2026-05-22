@@ -9,6 +9,7 @@ import type { PanelTab } from './PanelTabs';
 import { SessionRow } from './SessionRow';
 import { ScheduledRow } from './ScheduledRow';
 import { Logs } from './Logs';
+import { MiniLauncher } from './MiniLauncher';
 import { api } from '../api';
 import type { DeviceCard, Session, Schedule } from '../types';
 import type { Layout } from '../useLayout';
@@ -72,89 +73,15 @@ export function PanelContent({ device, tab, setTab, mobile = false }: PanelConte
 
   return (
     <>
-      {/* MiniLauncher slot — Task 10 will replace this */}
-      {/* data-launcher-slot marks the seam for Task 10 */}
-      <div data-launcher-slot="true" style={{
-        flex: 'none',
-        padding: '12px 14px',
-        borderBottom: `1px solid ${RT.border}`,
-        background: RT.bg,
-      }}>
-        <div style={{
-          fontSize: 9,
-          color: RT.textLow,
-          letterSpacing: '.14em',
-          textTransform: 'uppercase',
-          fontFamily: FONT_MONO,
-          marginBottom: 8,
-        }}>
-          Launch on {device.name}
-        </div>
-        {/* Launcher disabled stub — real launcher is Task 10 */}
-        <div style={{
-          display: 'flex',
-          gap: 6,
-          flexWrap: mobile ? 'wrap' : 'nowrap',
-          opacity: 0.4,
-          pointerEvents: 'none',
-        }}>
-          <input
-            readOnly
-            value=""
-            placeholder="/path/to/project"
-            style={{
-              flex: 1,
-              minWidth: mobile ? '100%' : 0,
-              background: RT.panel,
-              color: RT.text,
-              border: `1px solid ${RT.border}`,
-              borderRadius: 6,
-              padding: '7px 9px',
-              fontFamily: FONT_MONO,
-              fontSize: 11,
-              outline: 'none',
-            }}
-          />
-          <select
-            disabled
-            style={{
-              background: RT.panel,
-              color: RT.text,
-              border: `1px solid ${RT.border}`,
-              borderRadius: 6,
-              padding: '7px 9px',
-              fontFamily: FONT_MONO,
-              fontSize: 11,
-              outline: 'none',
-            }}
-          >
-            <option>STANDARD</option>
-            <option>TEAMMATE</option>
-            <option>SAFE</option>
-          </select>
-          <button
-            disabled
-            style={{
-              background: RT.text,
-              color: RT.bg,
-              border: 'none',
-              padding: '7px 13px',
-              borderRadius: 6,
-              cursor: 'not-allowed',
-              fontFamily: 'inherit',
-              fontSize: 11,
-              fontWeight: 600,
-              display: 'inline-flex',
-              alignItems: 'center',
-              gap: 5,
-              flex: mobile ? 1 : 'none',
-              justifyContent: 'center',
-            }}
-          >
-            <Icons.play size={10} stroke={RT.bg} /> Launch
-          </button>
-        </div>
-      </div>
+      <MiniLauncher
+        deviceId={device.id}
+        deviceName={device.name}
+        mobile={mobile}
+        onLaunched={() => {
+          reloadSessions();
+          setTab('running');
+        }}
+      />
 
       <PanelTabs
         tab={tab}
