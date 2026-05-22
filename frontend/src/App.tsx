@@ -1,6 +1,6 @@
 // App.tsx — root shell. Owns cards/openId/tab state + overview polling.
 // Ported from variant-ops-refined.jsx lines 48-79.
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { RT, FONT_SANS } from './tokens';
 import { useLayout } from './useLayout';
 import { api } from './api';
@@ -20,6 +20,17 @@ export function App() {
   const [cards, setCards] = useState<DeviceCard[]>([]);
   const [openId, setOpenId] = useState<string | null>(null);
   const [tab, setTab] = useState<PanelTab>('running');
+
+  const loadOverview = useCallback(async () => {
+    try {
+      const data = await api.overview();
+      if (data?.devices) {
+        setCards(data.devices as DeviceCard[]);
+      }
+    } catch {
+      // Network error — keep existing cards.
+    }
+  }, []);
 
   // Poll /rc/overview every 5 seconds.
   useEffect(() => {
@@ -74,6 +85,7 @@ export function App() {
         onlineCount={onlineCount}
         totalTokens={totalTokens}
         layout={layout}
+        onRefresh={loadOverview}
       />
 
       {!layout.mobile && <Strip cards={cards} />}

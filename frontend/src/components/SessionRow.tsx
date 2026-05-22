@@ -1,6 +1,6 @@
 // SessionRow.tsx — RSessionRow ported from variant-ops-refined.jsx lines 553-583.
 import type { CSSProperties } from 'react';
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { RT, FONT_MONO, tintFor } from '../tokens';
 import { Icons, CapBar, StatusPill } from './primitives';
 import { btn } from './btn';
@@ -12,15 +12,27 @@ export interface SessionRowProps {
   hue: number;
   deviceId: string;
   onChanged: () => void;
+  onPreview: (name: string) => void;
 }
 
 function truncate(s: string, n: number): string {
   return s.length > n ? s.slice(0, n) + '…' : s;
 }
 
-export function SessionRow({ s, hue, deviceId, onChanged }: SessionRowProps) {
+export function SessionRow({ s, hue, deviceId, onChanged, onPreview }: SessionRowProps) {
   const [pending, setPending] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
   const hueColor = tintFor(hue, 0.66, 0.08);
+
+  // Click-outside to close ⋯ menu
+  useEffect(() => {
+    const off = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) setMenuOpen(false);
+    };
+    if (menuOpen) document.addEventListener('mousedown', off);
+    return () => document.removeEventListener('mousedown', off);
+  }, [menuOpen]);
 
   // Compute dir: basename of workdir.
   const dir = s.workdir
@@ -79,7 +91,41 @@ export function SessionRow({ s, hue, deviceId, onChanged }: SessionRowProps) {
     }
   };
 
+  const handleUnstick = async () => {
+    setMenuOpen(false);
+    setPending(true);
+    try {
+      await api.unstick(deviceId, s.name);
+    } catch {/* ignore */}
+    finally {
+      setPending(false);
+      onChanged();
+    }
+  };
+
+  const handlePreviewClick = () => {
+    setMenuOpen(false);
+    onPreview(s.name);
+  };
+
   const miniStyle: CSSProperties = btn('mini');
+
+  const menuItemStyle: CSSProperties = {
+    width: '100%',
+    textAlign: 'left',
+    background: 'transparent',
+    border: 'none',
+    borderRadius: 4,
+    padding: '7px 9px',
+    cursor: 'pointer',
+    color: RT.text,
+    fontFamily: 'inherit',
+    fontSize: 11,
+    display: 'flex',
+    alignItems: 'center',
+    gap: 7,
+    whiteSpace: 'nowrap',
+  };
 
   return (
     <div style={{
@@ -162,10 +208,53 @@ export function SessionRow({ s, hue, deviceId, onChanged }: SessionRowProps) {
         >
           <Icons.stop size={9} stroke={RT.red} />
         </button>
-        {/* ⋯ menu stub — wired in Task 12 */}
-        <button style={miniStyle} title="More options" onClick={() => {/* Task 12 */}}>
-          <Icons.more size={10} stroke={RT.textDim} />
-        </button>
+
+        {/* ⋯ menu */}
+        <div ref={menuRef} style={{ position: 'relative' }}>
+          <button
+            style={{ ...miniStyle, opacity: pending ? 0.6 : 1 }}
+            title="More options"
+            disabled={pending}
+            onClick={() => setMenuOpen((o) => !o)}
+          >
+            <Icons.more size={10} stroke={RT.textDim} />
+          </button>
+
+          {menuOpen && (
+            <div style={{
+              position: 'absolute',
+              bottom: '100%',
+              right: 0,
+              marginBottom: 4,
+              background: RT.panel,
+              border: `1px solid ${RT.borderHi}`,
+              borderRadius: 8,
+              padding: 4,
+              zIndex: 20,
+              boxShadow: '0 8px 24px rgba(0,0,0,.4)',
+              minWidth: 130,
+            }}>
+              <button
+                style={menuItemStyle}
+                onClick={handlePreviewClick}
+                onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = RT.bgRaised; }}
+                onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = 'transparent'; }}
+              >
+                <Icons.search size={10} stroke={RT.textDim} />
+                Preview
+              </button>
+              <button
+                style={menuItemStyle}
+                onClick={handleUnstick}
+                onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = RT.bgRaised; }}
+                onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = 'transparent'; }}
+              >
+                <Icons.refresh size={10} stroke={RT.amber} />
+                Unstick
+              </button>
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );

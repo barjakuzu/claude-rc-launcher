@@ -6,6 +6,8 @@ import type { Layout } from '../useLayout';
 import { RT, FONT_MONO, FONT_SANS, tintFor, hueForId, fmtK } from '../tokens';
 import { Dot, Icons } from './primitives';
 import { btn } from './btn';
+import { api } from '../api';
+import { ShareTunnel } from './ShareTunnel';
 
 // ─── Props ───────────────────────────────────────────────────────────────────
 
@@ -16,6 +18,7 @@ interface HeaderProps {
   onlineCount: number;
   totalTokens: number;
   layout: Layout;
+  onRefresh: () => void;
 }
 
 interface MachineSelectorProps {
@@ -130,7 +133,6 @@ function MachineSelector({ cards, openId, setOpenId, layout }: MachineSelectorPr
               </div>
             </div>}
         <span style={{ flex: 1, textAlign: 'left', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{label}</span>
-        {/* region not available — omitted per task spec */}
         <Icons.chevDown size={12} stroke={RT.textDim} />
       </button>
 
@@ -190,75 +192,276 @@ function MachineSelector({ cards, openId, setOpenId, layout }: MachineSelectorPr
   );
 }
 
-// ─── Header ──────────────────────────────────────────────────────────────────
+// ─── VersionChip ────────────────────────────────────────────────────────────
 
-export function Header({ cards, openId, setOpenId, layout }: HeaderProps) {
-  return (
-    <div style={{
-      flex: 'none',
-      height: layout.mobile ? 52 : 48,
-      borderBottom: `1px solid ${RT.border}`,
-      background: RT.bgRaised,
-      display: 'flex',
-      alignItems: 'center',
-      padding: layout.mobile ? '0 14px' : '0 18px',
-      gap: layout.mobile ? 10 : 14,
-    }}>
-      {/* Mark */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
-        <div style={{
-          width: 22,
-          height: 22,
-          borderRadius: 5,
-          border: `1px solid ${RT.borderHi}`,
-          background: RT.panel,
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
+interface UpdateInfo {
+  update_available: boolean;
+  latest: string;
+  current?: string;
+}
+
+function VersionChip() {
+  const mounted = useRef(true);
+  useEffect(() => () => { mounted.current = false; }, []);
+
+  const [info, setInfo] = useState<UpdateInfo | null>(null);
+  const [updating, setUpdating] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    api.updateCheck().then((data) => {
+      if (!cancelled && mounted.current) setInfo(data as UpdateInfo);
+    }).catch(() => {/* ignore */});
+    return () => { cancelled = true; };
+  }, []);
+
+  const handleUpdate = async () => {
+    setUpdating(true);
+    try {
+      await api.update();
+    } catch {/* likely network error as server restarts — expected */}
+    // Reload after 3s
+    setTimeout(() => { window.location.reload(); }, 3000);
+  };
+
+  if (!info) return null;
+
+  const vLabel = info.current ? `v${info.current}` : (info.latest ? `v${info.latest}` : null);
+
+  if (info.update_available) {
+    return (
+      <button
+        onClick={handleUpdate}
+        disabled={updating}
+        style={{
+          background: 'oklch(0.72 0.09 78 / 0.15)',
+          border: `1px solid oklch(0.72 0.09 78 / 0.40)`,
+          borderRadius: 6,
+          padding: '4px 9px',
+          cursor: updating ? 'wait' : 'pointer',
+          color: RT.amber,
           fontFamily: FONT_MONO,
           fontSize: 10,
           fontWeight: 600,
-          letterSpacing: '.02em',
-          color: RT.text,
-        }}>rc</div>
-        {!layout.mobile && (
-          <>
-            <div style={{ fontSize: 13, fontWeight: 600, letterSpacing: '-.005em' }}>Claude RC</div>
-            <div style={{ fontFamily: FONT_MONO, fontSize: 10, color: RT.textLow, letterSpacing: '.06em' }}>v2.0</div>
-          </>
-        )}
-      </div>
+          whiteSpace: 'nowrap',
+          opacity: updating ? 0.7 : 1,
+        }}
+      >
+        {updating ? 'updating…' : `v${info.latest} · Update`}
+      </button>
+    );
+  }
 
-      {!layout.mobile && <div style={{ width: 1, height: 18, background: RT.border, marginInline: 4 }} />}
+  return vLabel ? (
+    <span style={{ fontFamily: FONT_MONO, fontSize: 10, color: RT.textLow, letterSpacing: '.06em' }}>
+      {vLabel}
+    </span>
+  ) : null;
+}
 
-      {/* Machine selector — primary nav */}
-      <MachineSelector cards={cards} openId={openId} setOpenId={setOpenId} layout={layout} />
+// ─── GlobalMenu ─────────────────────────────────────────────────────────────
 
-      <div style={{ flex: 1 }} />
+interface GlobalMenuProps {
+  openId: string | null;
+  onRefresh: () => void;
+}
 
-      {!layout.mobile && (
+function GlobalMenu({ openId, onRefresh }: GlobalMenuProps) {
+  const [open, setOpen] = useState(false);
+  const [pending, setPending] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const off = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    if (open) document.addEventListener('mousedown', off);
+    return () => document.removeEventListener('mousedown', off);
+  }, [open]);
+
+  const handleStopAll = async () => {
+    if (!openId) return;
+    setPending(true);
+    setOpen(false);
+    try {
+      await api.stopAll(openId);
+    } catch {/* ignore */}
+    finally {
+      setPending(false);
+      onRefresh();
+    }
+  };
+
+  const menuItemStyle: React.CSSProperties = {
+    width: '100%',
+    textAlign: 'left',
+    background: 'transparent',
+    border: 'none',
+    borderRadius: 6,
+    padding: '8px 10px',
+    cursor: 'pointer',
+    color: RT.text,
+    fontFamily: FONT_SANS,
+    fontSize: 12,
+    display: 'flex',
+    alignItems: 'center',
+    gap: 9,
+  };
+
+  return (
+    <div ref={ref} style={{ position: 'relative' }}>
+      <button
+        style={{ ...btn('icon'), opacity: pending ? 0.6 : 1 }}
+        onClick={() => setOpen((o) => !o)}
+        title="Menu"
+      >
+        <Icons.more size={12} stroke={RT.textDim} />
+      </button>
+
+      {open && (
         <div style={{
+          position: 'absolute',
+          top: '100%',
+          right: 0,
+          marginTop: 6,
           background: RT.panel,
-          border: `1px solid ${RT.border}`,
-          borderRadius: 6,
-          padding: '5px 10px',
-          display: 'flex',
-          alignItems: 'center',
-          gap: 8,
-          width: 260,
-          fontFamily: FONT_MONO,
-          fontSize: 11,
-          color: RT.textLow,
+          border: `1px solid ${RT.borderHi}`,
+          borderRadius: 10,
+          width: 180,
+          padding: 6,
+          zIndex: 30,
+          boxShadow: '0 12px 36px rgba(0,0,0,.4)',
         }}>
-          <Icons.search size={11} stroke={RT.textLow} />
-          <span style={{ flex: 1 }}>Search sessions, tasks…</span>
-          <span style={{ padding: '0px 5px', border: `1px solid ${RT.border}`, borderRadius: 3, fontSize: 10 }}>⌘K</span>
+          <button
+            style={{ ...menuItemStyle, opacity: openId ? 1 : 0.4, cursor: openId ? 'pointer' : 'default' }}
+            onClick={openId ? handleStopAll : undefined}
+            onMouseEnter={(e) => { if (openId) (e.currentTarget as HTMLButtonElement).style.background = RT.bgRaised; }}
+            onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = 'transparent'; }}
+          >
+            <Icons.stop size={11} stroke={RT.red} />
+            Stop all
+          </button>
+
+          <button
+            style={menuItemStyle}
+            onClick={() => { setOpen(false); onRefresh(); }}
+            onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = RT.bgRaised; }}
+            onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = 'transparent'; }}
+          >
+            <Icons.refresh size={11} stroke={RT.textDim} />
+            Refresh
+          </button>
+
+          <div style={{ height: 1, background: RT.border, margin: '4px 0' }} />
+
+          <button
+            style={{ ...menuItemStyle, color: RT.textDim }}
+            onClick={() => { window.location.href = '/legacy'; }}
+            onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = RT.bgRaised; }}
+            onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = 'transparent'; }}
+          >
+            <Icons.link size={11} stroke={RT.textDim} />
+            Classic UI
+          </button>
+
+          <button
+            style={{ ...menuItemStyle, color: RT.red }}
+            onClick={() => { window.location.href = '/logout'; }}
+            onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = RT.bgRaised; }}
+            onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = 'transparent'; }}
+          >
+            <Icons.power size={11} stroke={RT.red} />
+            Logout
+          </button>
         </div>
       )}
-
-      {/* Share / version / ⋯ buttons — static placeholders, wired in a later task */}
-      <button style={btn('icon')}><Icons.refresh size={12} stroke={RT.textDim} /></button>
-      {!layout.mobile && <button style={btn('icon')}><Icons.power size={11} stroke={RT.textDim} /></button>}
     </div>
+  );
+}
+
+// ─── Header ──────────────────────────────────────────────────────────────────
+
+export function Header({ cards, openId, setOpenId, layout, onRefresh }: HeaderProps) {
+  const [shareOpen, setShareOpen] = useState(false);
+
+  return (
+    <>
+      <div style={{
+        flex: 'none',
+        height: layout.mobile ? 52 : 48,
+        borderBottom: `1px solid ${RT.border}`,
+        background: RT.bgRaised,
+        display: 'flex',
+        alignItems: 'center',
+        padding: layout.mobile ? '0 14px' : '0 18px',
+        gap: layout.mobile ? 10 : 14,
+      }}>
+        {/* Mark */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
+          <div style={{
+            width: 22,
+            height: 22,
+            borderRadius: 5,
+            border: `1px solid ${RT.borderHi}`,
+            background: RT.panel,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            fontFamily: FONT_MONO,
+            fontSize: 10,
+            fontWeight: 600,
+            letterSpacing: '.02em',
+            color: RT.text,
+          }}>rc</div>
+          {!layout.mobile && (
+            <>
+              <div style={{ fontSize: 13, fontWeight: 600, letterSpacing: '-.005em' }}>Claude RC</div>
+              <VersionChip />
+            </>
+          )}
+        </div>
+
+        {!layout.mobile && <div style={{ width: 1, height: 18, background: RT.border, marginInline: 4 }} />}
+
+        {/* Machine selector — primary nav */}
+        <MachineSelector cards={cards} openId={openId} setOpenId={setOpenId} layout={layout} />
+
+        <div style={{ flex: 1 }} />
+
+        {!layout.mobile && (
+          <div style={{
+            background: RT.panel,
+            border: `1px solid ${RT.border}`,
+            borderRadius: 6,
+            padding: '5px 10px',
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+            width: 260,
+            fontFamily: FONT_MONO,
+            fontSize: 11,
+            color: RT.textLow,
+          }}>
+            <Icons.search size={11} stroke={RT.textLow} />
+            <span style={{ flex: 1 }}>Search sessions, tasks…</span>
+            <span style={{ padding: '0px 5px', border: `1px solid ${RT.border}`, borderRadius: 3, fontSize: 10 }}>⌘K</span>
+          </div>
+        )}
+
+        {/* Share tunnel button */}
+        <button
+          style={btn('icon')}
+          title="Share tunnel"
+          onClick={() => setShareOpen(true)}
+        >
+          <Icons.share size={12} stroke={RT.textDim} />
+        </button>
+
+        {/* Global ⋯ menu (stop all, refresh, logout, classic UI) */}
+        {!layout.mobile && <GlobalMenu openId={openId} onRefresh={onRefresh} />}
+      </div>
+
+      {shareOpen && <ShareTunnel onClose={() => setShareOpen(false)} />}
+    </>
   );
 }

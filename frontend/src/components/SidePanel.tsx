@@ -11,6 +11,8 @@ import { ScheduledRow } from './ScheduledRow';
 import { ScheduleModal } from './ScheduleModal';
 import { Logs } from './Logs';
 import { MiniLauncher } from './MiniLauncher';
+import { PreviewModal } from './PreviewModal';
+import { ResumeList } from './ResumeList';
 import { api } from '../api';
 import type { DeviceCard, Session, Schedule } from '../types';
 import type { Layout } from '../useLayout';
@@ -76,6 +78,12 @@ export function PanelContent({ device, tab, setTab, mobile = false }: PanelConte
   const [modalOpen, setModalOpen] = useState(false);
   const [editing,   setEditing]   = useState<Schedule | null>(null);
 
+  // Preview modal state
+  const [previewName, setPreviewName] = useState<string | null>(null);
+
+  // Resume list state
+  const [resumeOpen, setResumeOpen] = useState(false);
+
   function openCreate() {
     setEditing(null);
     setModalOpen(true);
@@ -118,25 +126,40 @@ export function PanelContent({ device, tab, setTab, mobile = false }: PanelConte
       {/* Panel body */}
       <div style={{ flex: 1, overflow: 'auto', padding: '10px 12px' }}>
         {tab === 'running' && (
-          sessions.length === 0
-            ? (
-              <div style={{ padding: 40, textAlign: 'center', color: RT.textLow, fontSize: 12 }}>
-                {device.online ? 'No active sessions.' : 'Device offline.'}
-              </div>
-            )
-            : (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                {sessions.map((s) => (
-                  <SessionRow
-                    key={s.name}
-                    s={s}
-                    hue={hue}
-                    deviceId={device.id}
-                    onChanged={reloadSessions}
-                  />
-                ))}
-              </div>
-            )
+          <>
+            {/* Resume button */}
+            <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 6 }}>
+              <button
+                onClick={() => setResumeOpen(true)}
+                style={{ ...btn('tinyText'), gap: 5 }}
+              >
+                <Icons.refresh size={10} stroke="currentColor" />
+                Resume…
+              </button>
+            </div>
+
+            {sessions.length === 0
+              ? (
+                <div style={{ padding: 40, textAlign: 'center', color: RT.textLow, fontSize: 12 }}>
+                  {device.online ? 'No active sessions.' : 'Device offline.'}
+                </div>
+              )
+              : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  {sessions.map((s) => (
+                    <SessionRow
+                      key={s.name}
+                      s={s}
+                      hue={hue}
+                      deviceId={device.id}
+                      onChanged={reloadSessions}
+                      onPreview={(name) => setPreviewName(name)}
+                    />
+                  ))}
+                </div>
+              )
+            }
+          </>
         )}
 
         {tab === 'scheduled' && (
@@ -183,6 +206,24 @@ export function PanelContent({ device, tab, setTab, mobile = false }: PanelConte
           initial={editing}
           onClose={closeModal}
           onSaved={handleSaved}
+        />
+      )}
+
+      {/* Preview modal */}
+      {previewName !== null && (
+        <PreviewModal
+          deviceId={device.id}
+          name={previewName}
+          onClose={() => setPreviewName(null)}
+        />
+      )}
+
+      {/* Resume list modal */}
+      {resumeOpen && (
+        <ResumeList
+          deviceId={device.id}
+          onClose={() => setResumeOpen(false)}
+          onResumed={reloadSessions}
         />
       )}
     </>
