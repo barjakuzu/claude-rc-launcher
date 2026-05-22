@@ -19,7 +19,9 @@ claude-rc
 claude-rc update
 ```
 
-No build step, no dependencies beyond Python 3.8+ stdlib. Port 8200 by default.
+Runtime has no dependencies beyond Python 3.8+ stdlib, and target devices need no build
+step (the frontend is pre-built into `static/dist/` and committed). The React frontend is
+built at dev time with Vite (Node only needed on the dev machine). Port 8200 by default.
 
 ## Architecture
 
@@ -34,10 +36,30 @@ tunnel.py       — Cloudflare tunnel management
 scheduler.py    — Cron expression parser + scheduler thread
 schedules.py    — Schedule storage CRUD (JSON file at ~/.claude-rc/schedules.json)
 mcp_server.py   — MCP server for chat-based schedule management (standalone)
-static/index.html — Frontend HTML (links to style.css + app.js, no framework)
-static/style.css  — Extracted CSS styles
-static/app.js     — Extracted JS application logic
+stats.py        — Per-device metrics: token-history ring buffer + system load/OS
+overview.py     — Hub aggregator: fans out to devices, builds grid cards (/rc/overview)
+frontend/       — React + TypeScript SPA (Vite), the V4 "Ops Console" UI — SOURCE
+static/dist/    — Built frontend (committed) — served at `/`. Run `npm run build` before commit
+static/index.html — LEGACY vanilla-JS UI (app.js + style.css), served at `/legacy`
+docs/design-reference/ — frozen V4 prototype the SPA was ported from
 ```
+
+### Frontend (React/TS V4 — current)
+
+The primary UI is a React + TypeScript SPA in `frontend/`, built with Vite to
+`static/dist/` (committed, so target devices need **no Node** — `git pull` + restart
+still works). The server serves the SPA at `/` and the old vanilla UI at `/legacy`.
+
+- **Build before committing UI changes:** `cd frontend && npm run build` (outputs to
+  `../static/dist`, Vite `base: '/static/dist/'`). Backend tests: `python3 -m unittest discover tests`.
+- **Multi-device dashboard:** the V4 UI is a device grid (from `/rc/overview`) → drill
+  into a side panel (launcher + Sessions/Scheduled/Logs). The machine selector in the
+  header is primary nav. Polls `/rc/overview` every 5s; the open panel polls that device.
+- **Design source of truth:** `docs/design-reference/variant-ops-refined.jsx` — match it
+  pixel-for-pixel. Dark OKLCH palette (`RT` tokens in `frontend/src/tokens.ts`); device
+  cards color-coded by a stable hue hashed from device id.
+- A device shows **online** when its `/rc/sessions` is reachable; `/rc/stats` (load/OS/
+  sparkline) is best-effort, so a device on older code still appears online.
 
 ### Key patterns
 
