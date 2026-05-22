@@ -1,5 +1,5 @@
 // DirBrowser.tsx — directory picker modal/overlay for MiniLauncher.
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { RT, FONT_MONO } from '../tokens';
 import { Icons } from './primitives';
 import { btn } from './btn';
@@ -23,18 +23,23 @@ export function DirBrowser({ deviceId, initialPath, onSelect, onClose }: DirBrow
   const [result, setResult] = useState<BrowseResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const mounted = useRef(true);
+
+  useEffect(() => () => { mounted.current = false; }, []);
 
   const navigate = useCallback(async (path: string) => {
     setLoading(true);
     setError(null);
     try {
       const data = await api.browse(deviceId, path) as BrowseResult;
+      if (!mounted.current) return;
       setResult(data);
       setCurrentPath(data.path);
     } catch {
+      if (!mounted.current) return;
       setError('Failed to list directory.');
     } finally {
-      setLoading(false);
+      if (mounted.current) setLoading(false);
     }
   }, [deviceId]);
 

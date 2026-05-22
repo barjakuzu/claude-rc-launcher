@@ -1,6 +1,6 @@
 // MiniLauncher.tsx — in-panel launcher with progressive disclosure.
 // Minimal row matches variant-ops-refined.jsx RMiniLauncher lines 466-498.
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { RT, FONT_MONO } from '../tokens';
 import { Icons } from './primitives';
 import { btn } from './btn';
@@ -45,11 +45,15 @@ export function MiniLauncher({ deviceId, deviceName, mobile = false, onLaunched 
   // State
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const mounted = useRef(true);
+
+  useEffect(() => () => { mounted.current = false; }, []);
 
   // Load default workdir from /rc/projects on mount
   const loadProjects = useCallback(async () => {
     try {
       const data = await api.projects(deviceId) as ProjectsResult;
+      if (!mounted.current) return;
       if (data?.default) setWorkdir(data.default);
     } catch {/* ignore */}
   }, [deviceId]);
@@ -70,6 +74,7 @@ export function MiniLauncher({ deviceId, deviceName, mobile = false, onLaunched 
       if (sandbox) body.sandbox = sandbox;
 
       const res = await api.start(deviceId, body) as { ok?: boolean; message?: string };
+      if (!mounted.current) return;
       if (res && res.ok === false) {
         setError(res.message ?? 'Launch failed.');
       } else {
@@ -77,9 +82,10 @@ export function MiniLauncher({ deviceId, deviceName, mobile = false, onLaunched 
         onLaunched();
       }
     } catch {
+      if (!mounted.current) return;
       setError('Network error — could not reach device.');
     } finally {
-      setPending(false);
+      if (mounted.current) setPending(false);
     }
   };
 
