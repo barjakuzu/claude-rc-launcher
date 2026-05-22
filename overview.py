@@ -5,9 +5,14 @@ from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlparse
 
 
-def card_from_parts(device, sessions, stats):
-    """Build one grid card. sessions/stats are None when the device is unreachable."""
-    online = stats is not None
+def card_from_parts(device, sessions, stats, online=None):
+    """Build one grid card. sessions/stats are None when the device is unreachable.
+
+    online: explicit reachability. When None, falls back to stats-based default
+    (online = stats is not None) for backward compatibility.
+    """
+    if online is None:
+        online = stats is not None
     sess = sessions or []
     tokens = sum(int(s.get("tokens", 0)) for s in sess)
     load_pct = 0
@@ -39,10 +44,13 @@ def _fetch(base_url, path, auth_user, auth_pass, timeout=3):
 def fetch_remote_card(device):
     try:
         sess = _fetch(device["base_url"], "/rc/sessions", device.get("auth_user", ""), device.get("auth_pass", ""))
-        st = _fetch(device["base_url"], "/rc/stats", device.get("auth_user", ""), device.get("auth_pass", ""))
-        return card_from_parts(device, sess.get("sessions", []), st)
     except Exception:
-        return card_from_parts(device, None, None)
+        return card_from_parts(device, None, None, online=False)
+    try:
+        st = _fetch(device["base_url"], "/rc/stats", device.get("auth_user", ""), device.get("auth_pass", ""))
+    except Exception:
+        st = None
+    return card_from_parts(device, sess.get("sessions", []), st, online=True)
 
 
 def build_overview(local_device, local_sessions, local_stats, remote_devices):
