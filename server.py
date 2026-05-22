@@ -10,6 +10,8 @@ import secrets
 import subprocess
 import threading
 import time
+import urllib.error
+import urllib.request
 from http.cookies import SimpleCookie
 from urllib.parse import urlparse, parse_qs
 
@@ -29,6 +31,7 @@ from schedules import (
     load_schedules, create_schedule, update_schedule, delete_schedule,
 )
 from scheduler import validate_cron, next_cron_run, _fire_schedule, WIZARD_PROMPT
+from devices import get_device, list_devices_public
 
 
 def _parse_projects():
@@ -239,6 +242,57 @@ class Handler(http.server.BaseHTTPRequestHandler):
         except Exception:
             return {}
 
+    def _target_device(self):
+        """Device id the request targets, from X-RC-Device header or ?device=."""
+        dev_id = self.headers.get("X-RC-Device", "")
+        if not dev_id:
+            qs = parse_qs(urlparse(self.path).query)
+            dev_id = qs.get("device", [""])[0]
+        return dev_id
+
+    def _should_proxy(self, dev_id):
+        """True if this request should be forwarded to a remote device.
+
+        Static assets and the hub's own device list are always served locally.
+        """
+        if not dev_id or dev_id == "local":
+            return False
+        p = self.path.split('?')[0]
+        if p.startswith("/rc"):
+            p = p[3:]
+        if p.startswith("/static/") or p == "/devices":
+            return False
+        return True
+
+    def _proxy_to_device(self, device):
+        """Forward the current request to a remote device's app and relay back."""
+        target = device["base_url"].rstrip("/") + self.path
+        length = int(self.headers.get("Content-Length", 0) or 0)
+        body = self.rfile.read(length) if length > 0 else None
+        req = urllib.request.Request(target, data=body, method=self.command)
+        ct = self.headers.get("Content-Type")
+        if ct:
+            req.add_header("Content-Type", ct)
+        # Use the device's own credentials, never the hub session/cookie.
+        user, pw = device.get("auth_user", ""), device.get("auth_pass", "")
+        if user or pw:
+            token = base64.b64encode(f"{user}:{pw}".encode()).decode()
+            req.add_header("Authorization", f"Basic {token}")
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                data, status = resp.read(), resp.status
+                resp_ct = resp.headers.get("Content-Type", "application/json")
+        except urllib.error.HTTPError as e:
+            data, status = e.read(), e.code
+            resp_ct = e.headers.get("Content-Type", "application/json")
+        except Exception as e:
+            return self._json({"error": "device unreachable", "detail": str(e)}, 502)
+        self.send_response(status)
+        self.send_header("Content-Type", resp_ct)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
     def do_GET(self):
         # Login/logout routes — no auth required
         raw_path = self.path.split('?')[0]
@@ -269,6 +323,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         if not _check_auth(self):
             return _send_auth_required(self)
+
+        # Route to a remote device if one is selected.
+        dev_id = self._target_device()
+        if self._should_proxy(dev_id):
+            device = get_device(dev_id)
+            if device is None:
+                return self._json({"error": "unknown device"}, 404)
+            return self._proxy_to_device(device)
 
         # Serve static files (handles both /static/* and /rc/static/*)
         static_path = self.path.split('?')[0]
@@ -306,6 +368,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._json({"error": "Session not found"}, 404)
                 return
             self._json({"name": name, "output": result.stdout, "status": "running"})
+
+        elif path == "/devices":
+            self._json({"devices": [{"id": "local", "name": "This machine (VM)"}]
+                        + list_devices_public()})
 
         elif path == "/projects":
             projects = _parse_projects()
@@ -490,6 +556,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         if not _check_auth(self):
             return _send_auth_required(self)
+
+        # Route to a remote device if one is selected.
+        dev_id = self._target_device()
+        if self._should_proxy(dev_id):
+            device = get_device(dev_id)
+            if device is None:
+                return self._json({"error": "unknown device"}, 404)
+            return self._proxy_to_device(device)
 
         path = self.path
         if path.startswith("/rc"):

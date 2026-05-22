@@ -23,5 +23,8 @@ if __name__ == "__main__":
     # Start the scheduler thread
     start_scheduler()
 
-    server = http.server.HTTPServer((HOST, PORT), Handler)
+    # ThreadingHTTPServer: a request proxied to a remote device blocks its own
+    # handler thread (waiting on the network) without stalling other requests.
+    server = http.server.ThreadingHTTPServer((HOST, PORT), Handler)
+    server.daemon_threads = True
     server.serve_forever()

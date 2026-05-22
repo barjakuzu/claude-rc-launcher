@@ -415,6 +415,9 @@
   .update-checking { color: #64748b; }
 
   /* Refresh + Logout */
+  .device-select { position: absolute; top: 16px; right: 130px; max-width: 180px; background: #0a0a0a; color: #a3a3a3; font-size: 12px; padding: 4px 8px; border: 1px solid #333; border-radius: 6px; cursor: pointer; appearance: none; -webkit-appearance: none; }
+  .device-select:hover { color: #e2e8f0; border-color: #555; }
+  .device-select:focus { outline: none; border-color: #525252; }
   .refresh-btn { position: absolute; top: 16px; right: 80px; background: none; color: #64748b; font-size: 16px; padding: 2px 8px; border: 1px solid #333; border-radius: 6px; cursor: pointer; }
   .refresh-btn:hover { color: #e2e8f0; border-color: #555; }
   .logout-btn { position: absolute; top: 16px; right: 16px; color: #64748b; font-size: 12px; text-decoration: none; padding: 4px 10px; border: 1px solid #333; border-radius: 6px; }

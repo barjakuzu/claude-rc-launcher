@@ -68,9 +68,12 @@ const _apiBase = window.location.origin + '/rc';
 // Auth token injected by the server into the page. Mobile Safari doesn't
 // forward Basic Auth credentials on fetch/XHR, so we attach it explicitly.
 const _authToken = window.__RC_AUTH || '';
+// Currently selected device ('local' = this machine). Persisted across reloads.
+let selectedDevice = localStorage.getItem('rc_device') || 'local';
 async function api(method, path, body) {
   const headers = {'Content-Type': 'application/json'};
   if (_authToken) headers['Authorization'] = _authToken;
+  if (selectedDevice && selectedDevice !== 'local') headers['X-RC-Device'] = selectedDevice;
   const opts = { method, headers };
   if (body) opts.body = JSON.stringify(body);
   const r = await fetch(_apiBase + path, opts);
@@ -1326,6 +1329,36 @@ function closePreview() {
   _previewSession = null;
 }
 
+// --- Device switcher ---
+async function loadDevices() {
+  const sel = document.getElementById('device-select');
+  if (!sel) return;
+  let devices = [{id: 'local', name: 'This machine (VM)'}];
+  try {
+    const d = await api('GET', '/devices');
+    if (d && d.devices) devices = d.devices;
+  } catch(e) { /* fall back to local-only */ }
+  // If the saved selection no longer exists, revert to local.
+  if (!devices.some(dev => dev.id === selectedDevice)) selectedDevice = 'local';
+  sel.replaceChildren();
+  for (const dev of devices) {
+    const opt = new Option(dev.name, dev.id);
+    if (dev.id === selectedDevice) opt.selected = true;
+    sel.add(opt);
+  }
+  // Hide the switcher entirely when there's only the local device.
+  sel.style.display = devices.length > 1 ? '' : 'none';
+}
+
+function onDeviceChange() {
+  const sel = document.getElementById('device-select');
+  selectedDevice = sel.value || 'local';
+  localStorage.setItem('rc_device', selectedDevice);
+  loadProjects();
+  refresh();
+}
+
+loadDevices();
 loadProjects();
 refresh();
 fetch('/rc/version').then(r=>r.json()).then(d => {

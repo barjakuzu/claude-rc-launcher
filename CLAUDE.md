@@ -77,6 +77,16 @@ All under `/rc/` prefix:
 
 `mcp_server.py` is a standalone MCP server (stdio transport) that proxies to the launcher's HTTP API. Users can create/manage schedules by chatting with any Claude Code session that has this MCP configured. Tools: `list_schedules`, `create_schedule`, `update_schedule`, `delete_schedule`, `fire_schedule`.
 
+### Multi-device / hub mode
+
+One instance can act as a **hub** that manages Claude sessions on multiple machines. Every machine runs the same unchanged rc-launcher app; the hub just proxies to them.
+
+- **Registry**: `devices.py` reads `~/.claude-rc/devices.json` — a list of `{id, name, base_url, auth_user, auth_pass}` for each remote device. The hub's own machine is the implicit `local` device (never listed). The file holds credentials → `chmod 600`. `list_devices_public()` strips creds for the UI.
+- **Proxy**: `server.py` reads the target device from the `X-RC-Device` request header (fallback `?device=`). If `local`/absent → handled normally. Otherwise `_proxy_to_device()` forwards the request to that device's `base_url` over `urllib`, injecting the device's own Basic Auth and stripping the hub cookie. `/login`, `/logout`, `/static/*`, and `/devices` are never proxied. Unreachable device → `502`; unknown id → `404`.
+- **Frontend**: a device dropdown (`#device-select`) populated from `GET /rc/devices`, persisted in `localStorage.rc_device`. `api()` attaches `X-RC-Device` to every call; changing it re-runs `refresh()`. The response shape is identical per device, so no other UI logic changes.
+- **Connectivity**: remote devices are reached over Tailscale (use the MagicDNS name in `base_url` so it survives IP changes). The hub is the only publicly-exposed instance (Cloudflare tunnel); remote devices stay private behind the tailnet.
+- **Schedules stay per-device**: each device's own scheduler runs its own `schedules.json`. Managing a device's schedules in the UI works transparently because the schedule routes are proxied like everything else. There is no hub-level cross-device scheduler.
+
 ### Install infrastructure
 
 - `install.sh` — curl-pipe installer. Clones repo, sets up auth, creates wrapper script, configures launchd (macOS) or systemd (Linux) service. Re-running updates via `git pull`.

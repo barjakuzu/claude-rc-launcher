@@ -2,7 +2,7 @@
 
 import os
 
-VERSION = "1.3.8"
+VERSION = "1.4.0"
 
 # Single home directory for all claude-rc data
 RC_HOME = os.environ.get("RC_HOME", os.path.expanduser("~/.claude-rc"))
@@ -32,6 +32,8 @@ MODEL_MAP = {
 }
 
 SCHEDULES_FILE = os.path.join(RC_HOME, "schedules.json")
+# Registry of remote devices this hub can proxy to (see devices.py).
+DEVICES_FILE = os.path.join(RC_HOME, "devices.json")
 LOG_FILE = os.path.join(RC_HOME, "logs", "claude-rc.log")
 
 # Directories the browser can navigate into. Comma-separated absolute paths.
