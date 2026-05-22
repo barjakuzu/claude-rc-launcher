@@ -345,8 +345,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             path = path[3:] or "/"
 
         if path == "/":
+            return self._serve_static("/static/dist/index.html")
+
+        elif path == "/legacy":
             auth_hdr = self.headers.get("Authorization", "")
-            self._html(_load_html(auth_hdr))
+            return self._html(_load_html(auth_hdr))
 
         elif path == "/sessions":
             sessions = list_rc_sessions()
