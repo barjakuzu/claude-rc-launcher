@@ -32,7 +32,7 @@ from schedules import (
     load_schedules, create_schedule, update_schedule, delete_schedule,
 )
 from scheduler import validate_cron, next_cron_run, _fire_schedule, WIZARD_PROMPT
-from devices import get_device, list_devices_public
+from devices import get_device, list_devices_public, load_devices
 
 
 def _parse_projects():
@@ -445,6 +445,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
             s["tokens_now"] = sum(x.get("tokens", 0) for x in sess)
             s["sessions"] = len(sess)
             self._json(s)
+
+        elif path == "/overview":
+            import overview
+            local_sess = list_rc_sessions()
+            local_stats = {**stats.system_stats(), "token_history": stats.token_history()}
+            local_card = {"id": "local", "name": "This machine (VM)", "base_url": ""}
+            cards = overview.build_overview(local_card, local_sess, local_stats, load_devices())
+            self._json({"devices": cards})
 
         elif path == "/update-check":
             # Check latest version from GitHub API (cached for 10 min)
