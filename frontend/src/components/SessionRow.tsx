@@ -165,18 +165,8 @@ export function SessionRow({ s, hue, deviceId, mobile = false, onChanged, onPrev
         <CapBar pct={pct} height={4} bg="rgba(255,255,255,.04)" color={hueColor} />
       </div>
 
-      {/* Col 3: Actions */}
-      <div style={{ display: 'flex', gap: 6, justifyContent: mobile ? 'space-between' : 'flex-end' }}>
-        <V5IconButton label="Copy session ID" onClick={handleCopy}>
-          <Icons.copy size={14} stroke={RT.textDim} />
-        </V5IconButton>
-        <V5IconButton
-          label="Open session URL"
-          disabled={!s.url}
-          onClick={handleLink}
-        >
-          <Icons.link size={14} stroke={RT.textDim} />
-        </V5IconButton>
+      {/* Col 3: Actions — consolidated to 3 buttons (Restart / Stop / More) */}
+      <div style={{ display: 'flex', gap: 6, justifyContent: mobile ? 'flex-end' : 'flex-end' }}>
         <V5IconButton
           label="Restart session"
           accent={RT.green}
@@ -194,7 +184,7 @@ export function SessionRow({ s, hue, deviceId, mobile = false, onChanged, onPrev
           <Icons.stop size={12} />
         </V5IconButton>
 
-        {/* ⋯ more menu */}
+        {/* ⋯ more menu — secondary actions */}
         <div ref={menuRef} style={{ position: 'relative' }}>
           <V5IconButton
             label="More options"
@@ -209,21 +199,36 @@ export function SessionRow({ s, hue, deviceId, mobile = false, onChanged, onPrev
               position: 'absolute', bottom: '100%', right: 0, marginBottom: 4,
               background: RT.panel, border: `1px solid ${RT.borderHi}`,
               borderRadius: 8, padding: 4, zIndex: 20,
-              boxShadow: '0 8px 24px rgba(0,0,0,.4)', minWidth: 130,
+              boxShadow: '0 8px 24px rgba(0,0,0,.4)', minWidth: 160,
             }}>
+              <button
+                style={menuItemStyle} onClick={() => { setMenuOpen(false); handleCopy(); }}
+                onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = RT.bgRaised; }}
+                onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = 'transparent'; }}
+              >
+                <Icons.copy size={11} stroke={RT.textDim} /> Copy session ID
+              </button>
+              <button
+                style={{ ...menuItemStyle, opacity: s.url ? 1 : 0.45, cursor: s.url ? 'pointer' : 'default' }}
+                onClick={() => { if (s.url) { setMenuOpen(false); handleLink(); } }}
+                onMouseEnter={(e) => { if (s.url) (e.currentTarget as HTMLButtonElement).style.background = RT.bgRaised; }}
+                onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = 'transparent'; }}
+              >
+                <Icons.link size={11} stroke={RT.textDim} /> Open URL
+              </button>
               <button
                 style={menuItemStyle} onClick={handlePreviewClick}
                 onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = RT.bgRaised; }}
                 onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = 'transparent'; }}
               >
-                <Icons.search size={10} stroke={RT.textDim} /> Preview
+                <Icons.search size={11} stroke={RT.textDim} /> Preview
               </button>
               <button
                 style={menuItemStyle} onClick={handleUnstick}
                 onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = RT.bgRaised; }}
                 onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = 'transparent'; }}
               >
-                <Icons.refresh size={10} stroke={RT.amber} /> Unstick
+                <Icons.refresh size={11} stroke={RT.amber} /> Unstick
               </button>
             </div>
           )}

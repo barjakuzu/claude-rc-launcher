@@ -1,5 +1,5 @@
 // ScheduledRow.tsx — V5 full-width 3-col grid with V5IconButton actions.
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { RT, FONT_MONO } from '../tokens';
 import { Icons } from './primitives';
 import { V5IconButton } from './V5IconButton';
@@ -16,6 +16,15 @@ export interface ScheduledRowProps {
 
 export function ScheduledRow({ s, deviceId, mobile = false, onChanged, onEdit }: ScheduledRowProps) {
   const [pending, setPending] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const off = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) setMenuOpen(false);
+    };
+    if (menuOpen) document.addEventListener('mousedown', off);
+    return () => document.removeEventListener('mousedown', off);
+  }, [menuOpen]);
 
   async function withPending(fn: () => Promise<void>) {
     if (pending) return;
@@ -116,18 +125,55 @@ export function ScheduledRow({ s, deviceId, mobile = false, onChanged, onEdit }:
         )}
       </div>
 
-      {/* Col 3: Actions — Run now (green), Edit (terminal), Delete (red) */}
+      {/* Col 3: Actions — Run now (primary) + ⋯ for Edit / Delete */}
       <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
         <V5IconButton label="Run now" accent={RT.green} pending={pending} onClick={handleFire}>
           <Icons.play size={12} />
         </V5IconButton>
-        <V5IconButton label="Edit schedule" pending={pending} onClick={handleEdit}>
-          <Icons.terminal size={13} stroke={RT.textDim} />
-        </V5IconButton>
-        <V5IconButton label="Delete schedule" accent={RT.red} pending={pending} onClick={handleDelete}>
-          <Icons.stop size={11} />
-        </V5IconButton>
+
+        <div ref={menuRef} style={{ position: 'relative' }}>
+          <V5IconButton
+            label="More options"
+            pending={pending}
+            onClick={() => setMenuOpen((o) => !o)}
+          >
+            <Icons.more size={14} stroke={RT.textDim} />
+          </V5IconButton>
+
+          {menuOpen && (
+            <div style={{
+              position: 'absolute', bottom: '100%', right: 0, marginBottom: 4,
+              background: RT.panel, border: `1px solid ${RT.borderHi}`,
+              borderRadius: 8, padding: 4, zIndex: 20,
+              boxShadow: '0 8px 24px rgba(0,0,0,.4)', minWidth: 160,
+            }}>
+              <button
+                style={menuItemStyle}
+                onClick={() => { setMenuOpen(false); handleEdit(); }}
+                onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = RT.bgRaised; }}
+                onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = 'transparent'; }}
+              >
+                <Icons.terminal size={11} stroke={RT.textDim} /> Edit schedule
+              </button>
+              <button
+                style={{ ...menuItemStyle, color: RT.red }}
+                onClick={() => { setMenuOpen(false); handleDelete(); }}
+                onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = RT.bgRaised; }}
+                onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = 'transparent'; }}
+              >
+                <Icons.stop size={11} stroke={RT.red} /> Delete
+              </button>
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );
 }
+
+const menuItemStyle: React.CSSProperties = {
+  width: '100%', textAlign: 'left',
+  background: 'transparent', border: 'none', borderRadius: 5,
+  padding: '8px 11px', cursor: 'pointer', color: RT.text, fontFamily: 'inherit',
+  fontSize: 12, display: 'flex', alignItems: 'center', gap: 8,
+};
