@@ -10,7 +10,12 @@ import { Strip } from './components/Strip';
 import { DeviceRail } from './components/DeviceRail';
 import { DeviceDetail } from './components/DeviceDetail';
 import { BigCard } from './components/BigCard';
+import { MobileNav } from './components/MobileNav';
+import { AllSessions } from './components/AllSessions';
+import { AllScheduled } from './components/AllScheduled';
+import { Activity } from './components/Activity';
 import type { PanelTab } from './components/PanelTabs';
+import type { MTab } from './components/MobileNav';
 
 ensureKeyframes();
 
@@ -19,6 +24,17 @@ export function App() {
   const [cards, setCards] = useState<DeviceCard[]>([]);
   const [openId, setOpenId] = useState<string | null>(null);
   const [tab, setTab] = useState<PanelTab>('running');
+
+  // Mobile tab state — persisted across page loads.
+  const [mTab, setMTab] = useState<MTab>(
+    () => (localStorage.getItem('rc_mtab') as MTab) ?? 'devices'
+  );
+
+  const pickMTab = (t: MTab) => {
+    setMTab(t);
+    if (t !== 'devices') setOpenId(null);
+    localStorage.setItem('rc_mtab', t);
+  };
 
   const loadOverview = useCallback(async () => {
     try {
@@ -48,6 +64,13 @@ export function App() {
 
   const onlineCount = cards.filter((c) => c.online).length;
   const totalTokens = cards.reduce((s, c) => s + c.tokens, 0);
+  const totalSessions = cards.reduce((s, c) => s + c.sessions, 0);
+
+  // Handler for cross-device views that want to open a specific device.
+  const handleOpenDevice = (id: string) => {
+    handleOpen(id);
+    pickMTab('devices');
+  };
 
   return (
     <div style={{
@@ -76,7 +99,20 @@ export function App() {
         )}
 
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minWidth: 0 }}>
-          {openCard ? (
+          {layout.mobile && mTab !== 'devices' ? (
+            // Mobile cross-device tab views.
+            <>
+              {mTab === 'sessions' && (
+                <AllSessions cards={cards} onOpenDevice={handleOpenDevice} />
+              )}
+              {mTab === 'scheduled' && (
+                <AllScheduled cards={cards} />
+              )}
+              {mTab === 'activity' && (
+                <Activity cards={cards} />
+              )}
+            </>
+          ) : openCard ? (
             // Device detail — full main area
             <DeviceDetail
               device={openCard}
@@ -95,6 +131,15 @@ export function App() {
           )}
         </div>
       </div>
+
+      {/* Footer / mobile nav */}
+      {layout.mobile ? (
+        <MobileNav
+          active={mTab}
+          onChange={pickMTab}
+          counts={{ devices: cards.length, sessions: totalSessions, scheduled: 0 }}
+        />
+      ) : null}
     </div>
   );
 }
