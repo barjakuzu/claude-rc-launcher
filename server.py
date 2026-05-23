@@ -478,7 +478,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.send_error(404)
                 return
             result = subprocess.run(
-                ["tmux", "capture-pane", "-t", name, "-e", "-p", "-S", "-50"],
+                ["tmux", "capture-pane", "-t", name, "-e", "-p", "-S", "-2000"],
                 capture_output=True, text=True,
             )
             if result.returncode != 0:

@@ -54,7 +54,7 @@ export function PreviewModal({ deviceId, name, onClose }: PreviewModalProps) {
         cursor: '#e8e7e3',
         selectionBackground: 'rgba(150,150,150,.3)',
       },
-      scrollback: 5000,
+      scrollback: 10000,
       convertEol: true,
       disableStdin: false,
       allowProposedApi: true,
@@ -110,17 +110,24 @@ export function PreviewModal({ deviceId, name, onClose }: PreviewModalProps) {
         const data = await api.preview(deviceId, name);
         if (cancelled || !mounted.current) return;
         const output: string = data?.output ?? '';
-        if (output !== lastContentRef.current) {
-          lastContentRef.current = output;
-          const term = termRef.current;
-          if (term) {
-            const wasAtBottom = term.buffer.active.viewportY >= term.buffer.active.length - term.rows;
+        const term = termRef.current;
+        if (output !== lastContentRef.current && term) {
+          // Pause re-rendering while the user has scrolled back, so the view
+          // doesn't snap to the bottom every poll. Once they scroll back down,
+          // the next poll re-renders normally.
+          const atBottom = term.buffer.active.viewportY >= term.buffer.active.length - term.rows;
+          if (atBottom) {
+            lastContentRef.current = output;
             term.reset();
             term.write(output);
-            if (wasAtBottom) term.scrollToBottom();
+            term.scrollToBottom();
+            if (mounted.current) setStatus('live');
+          } else {
+            if (mounted.current) setStatus('paused (scrolled)');
           }
+        } else if (mounted.current) {
+          setStatus('live');
         }
-        if (mounted.current) setStatus('live');
       } catch {
         if (mounted.current) setStatus('reconnecting…');
       }
@@ -208,14 +215,13 @@ function KeyBar({ deviceId, name }: { deviceId: string; name: string }) {
     api.sendKeys(deviceId, name, { special: [special] }).catch(() => { /* ignore */ });
   };
   const keys: { label: string; special: string; flex?: number; accent?: string }[] = [
-    { label: 'Esc',    special: 'Escape' },
-    { label: 'Tab',    special: 'Tab' },
-    { label: '←',      special: 'Left' },
-    { label: '↓',      special: 'Down' },
-    { label: '↑',      special: 'Up' },
-    { label: '→',      special: 'Right' },
-    { label: 'Ctrl-C', special: 'C-c', accent: RT.red },
-    { label: '⏎',      special: 'Enter', flex: 1.4, accent: RT.green },
+    { label: 'Esc', special: 'Escape' },
+    { label: 'Tab', special: 'Tab' },
+    { label: '←',   special: 'Left' },
+    { label: '↓',   special: 'Down' },
+    { label: '↑',   special: 'Up' },
+    { label: '→',   special: 'Right' },
+    { label: '⏎',   special: 'Enter', flex: 2, accent: RT.green },
   ];
   return (
     <div style={{
