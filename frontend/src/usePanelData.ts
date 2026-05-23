@@ -32,7 +32,12 @@ export function usePanelData(deviceId: string, tab: PanelTab) {
     return () => { cancelled = true; clearInterval(id); };
   }, [fetchSessions]);
 
-  // Fetch schedules on open + when tab switches to scheduled.
+  // Fetch schedules when device opens (deviceId changes).
+  useEffect(() => {
+    fetchScheduled();
+  }, [deviceId, fetchScheduled]);
+
+  // Refetch schedules when tab switches to scheduled.
   useEffect(() => {
     if (tab === 'scheduled') fetchScheduled();
   }, [tab, fetchScheduled]);

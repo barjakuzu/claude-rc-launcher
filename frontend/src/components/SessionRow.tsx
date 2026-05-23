@@ -66,7 +66,7 @@ export function SessionRow({ s, hue, deviceId, mobile = false, onChanged, onPrev
   // pct
   const pct = s.pct !== undefined
     ? s.pct
-    : Math.min(100, Math.round(((s.tokens || 0) / 2000) * 100));
+    : Math.min(100, Math.round(((s.tokens || 0) / 200000) * 100));
 
   // tokens label
   const tokensLabel = `${Math.round((s.tokens || 0) / 1000)}K`;
