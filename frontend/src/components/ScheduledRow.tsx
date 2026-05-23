@@ -1,20 +1,20 @@
-// ScheduledRow.tsx — RScheduledRow with per-row CRUD actions.
-// Card layout: name + ENABLED/PAUSED badge, cron line with clock icon, action buttons.
+// ScheduledRow.tsx — V5 full-width 3-col grid with V5IconButton actions.
 import { useState } from 'react';
 import { RT, FONT_MONO } from '../tokens';
 import { Icons } from './primitives';
-import { btn } from './btn';
+import { V5IconButton } from './V5IconButton';
 import { api } from '../api';
 import type { Schedule } from '../types';
 
 export interface ScheduledRowProps {
   s: Schedule;
   deviceId: string;
+  mobile?: boolean;
   onChanged: () => void;
   onEdit: (s: Schedule) => void;
 }
 
-export function ScheduledRow({ s, deviceId, onChanged, onEdit }: ScheduledRowProps) {
+export function ScheduledRow({ s, deviceId, mobile = false, onChanged, onEdit }: ScheduledRowProps) {
   const [pending, setPending] = useState(false);
 
   async function withPending(fn: () => Promise<void>) {
@@ -35,9 +35,7 @@ export function ScheduledRow({ s, deviceId, onChanged, onEdit }: ScheduledRowPro
       onChanged();
     });
 
-  const handleEdit = () => {
-    if (!pending) onEdit(s);
-  };
+  const handleEdit = () => { if (!pending) onEdit(s); };
 
   const handleDelete = () =>
     withPending(async () => {
@@ -48,112 +46,87 @@ export function ScheduledRow({ s, deviceId, onChanged, onEdit }: ScheduledRowPro
 
   return (
     <div style={{
-      background: RT.card,
-      border: `1px solid ${RT.border}`,
-      borderRadius: 8,
-      padding: '10px 12px',
-      display: 'flex',
-      flexDirection: 'column',
-      gap: 5,
+      background: RT.card, border: `1px solid ${RT.border}`,
+      borderRadius: 10, padding: mobile ? 14 : '14px 18px',
+      display: 'grid',
+      gridTemplateColumns: mobile ? '1fr' : '1.5fr 1fr auto',
+      gap: 16, alignItems: 'center',
     }}>
-      {/* Name + enabled badge */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-        <div style={{ fontSize: 13, fontWeight: 600, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-          {s.name}
+      {/* Col 1: Name + badge + cron */}
+      <div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 5 }}>
+          <div style={{
+            fontSize: 14, fontWeight: 600, letterSpacing: '-.005em',
+            whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', flex: 1, minWidth: 0,
+          }}>
+            {s.name}
+          </div>
+          {/* Clickable enabled/paused badge */}
+          <button
+            onClick={handleToggle}
+            disabled={pending}
+            title={s.enabled ? 'Click to pause' : 'Click to enable'}
+            style={{
+              fontSize: 9.5, fontFamily: FONT_MONO, letterSpacing: '.06em',
+              textTransform: 'uppercase', cursor: pending ? 'default' : 'pointer',
+              color: s.enabled ? RT.green : RT.textLow,
+              padding: '2px 7px', borderRadius: 4,
+              background: s.enabled ? 'oklch(0.66 0.10 150 / 0.12)' : 'rgba(255,255,255,.04)',
+              border: `1px solid ${s.enabled ? 'oklch(0.66 0.10 150 / 0.35)' : RT.border}`,
+              flex: 'none', opacity: pending ? 0.5 : 1,
+            }}
+          >
+            {s.enabled ? 'enabled' : 'paused'}
+          </button>
         </div>
-        <span style={{
-          fontSize: 10,
-          fontFamily: FONT_MONO,
-          letterSpacing: '.06em',
-          textTransform: 'uppercase',
-          color: s.enabled ? RT.green : RT.textLow,
-          padding: '1px 6px',
-          borderRadius: 3,
-          background: s.enabled ? 'oklch(0.66 0.10 150 / 0.12)' : 'rgba(255,255,255,.04)',
-          flex: 'none',
+        <div style={{
+          fontSize: 11, fontFamily: FONT_MONO, color: RT.textLow,
+          display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap',
         }}>
-          {s.enabled ? 'ENABLED' : 'PAUSED'}
-        </span>
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+            <Icons.clock size={10} stroke={RT.textLow} /> {s.cron}
+          </span>
+          {s.mode && (
+            <>
+              <span style={{ color: RT.borderHi }}>·</span>
+              <span>{s.mode}</span>
+            </>
+          )}
+        </div>
       </div>
 
-      {/* Cron + next run */}
+      {/* Col 2: Dir + next run */}
       <div style={{
-        fontSize: 11,
-        fontFamily: FONT_MONO,
-        color: RT.textDim,
-        display: 'flex',
-        alignItems: 'center',
-        gap: 6,
+        fontSize: 11, fontFamily: FONT_MONO, color: RT.textDim,
+        display: 'flex', alignItems: 'center', gap: 6, minWidth: 0,
       }}>
-        <Icons.clock size={10} stroke={RT.textLow} />
-        <span>{s.cron}</span>
+        {s.workdir && (
+          <>
+            <Icons.folder size={10} stroke={RT.textLow} />
+            <span style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+              {s.workdir.replace(/\/$/, '').split('/').pop() || s.workdir}
+            </span>
+            <span style={{ color: RT.borderHi }}>·</span>
+          </>
+        )}
         {s.next_run && (
-          <span style={{ color: RT.textLow }}>
-            (next: {new Date(s.next_run).toLocaleString()})
+          <span style={{ whiteSpace: 'nowrap', color: RT.textLow }}>
+            next {new Date(s.next_run).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}
           </span>
         )}
       </div>
 
-      {/* Action buttons */}
-      <div style={{ display: 'flex', gap: 4, justifyContent: 'flex-end', marginTop: 2 }}>
-        {/* Enable/Pause toggle */}
-        <button
-          onClick={handleToggle}
-          disabled={pending}
-          title={s.enabled ? 'Pause schedule' : 'Enable schedule'}
-          style={{
-            ...btn('mini'),
-            opacity: pending ? 0.5 : 1,
-            color: s.enabled ? RT.amber : RT.green,
-          }}
-        >
-          {s.enabled
-            ? <Icons.pause size={14} />
-            : <Icons.play size={14} />
-          }
-        </button>
-
-        {/* Fire now */}
-        <button
-          onClick={handleFire}
-          disabled={pending}
-          title="Run now"
-          style={{
-            ...btn('mini'),
-            opacity: pending ? 0.5 : 1,
-            color: RT.green,
-          }}
-        >
-          <Icons.forward size={14} />
-        </button>
-
-        {/* Edit */}
-        <button
-          onClick={handleEdit}
-          disabled={pending}
-          title="Edit schedule"
-          style={{
-            ...btn('mini'),
-            opacity: pending ? 0.5 : 1,
-            color: RT.textDim,
-          }}
-        >
-          <Icons.terminal size={14} />
-        </button>
-
-        {/* Delete */}
-        <button
-          onClick={handleDelete}
-          disabled={pending}
-          title="Delete schedule"
-          style={{
-            ...btn('mini'),
-            opacity: pending ? 0.5 : 1,
-            color: RT.red,
-          }}
-        >
-          <Icons.stop size={14} />
-        </button>
+      {/* Col 3: Actions — Run now (green), Edit (terminal), Delete (red) */}
+      <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
+        <V5IconButton label="Run now" accent={RT.green} pending={pending} onClick={handleFire}>
+          <Icons.play size={12} />
+        </V5IconButton>
+        <V5IconButton label="Edit schedule" pending={pending} onClick={handleEdit}>
+          <Icons.terminal size={13} stroke={RT.textDim} />
+        </V5IconButton>
+        <V5IconButton label="Delete schedule" accent={RT.red} pending={pending} onClick={handleDelete}>
+          <Icons.stop size={11} />
+        </V5IconButton>
       </div>
     </div>
   );

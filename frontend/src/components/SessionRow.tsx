@@ -1,9 +1,8 @@
-// SessionRow.tsx — per-session card with actions (open, copy, restart, stop, unstick, preview).
-import type { CSSProperties } from 'react';
+// SessionRow.tsx — V5 full-width 3-col grid with 34×34 V5IconButton actions.
 import { useState, useEffect, useRef } from 'react';
 import { RT, FONT_MONO, tintFor } from '../tokens';
-import { Icons, CapBar, StatusPill } from './primitives';
-import { btn } from './btn';
+import { Icons, CapBar, Dot } from './primitives';
+import { V5IconButton } from './V5IconButton';
 import type { Session } from '../types';
 import { api } from '../api';
 
@@ -11,6 +10,7 @@ export interface SessionRowProps {
   s: Session;
   hue: number;
   deviceId: string;
+  mobile?: boolean;
   onChanged: () => void;
   onPreview: (name: string) => void;
 }
@@ -19,11 +19,35 @@ function truncate(s: string, n: number): string {
   return s.length > n ? s.slice(0, n) + '…' : s;
 }
 
-export function SessionRow({ s, hue, deviceId, onChanged, onPreview }: SessionRowProps) {
+// V5StatusPill: bordered colored pill with dot
+function V5StatusPill({ status }: { status: string }) {
+  const map: Record<string, { label: string; color: string; pulse: boolean }> = {
+    running:  { label: 'running',  color: RT.green,   pulse: true  },
+    thinking: { label: 'thinking', color: RT.amber,   pulse: true  },
+    idle:     { label: 'idle',     color: RT.textLow, pulse: false },
+    stopped:  { label: 'stopped',  color: RT.red,     pulse: false },
+  };
+  const m = map[status] || { label: status, color: RT.textLow, pulse: false };
+  return (
+    <span style={{
+      display: 'inline-flex', alignItems: 'center', gap: 5,
+      fontSize: 9.5, letterSpacing: '.08em', textTransform: 'uppercase',
+      fontFamily: FONT_MONO, padding: '2px 7px', borderRadius: 4,
+      border: `1px solid ${m.color === RT.textLow ? RT.border : m.color}`,
+      color: m.color, opacity: m.color === RT.textLow ? 0.7 : 1,
+      flex: 'none',
+    }}>
+      <Dot color={m.color} size={5} pulse={m.pulse} />
+      {m.label}
+    </span>
+  );
+}
+
+export function SessionRow({ s, hue, deviceId, mobile = false, onChanged, onPreview }: SessionRowProps) {
   const [pending, setPending] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
-  const hueColor = tintFor(hue, 0.66, 0.08);
+  const hueColor = tintFor(hue, 0.70, 0.10);
 
   // Click-outside to close ⋯ menu
   useEffect(() => {
@@ -34,35 +58,32 @@ export function SessionRow({ s, hue, deviceId, onChanged, onPreview }: SessionRo
     return () => document.removeEventListener('mousedown', off);
   }, [menuOpen]);
 
-  // Compute dir: basename of workdir.
+  // dir: basename of workdir
   const dir = s.workdir
     ? (s.workdir.replace(/\/$/, '').split('/').pop() || s.workdir)
     : '—';
 
-  // Compute pct.
+  // pct
   const pct = s.pct !== undefined
     ? s.pct
     : Math.min(100, Math.round(((s.tokens || 0) / 2000) * 100));
 
-  // Compute tokens label.
+  // tokens label
   const tokensLabel = `${Math.round((s.tokens || 0) / 1000)}K`;
 
-  // Compute sessionId display string.
+  // sessionId display
   let sessionIdDisplay = '—';
   if (s.sessionId) {
-    sessionIdDisplay = truncate(s.sessionId, 28);
+    sessionIdDisplay = truncate(s.sessionId, 30);
   } else if (s.url) {
     const tail = s.url.replace(/.*\//, '');
-    sessionIdDisplay = truncate(tail, 28);
+    sessionIdDisplay = truncate(tail, 30);
   }
 
-  // Clipboard copy: prefer sessionId, fallback url.
   const copyValue = s.sessionId || s.url || '';
 
   const handleCopy = () => {
-    if (copyValue) {
-      navigator.clipboard.writeText(copyValue).catch(() => {/* ignore */});
-    }
+    if (copyValue) navigator.clipboard.writeText(copyValue).catch(() => {/* ignore */});
   };
 
   const handleLink = () => {
@@ -71,36 +92,21 @@ export function SessionRow({ s, hue, deviceId, onChanged, onPreview }: SessionRo
 
   const handleRefresh = async () => {
     setPending(true);
-    try {
-      await api.restart(deviceId, s.name);
-    } catch {/* ignore */}
-    finally {
-      setPending(false);
-      onChanged();
-    }
+    try { await api.restart(deviceId, s.name); } catch {/* ignore */}
+    finally { setPending(false); onChanged(); }
   };
 
   const handleStop = async () => {
     setPending(true);
-    try {
-      await api.stop(deviceId, s.name);
-    } catch {/* ignore */}
-    finally {
-      setPending(false);
-      onChanged();
-    }
+    try { await api.stop(deviceId, s.name); } catch {/* ignore */}
+    finally { setPending(false); onChanged(); }
   };
 
   const handleUnstick = async () => {
     setMenuOpen(false);
     setPending(true);
-    try {
-      await api.unstick(deviceId, s.name);
-    } catch {/* ignore */}
-    finally {
-      setPending(false);
-      onChanged();
-    }
+    try { await api.unstick(deviceId, s.name); } catch {/* ignore */}
+    finally { setPending(false); onChanged(); }
   };
 
   const handlePreviewClick = () => {
@@ -108,149 +114,116 @@ export function SessionRow({ s, hue, deviceId, onChanged, onPreview }: SessionRo
     onPreview(s.name);
   };
 
-  const miniStyle: CSSProperties = btn('mini');
-
-  const menuItemStyle: CSSProperties = {
-    width: '100%',
-    textAlign: 'left',
-    background: 'transparent',
-    border: 'none',
-    borderRadius: 4,
-    padding: '7px 9px',
-    cursor: 'pointer',
-    color: RT.text,
-    fontFamily: 'inherit',
-    fontSize: 12,
-    display: 'flex',
-    alignItems: 'center',
-    gap: 7,
-    whiteSpace: 'nowrap',
+  const menuItemStyle: React.CSSProperties = {
+    width: '100%', textAlign: 'left', background: 'transparent',
+    border: 'none', borderRadius: 4, padding: '7px 9px', cursor: 'pointer',
+    color: RT.text, fontFamily: 'inherit', fontSize: 12,
+    display: 'flex', alignItems: 'center', gap: 7, whiteSpace: 'nowrap',
   };
 
   return (
     <div style={{
-      background: RT.card,
-      border: `1px solid ${RT.border}`,
-      borderRadius: 8,
-      padding: '10px 12px',
-      display: 'flex',
-      flexDirection: 'column',
-      gap: 6,
+      background: RT.card, border: `1px solid ${RT.border}`,
+      borderRadius: 10, padding: mobile ? 14 : '14px 18px',
+      display: 'grid',
+      gridTemplateColumns: mobile ? '1fr' : 'minmax(220px, 1.4fr) minmax(180px, 1fr) auto',
+      gap: mobile ? 12 : 18, alignItems: 'center',
     }}>
-      {/* Title row */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-        <div style={{
-          fontSize: 13,
-          fontWeight: 600,
-          flex: 1,
-          minWidth: 0,
-          whiteSpace: 'nowrap',
-          overflow: 'hidden',
-          textOverflow: 'ellipsis',
-        }}>
-          {s.name}
+      {/* Col 1: Name + dir + sessionId */}
+      <div style={{ minWidth: 0 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 5 }}>
+          <div style={{
+            fontSize: 14, fontWeight: 600, letterSpacing: '-.005em',
+            whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', flex: 1, minWidth: 0,
+          }}>
+            {s.name}
+          </div>
+          <V5StatusPill status={s.status || 'idle'} />
         </div>
-        <StatusPill status={s.status || 'idle'} />
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 8,
+          fontFamily: FONT_MONO, fontSize: 11, color: RT.textLow, flexWrap: 'wrap',
+        }}>
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+            <Icons.folder size={10} stroke={RT.textLow} /> {dir}
+          </span>
+          <span style={{ color: RT.borderHi }}>·</span>
+          <span>{s.mode || 'STANDARD'}</span>
+          <span style={{ color: RT.borderHi }}>·</span>
+          <span style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 200 }}>
+            {sessionIdDisplay}
+          </span>
+        </div>
       </div>
 
-      {/* Dir + CapBar + tokens */}
-      <div style={{
-        display: 'flex',
-        alignItems: 'center',
-        gap: 8,
-        fontSize: 11,
-        fontFamily: FONT_MONO,
-        color: RT.textDim,
-      }}>
-        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3, whiteSpace: 'nowrap' }}>
-          <Icons.folder size={10} stroke={RT.textLow} /> {dir}
-        </span>
-        <CapBar pct={pct} height={2} bg="rgba(255,255,255,.04)" color={hueColor} />
-        <span style={{ whiteSpace: 'nowrap', color: RT.textDim }}>{tokensLabel}</span>
+      {/* Col 2: Tokens + bar */}
+      <div style={{ minWidth: 0 }}>
+        <div style={{ display: 'flex', alignItems: 'baseline', gap: 6, marginBottom: 5 }}>
+          <span style={{ fontFamily: FONT_MONO, fontSize: 14, fontWeight: 500 }}>{tokensLabel}</span>
+          <span style={{ fontFamily: FONT_MONO, fontSize: 11, color: RT.textLow }}>tokens · {pct}%</span>
+        </div>
+        <CapBar pct={pct} height={4} bg="rgba(255,255,255,.04)" color={hueColor} />
       </div>
 
-      {/* SessionId + action buttons */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-        <div style={{
-          flex: 1,
-          fontFamily: FONT_MONO,
-          fontSize: 11,
-          color: RT.textLow,
-          whiteSpace: 'nowrap',
-          overflow: 'hidden',
-          textOverflow: 'ellipsis',
-        }}>
-          {sessionIdDisplay}
-        </div>
-        <button style={miniStyle} title="Copy session ID" onClick={handleCopy}>
+      {/* Col 3: Actions */}
+      <div style={{ display: 'flex', gap: 6, justifyContent: mobile ? 'space-between' : 'flex-end' }}>
+        <V5IconButton label="Copy session ID" onClick={handleCopy}>
           <Icons.copy size={14} stroke={RT.textDim} />
-        </button>
-        <button
-          style={{ ...miniStyle, opacity: s.url ? 1 : 0.4, cursor: s.url ? 'pointer' : 'default' }}
-          title="Open session URL"
+        </V5IconButton>
+        <V5IconButton
+          label="Open session URL"
+          disabled={!s.url}
           onClick={handleLink}
         >
           <Icons.link size={14} stroke={RT.textDim} />
-        </button>
-        <button
-          disabled={pending}
-          style={{ ...miniStyle, opacity: pending ? 0.6 : 1 }}
-          title="Restart session"
+        </V5IconButton>
+        <V5IconButton
+          label="Restart session"
+          accent={RT.green}
+          pending={pending}
           onClick={handleRefresh}
         >
-          <Icons.refresh size={14} stroke={RT.green} />
-        </button>
-        <button
-          disabled={pending}
-          style={{ ...miniStyle, opacity: pending ? 0.6 : 1 }}
-          title="Stop session"
+          <Icons.refresh size={14} />
+        </V5IconButton>
+        <V5IconButton
+          label="Stop session"
+          accent={RT.red}
+          pending={pending}
           onClick={handleStop}
         >
-          <Icons.stop size={14} stroke={RT.red} />
-        </button>
+          <Icons.stop size={12} />
+        </V5IconButton>
 
-        {/* ⋯ menu */}
+        {/* ⋯ more menu */}
         <div ref={menuRef} style={{ position: 'relative' }}>
-          <button
-            style={{ ...miniStyle, opacity: pending ? 0.6 : 1 }}
-            title="More options"
-            disabled={pending}
+          <V5IconButton
+            label="More options"
+            pending={pending}
             onClick={() => setMenuOpen((o) => !o)}
           >
             <Icons.more size={14} stroke={RT.textDim} />
-          </button>
+          </V5IconButton>
 
           {menuOpen && (
             <div style={{
-              position: 'absolute',
-              bottom: '100%',
-              right: 0,
-              marginBottom: 4,
-              background: RT.panel,
-              border: `1px solid ${RT.borderHi}`,
-              borderRadius: 8,
-              padding: 4,
-              zIndex: 20,
-              boxShadow: '0 8px 24px rgba(0,0,0,.4)',
-              minWidth: 130,
+              position: 'absolute', bottom: '100%', right: 0, marginBottom: 4,
+              background: RT.panel, border: `1px solid ${RT.borderHi}`,
+              borderRadius: 8, padding: 4, zIndex: 20,
+              boxShadow: '0 8px 24px rgba(0,0,0,.4)', minWidth: 130,
             }}>
               <button
-                style={menuItemStyle}
-                onClick={handlePreviewClick}
+                style={menuItemStyle} onClick={handlePreviewClick}
                 onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = RT.bgRaised; }}
                 onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = 'transparent'; }}
               >
-                <Icons.search size={10} stroke={RT.textDim} />
-                Preview
+                <Icons.search size={10} stroke={RT.textDim} /> Preview
               </button>
               <button
-                style={menuItemStyle}
-                onClick={handleUnstick}
+                style={menuItemStyle} onClick={handleUnstick}
                 onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = RT.bgRaised; }}
                 onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = 'transparent'; }}
               >
-                <Icons.refresh size={10} stroke={RT.amber} />
-                Unstick
+                <Icons.refresh size={10} stroke={RT.amber} /> Unstick
               </button>
             </div>
           )}
