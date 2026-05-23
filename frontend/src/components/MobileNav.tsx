@@ -2,28 +2,35 @@
 import { RT, FONT_MONO } from '../tokens';
 import { Icons } from './primitives';
 
+// MTab includes 'activity' as a state reachable only via the More sheet.
+// The bottom-nav buttons only cover 'devices' | 'sessions' | 'scheduled'.
 export type MTab = 'devices' | 'sessions' | 'scheduled' | 'activity';
+
+// NavButtonId is restricted to what the 4 nav buttons represent.
+type NavButtonId = 'devices' | 'sessions' | 'scheduled' | 'more';
 
 interface MobileNavProps {
   active: MTab;
   onChange: (tab: MTab) => void;
+  onMore: () => void;
+  moreOpen: boolean;
   counts: { devices: number; sessions: number; scheduled: number };
 }
 
 interface NavItem {
-  id: MTab;
+  id: NavButtonId;
   label: string;
   icon: (p: { size?: number; stroke?: string; sw?: number }) => React.ReactNode;
   count?: number;
   dot?: boolean;
 }
 
-export function MobileNav({ active, onChange, counts }: MobileNavProps) {
+export function MobileNav({ active, onChange, onMore, moreOpen, counts }: MobileNavProps) {
   const items: NavItem[] = [
     { id: 'devices',   label: 'Devices',   icon: Icons.server,   count: counts.devices },
     { id: 'sessions',  label: 'Sessions',  icon: Icons.terminal, count: counts.sessions, dot: true },
     { id: 'scheduled', label: 'Scheduled', icon: Icons.clock,    count: counts.scheduled },
-    { id: 'activity',  label: 'Activity',  icon: Icons.share },
+    { id: 'more',      label: 'More',      icon: Icons.more },
   ];
 
   return (
@@ -37,13 +44,20 @@ export function MobileNav({ active, onChange, counts }: MobileNavProps) {
       gridTemplateColumns: `repeat(${items.length}, 1fr)`,
     }}>
       {items.map((it) => {
-        const isActive = active === it.id;
+        const isMore = it.id === 'more';
+        const isActive = isMore ? moreOpen : active === it.id;
         const color = isActive ? RT.text : RT.textLow;
         const Icon = it.icon;
         return (
           <button
             key={it.id}
-            onClick={() => onChange(it.id)}
+            onClick={() => {
+              if (isMore) {
+                onMore();
+              } else {
+                onChange(it.id as MTab);
+              }
+            }}
             style={{
               background: 'transparent', border: 'none', cursor: 'pointer',
               padding: '6px 4px 4px', display: 'flex', flexDirection: 'column',
