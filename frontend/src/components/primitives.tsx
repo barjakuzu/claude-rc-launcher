@@ -54,10 +54,13 @@ export interface SparklineProps {
   color?: string;
   fillOpacity?: number;
   dotEnd?: boolean;
+  /** When true, the SVG width is 100% of its container; w only drives the viewBox math. */
+  responsive?: boolean;
 }
 
-export function Sparkline({ data, w = 80, h = 22, color = 'currentColor', fillOpacity = 0.18, dotEnd = false }: SparklineProps) {
-  if (!data || data.length === 0) return <svg width={w} height={h} />;
+export function Sparkline({ data, w = 80, h = 22, color = 'currentColor', fillOpacity = 0.18, dotEnd = false, responsive = false }: SparklineProps) {
+  const svgW: number | string = responsive ? '100%' : w;
+  if (!data || data.length === 0) return <svg width={svgW} height={h} viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" />;
   const max = Math.max(...data, 1);
   const stepX = data.length > 1 ? w / (data.length - 1) : w;
   const pts: [number, number][] = data.map((v, i) => [i * stepX, h - (v / max) * (h - 2) - 1]);
@@ -65,7 +68,7 @@ export function Sparkline({ data, w = 80, h = 22, color = 'currentColor', fillOp
   const area = d + ` L${w.toFixed(1)} ${h} L0 ${h} Z`;
   const last = pts[pts.length - 1];
   return (
-    <svg width={w} height={h} viewBox={`0 0 ${w} ${h}`} style={{ display: 'block', overflow: 'visible' }}>
+    <svg width={svgW} height={h} viewBox={`0 0 ${w} ${h}`} preserveAspectRatio={responsive ? 'none' : undefined} style={{ display: 'block', overflow: 'visible' }}>
       <path d={area} fill={color} opacity={fillOpacity} />
       <path d={d} fill="none" stroke={color} strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
       {dotEnd && <circle cx={last[0]} cy={last[1]} r="2" fill={color} />}

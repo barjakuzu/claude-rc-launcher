@@ -136,35 +136,141 @@ def _send_auth_required(handler):
 
 
 def _login_html(csrf_token="", error=""):
-    """Generate the login page HTML with CSRF token."""
-    err_style = "display:block" if error else "display:none"
+    """Generate the login page HTML with CSRF token. V5 design system."""
+    err_style = "display:flex" if error else "display:none"
     err_msg = error or "Invalid credentials"
     return f"""<!DOCTYPE html>
-<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Claude RC — Login</title>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<title>Claude RC — Sign in</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist+Mono:wght@400;500;600&family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <style>
-*{{margin:0;padding:0;box-sizing:border-box}}
-body{{background:#0a0a0a;color:#e2e8f0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh}}
-.login-card{{background:#141414;border:1px solid #2a2a2a;border-radius:16px;padding:40px;width:100%;max-width:380px;text-align:center}}
-.login-card h1{{font-size:22px;margin-bottom:6px;color:#e2e8f0}}
-.login-card p{{font-size:13px;color:#64748b;margin-bottom:28px}}
-.field{{margin-bottom:16px;text-align:left}}
-.field label{{display:block;font-size:12px;color:#94a3b8;margin-bottom:4px}}
-.field input{{width:100%;padding:10px 12px;background:#1a1a1a;border:1px solid #2a2a2a;border-radius:8px;color:#e2e8f0;font-size:14px;outline:none;color-scheme:dark}}
-.field input:focus{{border-color:#555}}
-.field input:-webkit-autofill{{-webkit-box-shadow:0 0 0 30px #1a1a1a inset !important;-webkit-text-fill-color:#e2e8f0 !important;border-color:#2a2a2a !important}}
-.btn{{width:100%;padding:12px;background:#222;color:#e2e8f0;border:1px solid #333;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;margin-top:8px}}
-.btn:hover{{background:#333}}
-.error{{color:#ef4444;font-size:13px;margin-bottom:12px;{err_style}}}
-</style></head><body>
-<form class="login-card" method="POST" action="/login">
-<input type="hidden" name="csrf" value="{csrf_token}">
-<h1>Claude RC</h1><p>Session Launcher</p>
-<div class="error">{err_msg}</div>
-<div class="field"><label>Username</label><input name="user" type="text" autofocus required></div>
-<div class="field"><label>Password</label><input name="pass" type="password" required></div>
-<button type="submit" class="btn">Sign In</button>
-</form>
+:root {{
+  --bg:        oklch(0.155 0.004 80);
+  --bgRaised:  oklch(0.195 0.006 80);
+  --panel:     oklch(0.215 0.006 80);
+  --card:      oklch(0.225 0.006 80);
+  --border:    oklch(0.28 0.007 80);
+  --borderHi:  oklch(0.36 0.009 80);
+  --text:      oklch(0.96 0.004 80);
+  --textDim:   oklch(0.72 0.006 80);
+  --textLow:   oklch(0.52 0.007 80);
+  --accent:    oklch(0.70 0.10 250);
+  --red:       oklch(0.62 0.12 25);
+  --redSoft:   oklch(0.62 0.12 25 / 0.12);
+  --redEdge:   oklch(0.62 0.12 25 / 0.35);
+}}
+* {{ margin: 0; padding: 0; box-sizing: border-box; }}
+html, body {{ height: 100%; background: var(--bg); color: var(--text); }}
+body {{
+  font-family: 'Inter', system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale;
+  display: flex; align-items: center; justify-content: center;
+  padding: 20px;
+}}
+.wrap {{
+  width: 100%; max-width: 400px;
+  display: flex; flex-direction: column; gap: 18px;
+}}
+.brand {{
+  display: flex; align-items: center; gap: 10px; justify-content: center;
+  margin-bottom: 6px;
+}}
+.brand .mark {{
+  width: 28px; height: 28px; border-radius: 7px;
+  border: 1px solid var(--borderHi); background: var(--panel);
+  display: flex; align-items: center; justify-content: center;
+  font-family: 'Geist Mono', ui-monospace, monospace;
+  font-size: 11px; font-weight: 600; letter-spacing: .02em;
+  color: var(--text);
+}}
+.brand .name {{ font-size: 15px; font-weight: 600; letter-spacing: -.005em; }}
+.card {{
+  background: var(--bgRaised);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 28px 26px;
+  box-shadow: 0 12px 40px rgba(0,0,0,.35);
+}}
+.title {{
+  font-size: 20px; font-weight: 600; letter-spacing: -.015em;
+  margin-bottom: 4px;
+}}
+.subtitle {{
+  font-size: 11px; color: var(--textLow);
+  font-family: 'Geist Mono', ui-monospace, monospace;
+  letter-spacing: .14em; text-transform: uppercase;
+  margin-bottom: 22px;
+}}
+.error {{
+  {err_style}; align-items: center; gap: 8px;
+  background: var(--redSoft); border: 1px solid var(--redEdge);
+  color: var(--red); border-radius: 8px;
+  padding: 9px 12px; font-size: 12.5px;
+  margin-bottom: 14px;
+}}
+.field {{ margin-bottom: 12px; }}
+.field label {{
+  display: block; font-size: 9.5px; color: var(--textLow);
+  font-family: 'Geist Mono', ui-monospace, monospace;
+  letter-spacing: .14em; text-transform: uppercase;
+  margin-bottom: 6px;
+}}
+.field input {{
+  width: 100%; padding: 11px 13px;
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text); font-size: 14px; font-family: inherit;
+  outline: none; color-scheme: dark;
+  transition: border-color .12s, background .12s;
+}}
+.field input:hover {{ border-color: var(--borderHi); }}
+.field input:focus {{ border-color: var(--accent); background: var(--card); }}
+.field input:-webkit-autofill {{
+  -webkit-box-shadow: 0 0 0 30px var(--panel) inset !important;
+  -webkit-text-fill-color: var(--text) !important;
+  border-color: var(--border) !important;
+}}
+.btn {{
+  width: 100%; padding: 12px 16px; margin-top: 10px;
+  background: var(--text); color: var(--bg);
+  border: none; border-radius: 8px;
+  font-family: inherit; font-size: 13.5px; font-weight: 600;
+  letter-spacing: -.005em; cursor: pointer;
+  transition: opacity .12s;
+}}
+.btn:hover {{ opacity: 0.88; }}
+.btn:active {{ opacity: 0.78; }}
+.foot {{
+  text-align: center; font-size: 10.5px; color: var(--textLow);
+  font-family: 'Geist Mono', ui-monospace, monospace;
+  letter-spacing: .04em;
+}}
+.foot a {{ color: var(--textDim); text-decoration: none; }}
+.foot a:hover {{ color: var(--text); }}
+</style></head>
+<body>
+<div class="wrap">
+  <div class="brand">
+    <div class="mark">rc</div>
+    <div class="name">Claude RC</div>
+  </div>
+  <form class="card" method="POST" action="/login" autocomplete="on">
+    <input type="hidden" name="csrf" value="{csrf_token}">
+    <div class="title">Sign in</div>
+    <div class="subtitle">Session launcher</div>
+    <div class="error">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex:none"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>
+      <span>{err_msg}</span>
+    </div>
+    <div class="field"><label for="user">Username</label><input id="user" name="user" type="text" autofocus required autocomplete="username"></div>
+    <div class="field"><label for="pass">Password</label><input id="pass" name="pass" type="password" required autocomplete="current-password"></div>
+    <button type="submit" class="btn">Sign in</button>
+  </form>
+  <div class="foot">claude-rc · <a href="https://github.com/barjakuzu/claude-rc-launcher" rel="noopener">github</a></div>
+</div>
 </body></html>"""
 
 
