@@ -120,19 +120,25 @@ def _check_basic_auth(handler):
 
 
 def _send_auth_required(handler):
-    """Send 401 or redirect to login depending on request type."""
+    """Send 401 or redirect to login depending on request type.
+
+    We deliberately do NOT send a `WWW-Authenticate: Basic` header on the 401
+    path: that would cause browsers (especially Mobile Safari) to show their
+    native HTTP-Basic credentials dialog over our custom /login page. The SPA
+    catches 401 in api.ts and navigates to /login itself; curl/API consumers
+    send Basic Auth proactively (Authorization header still works server-side).
+    """
     accept = handler.headers.get("Accept", "")
-    # API/curl requests get 401 JSON; browser requests get redirected to login
+    # Browser navigation gets a redirect; XHR/fetch from the SPA gets 401 JSON.
     if "text/html" in accept and not handler.headers.get("Authorization"):
         handler.send_response(302)
         handler.send_header("Location", "/login")
         handler.end_headers()
     else:
         handler.send_response(401)
-        handler.send_header("WWW-Authenticate", 'Basic realm="Claude RC Launcher"')
-        handler.send_header("Content-Type", "text/plain")
+        handler.send_header("Content-Type", "application/json")
         handler.end_headers()
-        handler.wfile.write(b"Authentication required")
+        handler.wfile.write(b'{"error":"auth required"}')
 
 
 def _login_html(csrf_token="", error=""):
