@@ -186,19 +186,67 @@ export function PreviewModal({ deviceId, name, onClose }: PreviewModalProps) {
             flex: 1, padding: 10, background: '#1a1a18', overflow: 'hidden',
           }}
         />
+        <KeyBar deviceId={deviceId} name={name} />
         <div style={{
-          flex: 'none', padding: '8px 14px', borderTop: `1px solid ${RT.border}`,
+          flex: 'none', padding: '6px 14px', borderTop: `1px solid ${RT.border}`,
           background: RT.bgRaised, display: 'flex', alignItems: 'center', gap: 10,
           fontFamily: FONT_MONO, fontSize: 10.5, color: RT.textLow,
           letterSpacing: '.04em',
         }}>
-          <span>type to send keystrokes</span>
-          <span style={{ color: RT.borderHi }}>·</span>
-          <span>Ctrl-C / Enter / Tab / arrows work</span>
+          <span>tap the keys above or type on a keyboard</span>
           <div style={{ flex: 1 }} />
           <span>{deviceId}</span>
         </div>
       </div>
+    </div>
+  );
+}
+
+// On-screen key bar for mobile — taps map to tmux send-keys specials.
+function KeyBar({ deviceId, name }: { deviceId: string; name: string }) {
+  const send = (special: string) => {
+    api.sendKeys(deviceId, name, { special: [special] }).catch(() => { /* ignore */ });
+  };
+  const keys: { label: string; special: string; flex?: number; accent?: string }[] = [
+    { label: 'Esc',    special: 'Escape' },
+    { label: 'Tab',    special: 'Tab' },
+    { label: '←',      special: 'Left' },
+    { label: '↓',      special: 'Down' },
+    { label: '↑',      special: 'Up' },
+    { label: '→',      special: 'Right' },
+    { label: 'Ctrl-C', special: 'C-c', accent: RT.red },
+    { label: '⏎',      special: 'Enter', flex: 1.4, accent: RT.green },
+  ];
+  return (
+    <div style={{
+      flex: 'none',
+      borderTop: `1px solid ${RT.border}`,
+      background: RT.bg,
+      padding: '8px 8px',
+      display: 'flex', gap: 6, overflowX: 'auto', WebkitOverflowScrolling: 'touch',
+    }}>
+      {keys.map((k) => (
+        <button
+          key={k.label}
+          onClick={() => send(k.special)}
+          // Prevent stealing focus from the terminal on tap.
+          onMouseDown={(e) => e.preventDefault()}
+          style={{
+            flex: k.flex ?? 1, minWidth: 44, minHeight: 38,
+            background: RT.panel,
+            color: k.accent ?? RT.text,
+            border: `1px solid ${RT.border}`,
+            borderRadius: 8,
+            fontFamily: FONT_MONO, fontSize: 14, fontWeight: 500,
+            cursor: 'pointer', padding: '0 10px',
+            display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+            whiteSpace: 'nowrap',
+            touchAction: 'manipulation',
+          }}
+        >
+          {k.label}
+        </button>
+      ))}
     </div>
   );
 }
