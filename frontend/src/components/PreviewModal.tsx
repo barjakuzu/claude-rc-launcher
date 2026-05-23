@@ -93,8 +93,46 @@ export function PreviewModal({ deviceId, name, onClose }: PreviewModalProps) {
     const onResize = () => { try { fit.fit(); } catch { /* ignore */ } };
     window.addEventListener('resize', onResize);
 
+    // Touch-scroll handler — xterm.js doesn't translate touch swipes into
+    // viewport scrolling on iOS / Android. We capture touchmove on the
+    // container and translate the vertical delta into term.scrollLines.
+    const el = containerRef.current;
+    let lastY = 0;
+    let active = false;
+    let accumulator = 0;
+    const onTouchStart = (e: TouchEvent) => {
+      if (e.touches.length !== 1) return;
+      active = true;
+      lastY = e.touches[0].clientY;
+      accumulator = 0;
+    };
+    const onTouchMove = (e: TouchEvent) => {
+      if (!active || e.touches.length !== 1 || !termRef.current) return;
+      const y = e.touches[0].clientY;
+      const dy = lastY - y;        // positive: finger moved up → scroll down
+      lastY = y;
+      const rows = Math.max(1, termRef.current.rows);
+      const lineHeight = el!.clientHeight / rows;
+      accumulator += dy / lineHeight;
+      const whole = Math.trunc(accumulator);
+      if (whole !== 0) {
+        termRef.current.scrollLines(whole);
+        accumulator -= whole;
+        if (e.cancelable) e.preventDefault();
+      }
+    };
+    const onTouchEnd = () => { active = false; };
+    el.addEventListener('touchstart', onTouchStart, { passive: true });
+    el.addEventListener('touchmove',  onTouchMove,  { passive: false });
+    el.addEventListener('touchend',   onTouchEnd,   { passive: true });
+    el.addEventListener('touchcancel',onTouchEnd,   { passive: true });
+
     return () => {
       window.removeEventListener('resize', onResize);
+      el.removeEventListener('touchstart', onTouchStart);
+      el.removeEventListener('touchmove',  onTouchMove);
+      el.removeEventListener('touchend',   onTouchEnd);
+      el.removeEventListener('touchcancel',onTouchEnd);
       term.dispose();
       termRef.current = null;
       fitRef.current = null;
@@ -187,12 +225,34 @@ export function PreviewModal({ deviceId, name, onClose }: PreviewModalProps) {
             fontSize: 16, cursor: 'pointer', padding: '4px 8px',
           }}>✕</button>
         </div>
-        <div
-          ref={containerRef}
-          style={{
-            flex: 1, padding: 10, background: '#1a1a18', overflow: 'hidden',
-          }}
-        />
+        <div style={{ flex: 1, position: 'relative', minHeight: 0 }}>
+          <div
+            ref={containerRef}
+            style={{
+              position: 'absolute', inset: 0,
+              padding: 10, background: '#1a1a18', overflow: 'hidden',
+              touchAction: 'pan-y',
+            }}
+          />
+          {status === 'paused (scrolled)' && (
+            <button
+              onClick={() => { termRef.current?.scrollToBottom(); }}
+              style={{
+                position: 'absolute', right: 14, bottom: 14, zIndex: 5,
+                background: RT.green, color: RT.bg,
+                border: 'none', borderRadius: 999,
+                padding: '8px 14px', fontFamily: FONT_MONO, fontSize: 11,
+                fontWeight: 600, letterSpacing: '.06em', textTransform: 'uppercase',
+                boxShadow: '0 8px 20px rgba(0,0,0,.45)',
+                cursor: 'pointer',
+                display: 'inline-flex', alignItems: 'center', gap: 6,
+                touchAction: 'manipulation',
+              }}
+            >
+              ↓ Jump to live
+            </button>
+          )}
+        </div>
         <KeyBar deviceId={deviceId} name={name} />
         <div style={{
           flex: 'none', padding: '6px 14px', borderTop: `1px solid ${RT.border}`,
