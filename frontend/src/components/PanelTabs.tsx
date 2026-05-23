@@ -10,15 +10,18 @@ export interface PanelTabsProps {
   sessionCount: number;
   scheduledCount: number;
   onResume?: () => void;
+  mobile?: boolean;
 }
 
-export function PanelTabs({ tab, setTab, sessionCount, scheduledCount, onResume }: PanelTabsProps) {
-  const tabs: [PanelTab, string, number | null][] = [
+export function PanelTabs({ tab, setTab, sessionCount, scheduledCount, onResume, mobile }: PanelTabsProps) {
+  const allTabs: [PanelTab, string, number | null][] = [
     ['running',   'Sessions',  sessionCount],
     ['scheduled', 'Scheduled', scheduledCount],
     ['logs',      'Logs',      null],
     ['settings',  'Settings',  null],
   ];
+  // On mobile, only show the Sessions tab — Logs/Settings are reachable via the More sheet.
+  const tabs = mobile ? allTabs.slice(0, 1) : allTabs;
 
   return (
     <div style={{

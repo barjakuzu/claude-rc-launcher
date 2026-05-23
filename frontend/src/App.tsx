@@ -11,9 +11,11 @@ import { DeviceRail } from './components/DeviceRail';
 import { DeviceDetail } from './components/DeviceDetail';
 import { BigCard } from './components/BigCard';
 import { MobileNav } from './components/MobileNav';
+import { MobileMoreSheet } from './components/MobileMoreSheet';
 import { AllSessions } from './components/AllSessions';
 import { AllScheduled } from './components/AllScheduled';
 import { Activity } from './components/Activity';
+import { ShareTunnel } from './components/ShareTunnel';
 import type { PanelTab } from './components/PanelTabs';
 import type { MTab } from './components/MobileNav';
 
@@ -29,6 +31,8 @@ export function App() {
   const [mTab, setMTab] = useState<MTab>(
     () => (localStorage.getItem('rc_mtab') as MTab) ?? 'devices'
   );
+  const [moreOpen, setMoreOpen] = useState(false);
+  const [shareOpen, setShareOpen] = useState(false);
 
   const pickMTab = (t: MTab) => {
     setMTab(t);
@@ -134,12 +138,29 @@ export function App() {
 
       {/* Footer / mobile nav */}
       {layout.mobile ? (
-        <MobileNav
-          active={mTab}
-          onChange={pickMTab}
-          counts={{ devices: cards.length, sessions: totalSessions, scheduled: 0 }}
-        />
+        <>
+          <MobileMoreSheet
+            open={moreOpen}
+            onClose={() => setMoreOpen(false)}
+            openId={openId}
+            cards={cards}
+            setOpenId={setOpenId}
+            setMTab={pickMTab}
+            setDeviceTab={setTab}
+            onShareOpen={() => setShareOpen(true)}
+          />
+          <MobileNav
+            active={mTab}
+            onChange={pickMTab}
+            onMore={() => setMoreOpen(true)}
+            moreOpen={moreOpen}
+            counts={{ devices: cards.length, sessions: totalSessions, scheduled: 0 }}
+          />
+        </>
       ) : null}
+
+      {/* Share tunnel modal — reachable from More sheet */}
+      {shareOpen && <ShareTunnel onClose={() => setShareOpen(false)} />}
     </div>
   );
 }

@@ -61,6 +61,7 @@ export function DeviceDetail({ device, tab, setTab, onClose, layout }: DeviceDet
         sessionCount={sessions.length}
         scheduledCount={scheduled.length}
         onResume={() => setResumeOpen(true)}
+        mobile={mobile}
       />
 
       {/* Body */}
