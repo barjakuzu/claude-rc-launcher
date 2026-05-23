@@ -5,12 +5,12 @@ import overview
 class OverviewTest(unittest.TestCase):
     def test_card_from_parts_online(self):
         card = overview.card_from_parts(
-            device={"id": "home", "name": "Home", "base_url": "http://tba-lin.ts.net:8200"},
+            device={"id": "home", "name": "Home", "base_url": "http://home-box.example.net:8200"},
             sessions=[{"tokens": 1000}, {"tokens": 500}],
             stats={"loadavg": [2.0, 1.0, 1.0], "cores": 4, "os": "Ubuntu 24.04", "token_history": [1, 2, 3]},
         )
         self.assertEqual(card["id"], "home")
-        self.assertEqual(card["hostname"], "tba-lin.ts.net")
+        self.assertEqual(card["hostname"], "home-box.example.net")
         self.assertTrue(card["online"])
         self.assertEqual(card["sessions"], 2)
         self.assertEqual(card["tokens"], 1500)

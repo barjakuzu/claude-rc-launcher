@@ -40,7 +40,7 @@ const vEdge  = (hue) => `oklch(0.66 0.07 ${hue} / 0.32)`;
 // to match their setup — this prototype demonstrates the layout, not the data.
 const V5_DEVICES = [
   { ...window.DEVICES[0], id: 'vm',   name: 'This machine (VM)', hostname: 'local', region: 'local', location: 'Local · Ubuntu 24.04.4 LTS', kind: 'vm',     hue: 250, cpuLoad: 0.24, sessions: 5, tokens: 1400000, tokenCap: 2000000, lastActivity: 'just now' },
-  { ...window.DEVICES[1], id: 'home', name: 'Home (tba-lin)',    hostname: 'tba-lin.tail82c219.ts.net', region: 'tailnet', location: 'Brooklyn · tailscale', kind: 'server', hue: 30,  cpuLoad: 0,    sessions: 1, tokens: 0,       tokenCap: 2000000, online: true, lastActivity: '4m ago' },
+  { ...window.DEVICES[1], id: 'home', name: 'Home (home-box)',    hostname: 'home-box.example.ts.net', region: 'tailnet', location: 'Brooklyn · tailscale', kind: 'server', hue: 30,  cpuLoad: 0,    sessions: 1, tokens: 0,       tokenCap: 2000000, online: true, lastActivity: '4m ago' },
 ];
 const V5_SESSIONS = {
   vm: [

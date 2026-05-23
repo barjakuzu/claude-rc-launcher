@@ -234,12 +234,12 @@ import overview
 class OverviewTest(unittest.TestCase):
     def test_card_from_parts_online(self):
         card = overview.card_from_parts(
-            device={"id": "home", "name": "Home", "base_url": "http://tba-lin.ts.net:8200"},
+            device={"id": "home", "name": "Home", "base_url": "http://home-box.example.net:8200"},
             sessions=[{"tokens": 1000}, {"tokens": 500}],
             stats={"loadavg": [2.0, 1.0, 1.0], "cores": 4, "os": "Ubuntu 24.04", "token_history": [1, 2, 3]},
         )
         self.assertEqual(card["id"], "home")
-        self.assertEqual(card["hostname"], "tba-lin.ts.net")
+        self.assertEqual(card["hostname"], "home-box.example.net")
         self.assertTrue(card["online"])
         self.assertEqual(card["sessions"], 2)
         self.assertEqual(card["tokens"], 1500)
@@ -771,14 +771,14 @@ git push origin main
 cd /root/.claude-rc/app && git pull --ff-only
 sudo systemctl restart claude-rc-launcher && sleep 3 && systemctl is-active claude-rc-launcher
 ```
-Then bump `VERSION` in `config.py` (so the home box update restarts) and pull on `tba-lin` too:
+Then bump `VERSION` in `config.py` (so the home box update restarts) and pull on `home-box` too:
 ```bash
-timeout 40 ssh barjazz@tba-lin 'export XDG_RUNTIME_DIR=/run/user/1000; cd ~/.claude-rc/app && git pull --ff-only && systemctl --user restart claude-rc'
+timeout 40 ssh user@home-box 'export XDG_RUNTIME_DIR=/run/user/1000; cd ~/.claude-rc/app && git pull --ff-only && systemctl --user restart claude-rc'
 ```
 
 - [ ] **Step 3: E2E checks (mirror the multi-device deploy verification)**
 
-Via `https://claude.barjazz.dev` (and localhost): grid shows both devices online with live tokens/load; switch device; launch a session on `home` through the panel and confirm in `tba-lin` tmux; run stop/restart/unstick/preview; create→fire→delete a schedule; start/stop tunnel; trigger update-check. Confirm `/legacy` still works.
+Via `https://rc.example.com` (and localhost): grid shows both devices online with live tokens/load; switch device; launch a session on `home` through the panel and confirm in `home-box` tmux; run stop/restart/unstick/preview; create→fire→delete a schedule; start/stop tunnel; trigger update-check. Confirm `/legacy` still works.
 
 - [ ] **Step 4: Responsive sweep**
 

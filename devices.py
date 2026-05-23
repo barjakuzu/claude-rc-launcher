@@ -8,7 +8,7 @@ running its own rc-launcher app, reachable over a private network (Tailscale):
       {
         "id": "home",
         "name": "Home Ubuntu",
-        "base_url": "http://tba-lin.tail82c219.ts.net:8200",
+        "base_url": "http://home-box.example.ts.net:8200",
         "auth_user": "admin",
         "auth_pass": "..."
       }

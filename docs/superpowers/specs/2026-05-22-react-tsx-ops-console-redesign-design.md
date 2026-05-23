@@ -137,7 +137,7 @@ Fields with no honest source (region, geo location, per-device token cap) are
 - Hub serves `/` (new UI) and `/legacy` (old UI); `/static/dist/assets/*` load.
 - `/rc/stats` returns valid JSON on hub and home box; `/rc/overview` lists both
   devices with correct online state, sessions, tokens, load.
-- End-to-end through the running hub (and `https://claude.barjazz.dev`): switch
+- End-to-end through the running hub (and `https://rc.example.com`): switch
   device, launch a session, run each session action, create/edit/fire a schedule,
   start/stop the tunnel, trigger update-check — each verified against real effects
   (mirrors the manual checks used for the multi-device deploy).
