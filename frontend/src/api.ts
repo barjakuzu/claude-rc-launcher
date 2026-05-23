@@ -15,6 +15,8 @@ export const api = {
   projects: (device: string) => req('GET', '/projects', device),
   browse: (device: string, path: string) => req('GET', '/browse?path=' + encodeURIComponent(path), device),
   preview: (device: string, name: string) => req('GET', `/sessions/${encodeURIComponent(name)}/preview`, device),
+  sendKeys: (device: string, name: string, body: { keys?: string; special?: string[] }) =>
+    req('POST', `/sessions/${encodeURIComponent(name)}/keys`, device, body),
   start: (device: string, body: unknown) => req('POST', '/start', device, body),
   stop: (device: string, name: string) => req('POST', '/stop', device, { name }),
   restart: (device: string, name: string) => req('POST', '/restart', device, { name }),

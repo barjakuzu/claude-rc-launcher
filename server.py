@@ -478,7 +478,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.send_error(404)
                 return
             result = subprocess.run(
-                ["tmux", "capture-pane", "-t", name, "-p", "-S", "-50"],
+                ["tmux", "capture-pane", "-t", name, "-e", "-p", "-S", "-50"],
                 capture_output=True, text=True,
             )
             if result.returncode != 0:
@@ -807,6 +807,28 @@ class Handler(http.server.BaseHTTPRequestHandler):
             resume = body.get("resume", True)
             ok, msg = restart_session(name, resume=resume)
             self._json({"ok": ok, "message": msg, "name": name})
+
+        elif path.startswith("/sessions/") and path.endswith("/keys"):
+            name = path[len("/sessions/"):-len("/keys")]
+            if not name or ".." in name or "/" in name:
+                self.send_error(404)
+                return
+            body = self._read_body()
+            keys = body.get("keys")
+            special = body.get("special")
+            if not session_exists(name):
+                self._json({"ok": False, "message": "Session not found"}, 404)
+                return
+            try:
+                if special:
+                    cmd = ["tmux", "send-keys", "-t", name, *special]
+                    subprocess.run(cmd, capture_output=True, check=False, timeout=5)
+                if keys:
+                    cmd = ["tmux", "send-keys", "-t", name, "-l", keys]
+                    subprocess.run(cmd, capture_output=True, check=False, timeout=5)
+                self._json({"ok": True})
+            except subprocess.SubprocessError as e:
+                self._json({"ok": False, "message": str(e)}, 500)
 
         elif path == "/resume/start":
             body = self._read_body()

@@ -85,7 +85,7 @@ export function AllSessions({ cards, onOpenDevice }: AllSessionsProps) {
                   </>
                 )}
               </div>
-              {/* Actions: Preview (terminal) | Resume (restart) | More (⋯) | Stop */}
+              {/* Actions: Preview (terminal) | Restart | More (⋯) | Stop */}
               <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
                 <button
                   style={mobileActionBtn()}
@@ -96,11 +96,11 @@ export function AllSessions({ cards, onOpenDevice }: AllSessionsProps) {
                 </button>
                 <button
                   style={mobileActionBtn()}
-                  disabled={!!pending[`resume-${key}`]}
-                  onClick={() => guard(`resume-${key}`, () => api.restart(d.id, s.name))}
+                  disabled={!!pending[`restart-${key}`]}
+                  onClick={() => guard(`restart-${key}`, () => api.restart(d.id, s.name))}
                   title="Restart this session"
                 >
-                  <Icons.refresh size={13} stroke={RT.green} /> Resume
+                  <Icons.refresh size={13} stroke={RT.green} /> Restart
                 </button>
                 <MoreMenu
                   deviceId={d.id}

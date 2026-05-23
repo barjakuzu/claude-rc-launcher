@@ -1,14 +1,10 @@
-// PreviewModal.tsx — tmux pane preview for a session.
-import { useState, useEffect, useRef, useCallback } from 'react';
-import { RT, FONT_MONO } from '../tokens';
-import { btn } from './btn';
+import { useEffect, useRef, useState } from 'react';
+import { Terminal } from '@xterm/xterm';
+import { FitAddon } from '@xterm/addon-fit';
+import '@xterm/xterm/css/xterm.css';
+import { RT, FONT_MONO, FONT_SANS } from '../tokens';
+import { Icons } from './primitives';
 import { api } from '../api';
-
-interface PreviewResult {
-  name: string;
-  output: string;
-  status: string;
-}
 
 interface PreviewModalProps {
   deviceId: string;
@@ -16,122 +12,191 @@ interface PreviewModalProps {
   onClose: () => void;
 }
 
+// Map common JS keys to tmux send-keys names.
+const SPECIAL_KEY_MAP: Record<string, string> = {
+  'Enter': 'Enter',
+  'Backspace': 'BSpace',
+  'Tab': 'Tab',
+  'Escape': 'Escape',
+  'ArrowUp': 'Up',
+  'ArrowDown': 'Down',
+  'ArrowLeft': 'Left',
+  'ArrowRight': 'Right',
+  'Home': 'Home',
+  'End': 'End',
+  'PageUp': 'PageUp',
+  'PageDown': 'PageDown',
+  'Delete': 'DC',
+};
+
 export function PreviewModal({ deviceId, name, onClose }: PreviewModalProps) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const termRef = useRef<Terminal | null>(null);
+  const fitRef = useRef<FitAddon | null>(null);
   const mounted = useRef(true);
+  const [autoRefresh, setAutoRefresh] = useState(true);
+  const [status, setStatus] = useState<string>('connecting…');
+  const lastContentRef = useRef<string>('');
+
   useEffect(() => () => { mounted.current = false; }, []);
 
-  const [result, setResult] = useState<PreviewResult | null>(null);
-  const [autoRefresh, setAutoRefresh] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  // Initialize xterm
+  useEffect(() => {
+    if (!containerRef.current) return;
+    const term = new Terminal({
+      cursorBlink: false,
+      fontFamily: '"Geist Mono", ui-monospace, SFMono-Regular, monospace',
+      fontSize: 12,
+      lineHeight: 1.2,
+      theme: {
+        background: '#1a1a18',
+        foreground: '#e8e7e3',
+        cursor: '#e8e7e3',
+        selectionBackground: 'rgba(150,150,150,.3)',
+      },
+      scrollback: 5000,
+      convertEol: true,
+      disableStdin: false,
+      allowProposedApi: true,
+    });
+    const fit = new FitAddon();
+    term.loadAddon(fit);
+    term.open(containerRef.current);
+    try { fit.fit(); } catch { /* ignore early-fit failures */ }
+    termRef.current = term;
+    fitRef.current = fit;
 
-  const fetchPreview = useCallback(async () => {
-    try {
-      const data = await api.preview(deviceId, name) as PreviewResult;
-      if (mounted.current) {
-        setResult(data);
-        setError(null);
+    // Forward keystrokes (printable text) to the session.
+    term.onData((data) => {
+      if (!mounted.current) return;
+      api.sendKeys(deviceId, name, { keys: data }).catch(() => { /* ignore */ });
+    });
+
+    // Forward known special keys.
+    term.attachCustomKeyEventHandler((ev) => {
+      if (ev.type !== 'keydown') return true; // ignore keyup
+      const key = ev.key;
+      // Ctrl combinations: send as e.g. "C-c", "C-d", "C-l".
+      if (ev.ctrlKey && key.length === 1 && /[a-zA-Z]/.test(key)) {
+        api.sendKeys(deviceId, name, { special: [`C-${key.toLowerCase()}`] }).catch(() => {});
+        return false; // prevent xterm from also sending the char
       }
-    } catch (err) {
-      if (mounted.current) {
-        setError(err instanceof Error ? err.message : 'Failed to load preview');
+      const mapped = SPECIAL_KEY_MAP[key];
+      if (mapped) {
+        api.sendKeys(deviceId, name, { special: [mapped] }).catch(() => {});
+        return false; // we handled it
       }
-    }
+      return true; // let onData handle printable
+    });
+
+    // Resize handler — refit when container resizes.
+    const onResize = () => { try { fit.fit(); } catch { /* ignore */ } };
+    window.addEventListener('resize', onResize);
+
+    return () => {
+      window.removeEventListener('resize', onResize);
+      term.dispose();
+      termRef.current = null;
+      fitRef.current = null;
+    };
   }, [deviceId, name]);
 
-  // Fetch on mount + optional 3s auto-refresh
+  // Polling loop: refresh pane content
   useEffect(() => {
-    let cancelled = false;
-    fetchPreview();
     if (!autoRefresh) return;
-    const id = setInterval(() => { if (!cancelled) fetchPreview(); }, 3000);
+    let cancelled = false;
+    const fetchOnce = async () => {
+      try {
+        const data = await api.preview(deviceId, name);
+        if (cancelled || !mounted.current) return;
+        const output: string = data?.output ?? '';
+        if (output !== lastContentRef.current) {
+          lastContentRef.current = output;
+          const term = termRef.current;
+          if (term) {
+            const wasAtBottom = term.buffer.active.viewportY >= term.buffer.active.length - term.rows;
+            term.reset();
+            term.write(output);
+            if (wasAtBottom) term.scrollToBottom();
+          }
+        }
+        if (mounted.current) setStatus('live');
+      } catch {
+        if (mounted.current) setStatus('reconnecting…');
+      }
+    };
+    fetchOnce();
+    const id = setInterval(fetchOnce, 700);
     return () => { cancelled = true; clearInterval(id); };
-  }, [deviceId, name, autoRefresh, fetchPreview]);
+  }, [autoRefresh, deviceId, name]);
+
+  // Esc closes
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [onClose]);
 
   return (
-    <div
-      onClick={onClose}
-      style={{
-        position: 'fixed',
-        inset: 0,
-        zIndex: 50,
-        background: 'rgba(0,0,0,.55)',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        padding: '20px 16px',
-      }}
-    >
+    <div style={{
+      position: 'fixed', inset: 0, background: 'rgba(0,0,0,.55)',
+      display: 'flex', alignItems: 'center', justifyContent: 'center',
+      zIndex: 50, padding: 16,
+      fontFamily: FONT_SANS,
+    }} onClick={onClose}>
       <div
         onClick={(e) => e.stopPropagation()}
         style={{
-          width: '100%',
-          maxWidth: 680,
-          maxHeight: 'calc(100vh - 40px)',
-          background: RT.panel,
-          border: `1px solid ${RT.borderHi}`,
-          borderRadius: 12,
-          display: 'flex',
-          flexDirection: 'column',
-          overflow: 'hidden',
+          background: RT.panel, border: `1px solid ${RT.borderHi}`,
+          borderRadius: 12, width: '100%', maxWidth: 1000, height: '85vh',
+          display: 'flex', flexDirection: 'column', overflow: 'hidden',
+          boxShadow: '0 24px 64px rgba(0,0,0,.5)',
         }}
       >
-        {/* Header */}
         <div style={{
-          flex: 'none',
-          padding: '12px 16px',
-          borderBottom: `1px solid ${RT.border}`,
-          display: 'flex',
-          alignItems: 'center',
-          gap: 8,
+          flex: 'none', padding: '12px 14px', borderBottom: `1px solid ${RT.border}`,
+          background: RT.bgRaised, display: 'flex', alignItems: 'center', gap: 12,
         }}>
-          <div style={{ flex: 1, fontSize: 13, fontWeight: 600 }}>
-            Preview — <span style={{ fontFamily: FONT_MONO, fontSize: 11, color: RT.textDim }}>{name}</span>
-          </div>
-          <label style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 11, color: RT.textDim, cursor: 'pointer' }}>
+          <Icons.terminal size={14} stroke={RT.textDim} />
+          <div style={{ fontSize: 13, fontWeight: 600, letterSpacing: '-.005em' }}>{name}</div>
+          <div style={{
+            fontSize: 10, fontFamily: FONT_MONO, color: RT.textLow,
+            letterSpacing: '.06em', textTransform: 'uppercase',
+          }}>{status}</div>
+          <div style={{ flex: 1 }} />
+          <label style={{
+            display: 'inline-flex', alignItems: 'center', gap: 6,
+            fontSize: 11, color: RT.textDim, fontFamily: FONT_MONO, cursor: 'pointer',
+          }}>
             <input
-              type="checkbox"
-              checked={autoRefresh}
+              type="checkbox" checked={autoRefresh}
               onChange={(e) => setAutoRefresh(e.target.checked)}
-              style={{ cursor: 'pointer', accentColor: RT.green }}
+              style={{ accentColor: RT.accent }}
             />
-            auto-refresh
+            auto
           </label>
-          <button onClick={onClose} style={{ ...btn('mini'), width: 22, height: 22, fontSize: 11 }}>✕</button>
+          <button onClick={onClose} title="Close (Esc)" style={{
+            background: 'transparent', border: 'none', color: RT.textDim,
+            fontSize: 16, cursor: 'pointer', padding: '4px 8px',
+          }}>✕</button>
         </div>
-
-        {/* Body */}
-        <div style={{ flex: 1, overflow: 'auto', padding: 0 }}>
-          {error && (
-            <div style={{
-              padding: '12px 16px',
-              color: RT.red,
-              fontSize: 12,
-              fontFamily: FONT_MONO,
-            }}>
-              {error}
-            </div>
-          )}
-          {result && (
-            <pre style={{
-              margin: 0,
-              padding: '12px 16px',
-              fontFamily: FONT_MONO,
-              fontSize: 11,
-              lineHeight: 1.5,
-              color: RT.text,
-              background: RT.bg,
-              whiteSpace: 'pre-wrap',
-              wordBreak: 'break-word',
-              minHeight: '200px',
-            }}>
-              {result.output || '(empty)'}
-            </pre>
-          )}
-          {!result && !error && (
-            <div style={{ padding: 40, textAlign: 'center', color: RT.textLow, fontSize: 12 }}>
-              Loading…
-            </div>
-          )}
+        <div
+          ref={containerRef}
+          style={{
+            flex: 1, padding: 10, background: '#1a1a18', overflow: 'hidden',
+          }}
+        />
+        <div style={{
+          flex: 'none', padding: '8px 14px', borderTop: `1px solid ${RT.border}`,
+          background: RT.bgRaised, display: 'flex', alignItems: 'center', gap: 10,
+          fontFamily: FONT_MONO, fontSize: 10.5, color: RT.textLow,
+          letterSpacing: '.04em',
+        }}>
+          <span>type to send keystrokes</span>
+          <span style={{ color: RT.borderHi }}>·</span>
+          <span>Ctrl-C / Enter / Tab / arrows work</span>
+          <div style={{ flex: 1 }} />
+          <span>{deviceId}</span>
         </div>
       </div>
     </div>
