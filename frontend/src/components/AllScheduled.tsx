@@ -25,11 +25,25 @@ export function AllScheduled({ cards }: AllScheduledProps) {
 
   async function handlePick(targetDeviceId: string, entry: PickerEntry) {
     const s = entry.schedule;
+    // If the source has an instructions_file, fetch its content from the
+    // source device and inline it as the target's `prompt`. The path on the
+    // source won't exist on the target — inlining makes the copy standalone.
+    let prompt: string = s.prompt ?? '';
+    let instructions_file: string | undefined = s.instructions_file || undefined;
+    if (instructions_file) {
+      try {
+        const r = await api.schedInstructions(entry.deviceId, s.id);
+        if (r && typeof r.content === 'string' && r.content) {
+          prompt = r.content;
+          instructions_file = undefined;
+        }
+      } catch { /* fall through with path-only */ }
+    }
     const body = {
       name: s.name,
       cron: s.cron,
-      prompt: s.prompt ?? '',
-      instructions_file: s.instructions_file ?? undefined,
+      prompt,
+      instructions_file,
       workdir: s.workdir ?? '',
       mode: s.mode ?? 'c',
       model: s.model ?? undefined,

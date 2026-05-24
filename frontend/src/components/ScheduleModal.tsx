@@ -87,6 +87,34 @@ export function ScheduleModal({ deviceId, initial, onClose, onSaved }: ScheduleM
     if (value) setCron(value);
   }
 
+  // Launch a live Claude session on this device using the schedule's
+  // workdir / mode / model — useful for finalizing/testing the prompt.
+  const [launching, setLaunching] = useState(false);
+  async function handleOpenSession() {
+    if (launching) return;
+    setError(null);
+    setLaunching(true);
+    try {
+      const body: Record<string, unknown> = {
+        mode: MODE_TO_API[mode],
+        workdir: workdir || undefined,
+      };
+      const modelApi = MODEL_TO_API[model];
+      if (modelApi) body.model = modelApi;
+      // Give the launched session a recognizable name tied to the schedule.
+      if (name) body.name = `finalize-${name}`.slice(0, 60).replace(/[^A-Za-z0-9_-]/g, '-');
+      const res = await api.start(deviceId, body);
+      if (res && res.ok === false) throw new Error(res.message ?? 'launch failed');
+      if (mounted.current) {
+        onClose();
+      }
+    } catch (e) {
+      if (mounted.current) setError(`Failed to open session: ${(e as Error).message}`);
+    } finally {
+      if (mounted.current) setLaunching(false);
+    }
+  }
+
   async function handleSave() {
     if (pending) return;
     setError(null);
@@ -326,8 +354,31 @@ export function ScheduleModal({ deviceId, initial, onClose, onSaved }: ScheduleM
           borderTop: `1px solid ${RT.border}`,
           display: 'flex',
           gap: 8,
-          justifyContent: 'flex-end',
+          alignItems: 'center',
+          flexWrap: 'wrap',
         }}>
+          <button
+            onClick={handleOpenSession}
+            disabled={launching || pending}
+            title="Launch a live Claude session using this schedule's workdir / mode / model"
+            style={{
+              background: 'transparent',
+              border: `1px solid ${RT.border}`,
+              borderRadius: 6,
+              padding: '7px 12px',
+              cursor: (launching || pending) ? 'wait' : 'pointer',
+              color: RT.green,
+              fontSize: 13,
+              fontFamily: 'inherit',
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 6,
+              opacity: (launching || pending) ? 0.6 : 1,
+            }}
+          >
+            ▸ {launching ? 'Opening…' : 'Open session'}
+          </button>
+          <div style={{ flex: 1 }} />
           <button
             onClick={onClose}
             style={{

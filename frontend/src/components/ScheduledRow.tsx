@@ -64,18 +64,35 @@ export function ScheduledRow({ s, deviceId, mobile = false, cards, onChanged, on
     : undefined;
 
   async function handlePick(targetDeviceId: string) {
-    const body = {
-      name: s.name,
-      cron: s.cron,
-      prompt: s.prompt ?? '',
-      instructions_file: s.instructions_file ?? undefined,
-      workdir: s.workdir ?? '',
-      mode: s.mode ?? 'c',
-      model: s.model ?? undefined,
-      enabled: s.enabled ?? false,
-    };
     setPending(true);
     try {
+      // If the source has an instructions_file, fetch its content and inline
+      // it as the target's `prompt`. The path on the source won't exist on
+      // the target; inlining means the copy works standalone.
+      let prompt: string = s.prompt ?? '';
+      let instructions_file: string | undefined = s.instructions_file || undefined;
+      if (instructions_file) {
+        try {
+          const r = await api.schedInstructions(deviceId, s.id);
+          if (r && typeof r.content === 'string' && r.content) {
+            prompt = r.content;
+            instructions_file = undefined; // inlined — no longer needs the path
+          }
+        } catch {
+          // Couldn't read the file (404/etc.) — fall through with the path-only
+          // copy and warn the user after.
+        }
+      }
+      const body = {
+        name: s.name,
+        cron: s.cron,
+        prompt,
+        instructions_file,
+        workdir: s.workdir ?? '',
+        mode: s.mode ?? 'c',
+        model: s.model ?? undefined,
+        enabled: s.enabled ?? false,
+      };
       const res = await api.schedCreate(targetDeviceId, body);
       if (res && res.ok === false) throw new Error(res.message ?? 'create failed');
       if (pickerMode === 'move') {

@@ -28,6 +28,7 @@ export const api = {
   schedUpdate: (device: string, body: unknown) => req('POST', '/schedules/update', device, body),
   schedDelete: (device: string, id: string) => req('POST', '/schedules/delete', device, { id }),
   schedFire: (device: string, id: string) => req('POST', '/schedules/fire', device, { id }),
+  schedInstructions: (device: string, id: string) => req('GET', `/schedules/${encodeURIComponent(id)}/instructions`, device),
   tunnelStatus: () => req('GET', '/tunnel/status'),
   tunnelStart: () => req('POST', '/tunnel/start'),
   tunnelStop: () => req('POST', '/tunnel/stop'),

@@ -616,6 +616,27 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     s["next_run"] = None
             self._json({"schedules": schedules})
 
+        elif path.startswith("/schedules/") and path.endswith("/instructions"):
+            # Read the instructions_file content for a schedule on this device,
+            # so the cross-device copy/move can inline it as the target's prompt.
+            sid = path[len("/schedules/"):-len("/instructions")]
+            if not sid or "/" in sid or ".." in sid:
+                self.send_error(404)
+                return
+            sched = next((s for s in load_schedules() if s.get("id") == sid), None)
+            if not sched:
+                self._json({"error": "schedule not found"}, 404)
+                return
+            ipath = sched.get("instructions_file") or ""
+            if not ipath:
+                self._json({"content": "", "path": ""})
+                return
+            try:
+                with open(os.path.expanduser(ipath)) as f:
+                    self._json({"content": f.read(), "path": ipath})
+            except OSError as e:
+                self._json({"error": str(e), "path": ipath}, 404)
+
         elif path == "/resume/sessions":
             projects = list_resumable_sessions()
             self._json({"projects": projects})
