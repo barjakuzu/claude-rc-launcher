@@ -5,7 +5,7 @@ import { Icons, Dot } from './primitives';
 import { MobileHeader } from './MobileHeader';
 import { mobileActionBtn } from './mobileActionBtn';
 import { ScheduleModal } from './ScheduleModal';
-import { DevicePicker } from './DevicePicker';
+import { DevicePicker, rewriteHomePaths, type DevicePickResult } from './DevicePicker';
 import { useAllSchedules } from '../useCrossDevice';
 import { api } from '../api';
 import type { DeviceCard, Schedule } from '../types';
@@ -23,7 +23,8 @@ export function AllScheduled({ cards }: AllScheduledProps) {
   const [pickerEntry, setPickerEntry] = useState<PickerEntry | null>(null);
   const [moreOpenId, setMoreOpenId] = useState<string | null>(null);
 
-  async function handlePick(targetDeviceId: string, entry: PickerEntry) {
+  async function handlePick(result: DevicePickResult, entry: PickerEntry) {
+    const targetDeviceId = result.deviceId;
     const s = entry.schedule;
     // If the source has an instructions_file, fetch its content from the
     // source device and inline it as the target's `prompt`. The path on the
@@ -39,12 +40,24 @@ export function AllScheduled({ cards }: AllScheduledProps) {
         }
       } catch { /* fall through with path-only */ }
     }
+    let workdir = s.workdir ?? '';
+    if (result.rewritePaths) {
+      const src = cards.find((c) => c.id === entry.deviceId)?.home_dir ?? '';
+      const tgt = cards.find((c) => c.id === targetDeviceId)?.home_dir ?? '';
+      if (src && tgt && src !== tgt) {
+        workdir = rewriteHomePaths(workdir, src, tgt);
+        prompt  = rewriteHomePaths(prompt,  src, tgt);
+        if (instructions_file) {
+          instructions_file = rewriteHomePaths(instructions_file, src, tgt);
+        }
+      }
+    }
     const body = {
       name: s.name,
       cron: s.cron,
       prompt,
       instructions_file,
-      workdir: s.workdir ?? '',
+      workdir,
       mode: s.mode ?? 'c',
       model: s.model ?? undefined,
       enabled: s.enabled ?? false,
@@ -215,7 +228,9 @@ export function AllScheduled({ cards }: AllScheduledProps) {
             excludeDeviceId={pickerEntry.deviceId}
             title={pickerEntry.mode === 'copy' ? 'Copy schedule to…' : 'Move schedule to…'}
             caveat={caveat}
-            onPick={(targetDeviceId) => handlePick(targetDeviceId, pickerEntry)}
+            sourceHomeDir={cards.find((c) => c.id === pickerEntry.deviceId)?.home_dir}
+            contentSample={`${s.workdir ?? ''} ${s.prompt ?? ''} ${s.instructions_file ?? ''}`}
+            onPick={(res) => handlePick(res, pickerEntry)}
             onClose={() => setPickerEntry(null)}
           />
         );

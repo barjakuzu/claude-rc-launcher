@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from 'react';
 import { RT, FONT_MONO } from '../tokens';
 import { Icons } from './primitives';
 import { V5IconButton } from './V5IconButton';
-import { DevicePicker } from './DevicePicker';
+import { DevicePicker, rewriteHomePaths, type DevicePickResult } from './DevicePicker';
 import { api } from '../api';
 import type { Schedule, DeviceCard } from '../types';
 
@@ -63,7 +63,8 @@ export function ScheduledRow({ s, deviceId, mobile = false, cards, onChanged, on
     ? `Note: ${pathHints.join(' and ')} must exist on the target device for the schedule to run.`
     : undefined;
 
-  async function handlePick(targetDeviceId: string) {
+  async function handlePick(result: DevicePickResult) {
+    const targetDeviceId = result.deviceId;
     setPending(true);
     try {
       // If the source has an instructions_file, fetch its content and inline
@@ -83,12 +84,26 @@ export function ScheduledRow({ s, deviceId, mobile = false, cards, onChanged, on
           // copy and warn the user after.
         }
       }
+      let workdir = s.workdir ?? '';
+      // Optionally rewrite the source home dir → target home dir in workdir
+      // and prompt content (and instructions_file path if we kept it).
+      if (result.rewritePaths) {
+        const src = cards.find((c) => c.id === deviceId)?.home_dir ?? '';
+        const tgt = cards.find((c) => c.id === targetDeviceId)?.home_dir ?? '';
+        if (src && tgt && src !== tgt) {
+          workdir = rewriteHomePaths(workdir, src, tgt);
+          prompt  = rewriteHomePaths(prompt,  src, tgt);
+          if (instructions_file) {
+            instructions_file = rewriteHomePaths(instructions_file, src, tgt);
+          }
+        }
+      }
       const body = {
         name: s.name,
         cron: s.cron,
         prompt,
         instructions_file,
-        workdir: s.workdir ?? '',
+        workdir,
         mode: s.mode ?? 'c',
         model: s.model ?? undefined,
         enabled: s.enabled ?? false,
@@ -256,6 +271,8 @@ export function ScheduledRow({ s, deviceId, mobile = false, cards, onChanged, on
         excludeDeviceId={deviceId}
         title={pickerMode === 'copy' ? 'Copy schedule to…' : 'Move schedule to…'}
         caveat={caveat}
+        sourceHomeDir={cards.find((c) => c.id === deviceId)?.home_dir}
+        contentSample={`${s.workdir ?? ''} ${s.prompt ?? ''} ${s.instructions_file ?? ''}`}
         onPick={handlePick}
         onClose={() => setPickerMode(null)}
       />

@@ -17,18 +17,22 @@ def card_from_parts(device, sessions, stats, online=None):
     tokens = sum(int(s.get("tokens", 0)) for s in sess)
     load_pct = 0
     os_name, spark = "", []
+    user, home_dir = "", ""
     if stats:
         cores = max(1, int(stats.get("cores", 1)))
         load1 = (stats.get("loadavg") or [0])[0]
         load_pct = min(100, round((load1 / cores) * 100))
         os_name = stats.get("os", "")
         spark = stats.get("token_history") or []
+        user = stats.get("user", "") or ""
+        home_dir = stats.get("home_dir", "") or ""
     host = urlparse(device.get("base_url", "")).hostname or device.get("base_url", "")
     return {
         "id": device["id"], "name": device.get("name", device["id"]),
         "online": online, "hostname": host,
         "sessions": len(sess), "tokens": tokens,
         "loadPct": load_pct, "os": os_name, "spark": spark,
+        "user": user, "home_dir": home_dir,
     }
 
 

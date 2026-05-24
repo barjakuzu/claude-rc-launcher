@@ -2,6 +2,7 @@
 
 import os
 import platform
+import pwd
 import threading
 
 _HISTORY = []      # last N summed-token samples
@@ -42,10 +43,28 @@ def _os_pretty() -> str:
     _OS_CACHE = platform.platform()
     return _OS_CACHE
 
+def _user_and_home() -> tuple[str, str]:
+    """Return (user, home_dir) for the process. Used by clients to translate
+    paths when copying schedules across devices with different home dirs."""
+    try:
+        user = pwd.getpwuid(os.getuid()).pw_name
+    except (KeyError, OSError):
+        user = os.environ.get("USER") or os.environ.get("USERNAME") or ""
+    home = os.path.expanduser("~")
+    return user, home
+
+
 def system_stats():
-    """Return {loadavg:[1m,5m,15m], cores, os}."""
+    """Return {loadavg:[1m,5m,15m], cores, os, user, home_dir}."""
     try:
         load = list(os.getloadavg())
     except (OSError, AttributeError):
         load = [0.0, 0.0, 0.0]
-    return {"loadavg": load, "cores": os.cpu_count() or 1, "os": _os_pretty()}
+    user, home = _user_and_home()
+    return {
+        "loadavg": load,
+        "cores": os.cpu_count() or 1,
+        "os": _os_pretty(),
+        "user": user,
+        "home_dir": home,
+    }
