@@ -17,13 +17,14 @@ import type { Layout } from '../useLayout';
 
 export interface DeviceDetailProps {
   device: DeviceCard;
+  cards: DeviceCard[];
   tab: PanelTab;
   setTab: (t: PanelTab) => void;
   onClose: () => void;
   layout: Layout;
 }
 
-export function DeviceDetail({ device, tab, setTab, onClose, layout }: DeviceDetailProps) {
+export function DeviceDetail({ device, cards, tab, setTab, onClose, layout }: DeviceDetailProps) {
   const hue = hueForId(device.id);
   const { sessions, scheduled, reloadSessions, reloadSchedules } = usePanelData(device.id, tab);
 
@@ -119,6 +120,7 @@ export function DeviceDetail({ device, tab, setTab, onClose, layout }: DeviceDet
                   s={s}
                   deviceId={device.id}
                   mobile={mobile}
+                  cards={cards}
                   onChanged={reloadSchedules}
                   onEdit={openEdit}
                 />

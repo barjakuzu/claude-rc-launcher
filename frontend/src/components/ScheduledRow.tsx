@@ -3,20 +3,23 @@ import { useEffect, useRef, useState } from 'react';
 import { RT, FONT_MONO } from '../tokens';
 import { Icons } from './primitives';
 import { V5IconButton } from './V5IconButton';
+import { DevicePicker } from './DevicePicker';
 import { api } from '../api';
-import type { Schedule } from '../types';
+import type { Schedule, DeviceCard } from '../types';
 
 export interface ScheduledRowProps {
   s: Schedule;
   deviceId: string;
   mobile?: boolean;
+  cards: DeviceCard[];
   onChanged: () => void;
   onEdit: (s: Schedule) => void;
 }
 
-export function ScheduledRow({ s, deviceId, mobile = false, onChanged, onEdit }: ScheduledRowProps) {
+export function ScheduledRow({ s, deviceId, mobile = false, cards, onChanged, onEdit }: ScheduledRowProps) {
   const [pending, setPending] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [pickerMode, setPickerMode] = useState<'copy' | 'move' | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const off = (e: MouseEvent) => {
@@ -53,7 +56,46 @@ export function ScheduledRow({ s, deviceId, mobile = false, onChanged, onEdit }:
       onChanged();
     });
 
+  const pathHints: string[] = [];
+  if (s.workdir) pathHints.push(`workdir "${s.workdir}"`);
+  if (s.instructions_file) pathHints.push(`instructions file "${s.instructions_file}"`);
+  const caveat = pathHints.length > 0
+    ? `Note: ${pathHints.join(' and ')} must exist on the target device for the schedule to run.`
+    : undefined;
+
+  async function handlePick(targetDeviceId: string) {
+    const body = {
+      name: s.name,
+      cron: s.cron,
+      prompt: s.prompt ?? '',
+      instructions_file: s.instructions_file ?? undefined,
+      workdir: s.workdir ?? '',
+      mode: s.mode ?? 'c',
+      model: s.model ?? undefined,
+      enabled: s.enabled ?? false,
+    };
+    setPending(true);
+    try {
+      const res = await api.schedCreate(targetDeviceId, body);
+      if (res && res.ok === false) throw new Error(res.message ?? 'create failed');
+      if (pickerMode === 'move') {
+        await api.schedDelete(deviceId, s.id).catch((err) => {
+          console.warn('Copy succeeded but delete failed (move):', err);
+        });
+      }
+      setPickerMode(null);
+      onChanged();
+    } catch (e) {
+      alert(`Failed to ${pickerMode} schedule: ${(e as Error).message}`);
+    } finally {
+      setPending(false);
+    }
+  }
+
+  const hasOtherDevices = cards.length > 1;
+
   return (
+    <>
     <div style={{
       background: RT.card, border: `1px solid ${RT.border}`,
       borderRadius: 10, padding: mobile ? 14 : '14px 18px',
@@ -145,7 +187,7 @@ export function ScheduledRow({ s, deviceId, mobile = false, onChanged, onEdit }:
               position: 'absolute', bottom: '100%', right: 0, marginBottom: 4,
               background: RT.panel, border: `1px solid ${RT.borderHi}`,
               borderRadius: 8, padding: 4, zIndex: 20,
-              boxShadow: '0 8px 24px rgba(0,0,0,.4)', minWidth: 160,
+              boxShadow: '0 8px 24px rgba(0,0,0,.4)', minWidth: 170,
             }}>
               <button
                 style={menuItemStyle}
@@ -155,6 +197,27 @@ export function ScheduledRow({ s, deviceId, mobile = false, onChanged, onEdit }:
               >
                 <Icons.terminal size={11} stroke={RT.textDim} /> Edit schedule
               </button>
+              {hasOtherDevices && (
+                <button
+                  style={menuItemStyle}
+                  onClick={() => { setMenuOpen(false); setPickerMode('copy'); }}
+                  onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = RT.bgRaised; }}
+                  onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = 'transparent'; }}
+                >
+                  <Icons.copy size={11} stroke={RT.textDim} /> Copy to…
+                </button>
+              )}
+              {hasOtherDevices && (
+                <button
+                  style={menuItemStyle}
+                  onClick={() => { setMenuOpen(false); setPickerMode('move'); }}
+                  onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = RT.bgRaised; }}
+                  onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = 'transparent'; }}
+                >
+                  <Icons.share size={11} stroke={RT.textDim} /> Move to…
+                </button>
+              )}
+              <div style={{ height: 1, background: RT.border, margin: '3px 0' }} />
               <button
                 style={{ ...menuItemStyle, color: RT.red }}
                 onClick={() => { setMenuOpen(false); handleDelete(); }}
@@ -168,6 +231,19 @@ export function ScheduledRow({ s, deviceId, mobile = false, onChanged, onEdit }:
         </div>
       </div>
     </div>
+
+    {/* Device picker overlay for Copy/Move */}
+    {pickerMode !== null && (
+      <DevicePicker
+        cards={cards}
+        excludeDeviceId={deviceId}
+        title={pickerMode === 'copy' ? 'Copy schedule to…' : 'Move schedule to…'}
+        caveat={caveat}
+        onPick={handlePick}
+        onClose={() => setPickerMode(null)}
+      />
+    )}
+    </>
   );
 }
 

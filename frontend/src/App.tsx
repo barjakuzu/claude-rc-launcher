@@ -120,6 +120,7 @@ export function App() {
             // Device detail — full main area
             <DeviceDetail
               device={openCard}
+              cards={cards}
               tab={tab}
               setTab={setTab}
               onClose={() => handleOpen(null)}

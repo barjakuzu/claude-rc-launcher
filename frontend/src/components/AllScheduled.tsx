@@ -5,6 +5,7 @@ import { Icons, Dot } from './primitives';
 import { MobileHeader } from './MobileHeader';
 import { mobileActionBtn } from './mobileActionBtn';
 import { ScheduleModal } from './ScheduleModal';
+import { DevicePicker } from './DevicePicker';
 import { useAllSchedules } from '../useCrossDevice';
 import { api } from '../api';
 import type { DeviceCard, Schedule } from '../types';
@@ -13,10 +14,40 @@ interface AllScheduledProps {
   cards: DeviceCard[];
 }
 
+type PickerEntry = { deviceId: string; schedule: Schedule; mode: 'copy' | 'move' };
+
 export function AllScheduled({ cards }: AllScheduledProps) {
   const items = useAllSchedules(cards, true);
   const [editEntry, setEditEntry] = useState<{ deviceId: string; schedule: Schedule } | null>(null);
   const [newDeviceId, setNewDeviceId] = useState<string | null>(null);
+  const [pickerEntry, setPickerEntry] = useState<PickerEntry | null>(null);
+  const [moreOpenId, setMoreOpenId] = useState<string | null>(null);
+
+  async function handlePick(targetDeviceId: string, entry: PickerEntry) {
+    const s = entry.schedule;
+    const body = {
+      name: s.name,
+      cron: s.cron,
+      prompt: s.prompt ?? '',
+      instructions_file: s.instructions_file ?? undefined,
+      workdir: s.workdir ?? '',
+      mode: s.mode ?? 'c',
+      model: s.model ?? undefined,
+      enabled: s.enabled ?? false,
+    };
+    try {
+      const res = await api.schedCreate(targetDeviceId, body);
+      if (res && res.ok === false) throw new Error(res.message ?? 'create failed');
+      if (entry.mode === 'move') {
+        await api.schedDelete(entry.deviceId, s.id).catch((err) => {
+          console.warn('Copy succeeded but delete failed (move):', err);
+        });
+      }
+      setPickerEntry(null);
+    } catch (e) {
+      alert(`Failed to ${entry.mode} schedule: ${(e as Error).message}`);
+    }
+  }
 
   const handleNew = () => {
     if (cards.length === 0) return;
@@ -73,7 +104,7 @@ export function AllScheduled({ cards }: AllScheduledProps) {
                 {s.schedule_label && <span style={{ color: RT.borderHi }}>({s.schedule_label})</span>}
               </div>
               {/* Actions */}
-              <div style={{ display: 'flex', gap: 6 }}>
+              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                 <button
                   style={mobileActionBtn()}
                   onClick={() => api.schedFire(d.id, s.id)}
@@ -86,6 +117,49 @@ export function AllScheduled({ cards }: AllScheduledProps) {
                 >
                   <Icons.terminal size={13} stroke={RT.textDim} /> Edit
                 </button>
+                {cards.length > 1 && (
+                  <div style={{ position: 'relative' }}>
+                    <button
+                      style={mobileActionBtn()}
+                      onClick={() => setMoreOpenId(moreOpenId === d.id + s.id ? null : d.id + s.id)}
+                    >
+                      <Icons.more size={13} stroke={RT.textDim} />
+                    </button>
+                    {moreOpenId === d.id + s.id && (
+                      <div style={{
+                        position: 'absolute', bottom: '100%', left: 0, marginBottom: 4,
+                        background: RT.panel, border: `1px solid ${RT.borderHi}`,
+                        borderRadius: 8, padding: 4, zIndex: 30,
+                        boxShadow: '0 8px 24px rgba(0,0,0,.4)', minWidth: 160,
+                      }}>
+                        <button
+                          style={moreItemStyle}
+                          onClick={() => { setMoreOpenId(null); setPickerEntry({ deviceId: d.id, schedule: s, mode: 'copy' }); }}
+                        >
+                          <Icons.copy size={11} stroke={RT.textDim} /> Copy to…
+                        </button>
+                        <button
+                          style={moreItemStyle}
+                          onClick={() => { setMoreOpenId(null); setPickerEntry({ deviceId: d.id, schedule: s, mode: 'move' }); }}
+                        >
+                          <Icons.share size={11} stroke={RT.textDim} /> Move to…
+                        </button>
+                        <div style={{ height: 1, background: RT.border, margin: '3px 0' }} />
+                        <button
+                          style={{ ...moreItemStyle, color: RT.red }}
+                          onClick={() => {
+                            setMoreOpenId(null);
+                            if (window.confirm(`Delete schedule "${s.name}"?`)) {
+                              api.schedDelete(d.id, s.id);
+                            }
+                          }}
+                        >
+                          <Icons.stop size={11} stroke={RT.red} /> Delete
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             </div>
           );
@@ -111,6 +185,34 @@ export function AllScheduled({ cards }: AllScheduledProps) {
           onSaved={() => setNewDeviceId(null)}
         />
       )}
+
+      {/* Device picker for Copy/Move */}
+      {pickerEntry && (() => {
+        const s = pickerEntry.schedule;
+        const pathHints: string[] = [];
+        if (s.workdir) pathHints.push(`workdir "${s.workdir}"`);
+        if (s.instructions_file) pathHints.push(`instructions file "${s.instructions_file}"`);
+        const caveat = pathHints.length > 0
+          ? `Note: ${pathHints.join(' and ')} must exist on the target device for the schedule to run.`
+          : undefined;
+        return (
+          <DevicePicker
+            cards={cards}
+            excludeDeviceId={pickerEntry.deviceId}
+            title={pickerEntry.mode === 'copy' ? 'Copy schedule to…' : 'Move schedule to…'}
+            caveat={caveat}
+            onPick={(targetDeviceId) => handlePick(targetDeviceId, pickerEntry)}
+            onClose={() => setPickerEntry(null)}
+          />
+        );
+      })()}
     </div>
   );
 }
+
+const moreItemStyle: React.CSSProperties = {
+  width: '100%', textAlign: 'left',
+  background: 'transparent', border: 'none', borderRadius: 5,
+  padding: '8px 11px', cursor: 'pointer', color: RT.text, fontFamily: 'inherit',
+  fontSize: 12, display: 'flex', alignItems: 'center', gap: 8,
+};
