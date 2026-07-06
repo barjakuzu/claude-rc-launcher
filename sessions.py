@@ -80,8 +80,19 @@ def get_session_env(session_name, var_name):
     return None
 
 
+# Markers that indicate remote-control is active. The TUI wording changed
+# across Claude Code versions: old status bar said 'Remote Control active',
+# newer versions show '/rc active' in the status bar and print
+# '/remote-control is active' in the transcript.
+_RC_ACTIVE_MARKERS = (
+    "Remote Control active",
+    "/rc active",
+    "/remote-control is active",
+)
+
+
 def _is_rc_active(session_name):
-    """Check if the status bar shows 'Remote Control active' (not connecting/failed/reconnecting)."""
+    """Check if the session shows remote-control as active (not connecting/failed/reconnecting)."""
     try:
         r = subprocess.run(
             ["tmux", "capture-pane", "-t", session_name, "-e", "-p",
@@ -89,7 +100,7 @@ def _is_rc_active(session_name):
             capture_output=True, text=True, timeout=5,
         )
         clean = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', r.stdout)
-        return "Remote Control active" in clean
+        return any(m in clean for m in _RC_ACTIVE_MARKERS)
     except Exception:
         return False
 
@@ -413,7 +424,7 @@ def setup_session(session_name, display_name, mode):
             capture_output=True, text=True, timeout=5,
         )
         clean = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', r.stdout)
-        if "Remote Control active" in clean:
+        if any(m in clean for m in _RC_ACTIVE_MARKERS):
             url = _get_url_internal(session_name)
             if url:
                 print(f"  {session_name}: remote-control already active → {url}")
@@ -451,7 +462,8 @@ def setup_session(session_name, display_name, mode):
                 rc_menu_handled = True
                 continue
             # Handle the "already active" menu — just press Escape to dismiss
-            if "Disconnect this session" in pane:
+            # (newer TUI labels the entry 'Disconnect Remote Control')
+            if "Disconnect this session" in pane or "Disconnect Remote Control" in pane:
                 print(f"  {sname}: RC menu appeared, dismissing (already connected)")
                 subprocess.run(["tmux", "send-keys", "-t", sname, "Escape"], capture_output=True)
                 time.sleep(1)
