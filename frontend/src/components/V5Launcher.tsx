@@ -20,6 +20,12 @@ interface ProjectsResult {
   default_name: string;
 }
 
+interface BrowseResult {
+  path: string;
+  parent: string | null;
+  dirs: string[];
+}
+
 export interface V5LauncherProps {
   deviceId: string;
   deviceName: string;
@@ -39,9 +45,53 @@ export function V5Launcher({ deviceId, deviceName, mobile = false, onLaunched }:
   const [error, setError] = useState<string | null>(null);
   const [nameFocus, setNameFocus] = useState(false);
   const [dirFocus, setDirFocus] = useState(false);
+  const [dirOpen, setDirOpen] = useState(false);
+  const [dirData, setDirData] = useState<BrowseResult | null>(null);
   const mounted = useRef(true);
+  const lastBase = useRef('');
 
   useEffect(() => () => { mounted.current = false; }, []);
+
+  // Path combobox: base = everything up to the last '/', tail filters entries.
+  const browseBase = (v: string) => {
+    const i = v.lastIndexOf('/');
+    return i >= 0 ? v.slice(0, i + 1) : '/';
+  };
+
+  const loadDirs = useCallback(async (base: string) => {
+    lastBase.current = base;
+    try {
+      const d = await api.browse(deviceId, base || '/') as BrowseResult;
+      if (mounted.current && lastBase.current === base) setDirData(d);
+    } catch {/* ignore */}
+  }, [deviceId]);
+
+  const handleDirChange = (v: string) => {
+    setWorkdir(v);
+    setDirOpen(true);
+    const base = browseBase(v);
+    if (base !== lastBase.current) loadDirs(base);
+  };
+
+  const descendInto = (dir: string) => {
+    if (!dirData) return;
+    const root = dirData.path === '/' ? '' : dirData.path;
+    const next = `${root}/${dir}/`;
+    setWorkdir(next);
+    loadDirs(next);
+  };
+
+  const goUp = () => {
+    if (!dirData?.parent) return;
+    const p = dirData.parent.endsWith('/') ? dirData.parent : dirData.parent + '/';
+    setWorkdir(p);
+    loadDirs(p);
+  };
+
+  const dirTail = workdir.slice(browseBase(workdir).length).toLowerCase();
+  const dirEntries = (dirData?.dirs ?? []).filter(
+    (d) => !dirTail || d.toLowerCase().includes(dirTail),
+  );
 
   const loadProjects = useCallback(async () => {
     try {
@@ -85,6 +135,14 @@ export function V5Launcher({ deviceId, deviceName, mobile = false, onLaunched }:
     padding: '6px 9px', fontFamily: FONT_MONO, fontSize: 11, outline: 'none',
   };
 
+  const dirItemStyle: React.CSSProperties = {
+    width: '100%', textAlign: 'left', background: 'transparent',
+    border: 'none', borderRadius: 4, padding: '7px 9px', cursor: 'pointer',
+    color: RT.text, fontFamily: FONT_MONO, fontSize: 12,
+    display: 'flex', alignItems: 'center', gap: 7,
+    whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+  };
+
   return (
     <div style={{
       position: 'relative', flex: 'none',
@@ -124,27 +182,67 @@ export function V5Launcher({ deviceId, deviceName, mobile = false, onLaunched }:
           />
         </div>
 
-        {/* Workdir input */}
+        {/* Workdir input — focus opens a folder dropdown */}
         <div style={{
           flex: mobile ? '1 1 100%' : '1.4 1 auto', minWidth: mobile ? '100%' : 200,
           background: RT.panel, borderRadius: 8,
           border: `1px solid ${dirFocus ? RT.textDim : RT.border}`,
           transition: 'border-color .15s',
           padding: '9px 12px', display: 'flex', alignItems: 'center', gap: 8,
+          position: 'relative',
         }}>
           <Icons.folder size={12} stroke={RT.textLow} />
           <input
             value={workdir}
-            onChange={(e) => setWorkdir(e.target.value)}
-            onKeyDown={(e) => { if (e.key === 'Enter') handleLaunch(); }}
-            onFocus={() => setDirFocus(true)}
-            onBlur={() => setDirFocus(false)}
+            onChange={(e) => handleDirChange(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') { setDirOpen(false); handleLaunch(); }
+              else if (e.key === 'Escape') setDirOpen(false);
+            }}
+            onFocus={() => { setDirFocus(true); setDirOpen(true); loadDirs(browseBase(workdir)); }}
+            onBlur={() => { setDirFocus(false); setDirOpen(false); }}
             placeholder="/path/to/project"
             style={{
               flex: 1, background: 'transparent', color: RT.text,
               border: 'none', outline: 'none', fontFamily: FONT_MONO, fontSize: 12,
             }}
           />
+          {dirOpen && dirData && (
+            <div
+              /* keep input focus while interacting with the list */
+              onMouseDown={(e) => e.preventDefault()}
+              style={{
+                position: 'absolute', top: 'calc(100% + 4px)', left: 0, right: 0,
+                background: RT.panel, border: `1px solid ${RT.borderHi}`,
+                borderRadius: 8, padding: 4, zIndex: Z.menu,
+                boxShadow: '0 8px 24px rgba(0,0,0,.4)',
+                maxHeight: 260, overflowY: 'auto',
+              }}
+            >
+              <div style={{
+                padding: '5px 9px', fontSize: 10, color: RT.textLow,
+                fontFamily: FONT_MONO, letterSpacing: '.08em', textTransform: 'uppercase',
+                whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+              }}>
+                {dirData.path}
+              </div>
+              {dirData.parent !== null && (
+                <button onClick={goUp} style={dirItemStyle}>
+                  <Icons.back size={11} stroke={RT.textLow} /> ..
+                </button>
+              )}
+              {dirEntries.map((d) => (
+                <button key={d} onClick={() => descendInto(d)} style={dirItemStyle}>
+                  <Icons.folder size={11} stroke={RT.textDim} /> {d}
+                </button>
+              ))}
+              {dirEntries.length === 0 && (
+                <div style={{ padding: '7px 9px', fontSize: 11, color: RT.textLow, fontFamily: FONT_MONO }}>
+                  no matching subfolders
+                </div>
+              )}
+            </div>
+          )}
         </div>
 
         {/* Segmented mode pills */}
