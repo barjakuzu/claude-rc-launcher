@@ -1,6 +1,6 @@
 // ShareTunnel.tsx — tunnel share modal/popover.
 import { useState, useEffect, useRef } from 'react';
-import { RT, FONT_MONO } from '../tokens';
+import { RT, FONT_MONO, Z } from '../tokens';
 import { btn } from './btn';
 import { api } from '../api';
 
@@ -84,7 +84,7 @@ export function ShareTunnel({ onClose }: ShareTunnelProps) {
       style={{
         position: 'fixed',
         inset: 0,
-        zIndex: 50,
+        zIndex: Z.modal,
         background: 'rgba(0,0,0,.5)',
         display: 'flex',
         alignItems: 'center',

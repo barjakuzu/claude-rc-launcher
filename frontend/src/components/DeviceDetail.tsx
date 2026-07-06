@@ -9,6 +9,7 @@ import { SessionRow } from './SessionRow';
 import { ScheduledRow } from './ScheduledRow';
 import { ScheduleModal } from './ScheduleModal';
 import { Logs } from './Logs';
+import { DeviceSettings } from './DeviceSettings';
 import { PreviewModal } from './PreviewModal';
 import { ResumeList } from './ResumeList';
 import { usePanelData } from '../usePanelData';
@@ -139,7 +140,7 @@ export function DeviceDetail({ device, cards, tab, setTab, onClose, layout }: De
         )}
 
         {tab === 'settings' && (
-          <V5Empty text="Device settings coming soon." />
+          <DeviceSettings device={device} mobile={mobile} />
         )}
       </div>
 

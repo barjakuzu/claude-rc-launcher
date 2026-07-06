@@ -1,6 +1,6 @@
 // MobileMoreSheet.tsx — bottom sheet opened by the "More" nav button.
 import { useEffect } from 'react';
-import { RT, FONT_MONO } from '../tokens';
+import { RT, FONT_MONO, Z } from '../tokens';
 import { Icons } from './primitives';
 import type { MTab } from './MobileNav';
 import type { PanelTab } from './PanelTabs';
@@ -113,7 +113,7 @@ export function MobileMoreSheet({
             position: 'fixed',
             inset: 0,
             background: 'rgba(0,0,0,.5)',
-            zIndex: 40,
+            zIndex: Z.sheet,
           }}
         />
       )}
@@ -125,7 +125,7 @@ export function MobileMoreSheet({
           left: 0,
           right: 0,
           bottom: 0,
-          zIndex: 41,
+          zIndex: Z.sheet + 1,
           background: RT.panel,
           border: `1px solid ${RT.borderHi}`,
           borderTopLeftRadius: 16,

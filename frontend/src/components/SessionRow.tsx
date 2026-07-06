@@ -1,6 +1,6 @@
 // SessionRow.tsx — V5 full-width 3-col grid with 34×34 V5IconButton actions.
 import { useState, useEffect, useRef } from 'react';
-import { RT, FONT_MONO, tintFor } from '../tokens';
+import { RT, FONT_MONO, tintFor, Z } from '../tokens';
 import { Icons, CapBar, Dot } from './primitives';
 import { V5IconButton } from './V5IconButton';
 import type { Session } from '../types';
@@ -170,6 +170,7 @@ export function SessionRow({ s, hue, deviceId, mobile = false, onChanged, onPrev
         <V5IconButton
           label="Restart session"
           accent={RT.green}
+          mobile={mobile}
           pending={pending}
           onClick={handleRefresh}
         >
@@ -178,6 +179,7 @@ export function SessionRow({ s, hue, deviceId, mobile = false, onChanged, onPrev
         <V5IconButton
           label="Stop session"
           accent={RT.red}
+          mobile={mobile}
           pending={pending}
           onClick={handleStop}
         >
@@ -188,6 +190,7 @@ export function SessionRow({ s, hue, deviceId, mobile = false, onChanged, onPrev
         <div ref={menuRef} style={{ position: 'relative' }}>
           <V5IconButton
             label="More options"
+            mobile={mobile}
             pending={pending}
             onClick={() => setMenuOpen((o) => !o)}
           >
@@ -198,7 +201,7 @@ export function SessionRow({ s, hue, deviceId, mobile = false, onChanged, onPrev
             <div style={{
               position: 'absolute', bottom: '100%', right: 0, marginBottom: 4,
               background: RT.panel, border: `1px solid ${RT.borderHi}`,
-              borderRadius: 8, padding: 4, zIndex: 20,
+              borderRadius: 8, padding: 4, zIndex: Z.menu,
               boxShadow: '0 8px 24px rgba(0,0,0,.4)', minWidth: 160,
             }}>
               <button

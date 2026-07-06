@@ -1,6 +1,6 @@
 // ScheduleModal.tsx — create / edit a schedule.
 import { useState, useEffect, useRef } from 'react';
-import { RT, FONT_MONO } from '../tokens';
+import { RT, FONT_MONO, Z } from '../tokens';
 import { btn } from './btn';
 import { api } from '../api';
 import { DirBrowser } from './DirBrowser';
@@ -22,12 +22,12 @@ const CRON_PRESETS: { label: string; value: string }[] = [
 
 // ── Mode / model maps ─────────────────────────────────────────────────────────
 type ModeKey = 'STANDARD' | 'TEAMMATE' | 'SAFE';
-type ModelKey = 'DEFAULT' | 'SONNET' | 'HAIKU';
+type ModelKey = 'DEFAULT' | 'SONNET' | 'HAIKU' | 'FABLE';
 
 const MODE_TO_API: Record<ModeKey, string>  = { STANDARD: 'c', TEAMMATE: 'ci', SAFE: 'safe' };
 const API_TO_MODE: Record<string, ModeKey>  = { c: 'STANDARD', ci: 'TEAMMATE', safe: 'SAFE' };
-const MODEL_TO_API: Record<ModelKey, string> = { DEFAULT: '', SONNET: '2', HAIKU: '3' };
-const API_TO_MODEL: Record<string, ModelKey> = { '': 'DEFAULT', '2': 'SONNET', '3': 'HAIKU' };
+const MODEL_TO_API: Record<ModelKey, string> = { DEFAULT: '', SONNET: '2', HAIKU: '3', FABLE: '4' };
+const API_TO_MODEL: Record<string, ModelKey> = { '': 'DEFAULT', '2': 'SONNET', '3': 'HAIKU', '4': 'FABLE' };
 
 // ── Shared field style ────────────────────────────────────────────────────────
 const fieldStyle: React.CSSProperties = {
@@ -162,7 +162,7 @@ export function ScheduleModal({ deviceId, initial, onClose, onSaved }: ScheduleM
       style={{
         position: 'fixed',
         inset: 0,
-        zIndex: 50,
+        zIndex: Z.modal,
         background: 'rgba(0,0,0,.5)',
         display: 'flex',
         alignItems: 'center',
@@ -313,9 +313,10 @@ export function ScheduleModal({ deviceId, initial, onClose, onSaved }: ScheduleM
                 onChange={(e) => setModel(e.target.value as ModelKey)}
                 style={{ ...fieldStyle, cursor: 'pointer' }}
               >
-                <option value="DEFAULT">Default</option>
-                <option value="SONNET">Sonnet</option>
-                <option value="HAIKU">Haiku</option>
+                <option value="DEFAULT">Default (Opus 4.8)</option>
+                <option value="SONNET">Sonnet 5</option>
+                <option value="HAIKU">Haiku 4.5</option>
+                <option value="FABLE">Fable 5</option>
               </select>
             </div>
           </div>

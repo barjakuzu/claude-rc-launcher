@@ -1,6 +1,6 @@
 // AllSessions.tsx — cross-device flattened sessions list (V5AllSessions port).
 import { useEffect, useRef, useState } from 'react';
-import { RT, FONT_MONO, tintFor, hueForId } from '../tokens';
+import { RT, FONT_MONO, tintFor, hueForId, Z } from '../tokens';
 import { Icons, Dot, StatusPill } from './primitives';
 import { MobileHeader } from './MobileHeader';
 import { mobileActionBtn } from './mobileActionBtn';
@@ -186,7 +186,7 @@ function MoreMenu({ sessionName, sessionId, url, pending, onUnstick }: MoreMenuP
         <div style={{
           position: 'absolute', bottom: '100%', right: 0, marginBottom: 4,
           background: RT.panel, border: `1px solid ${RT.borderHi}`,
-          borderRadius: 8, padding: 4, zIndex: 20,
+          borderRadius: 8, padding: 4, zIndex: Z.menu,
           boxShadow: '0 8px 24px rgba(0,0,0,.4)', minWidth: 180,
         }}>
           <MenuItem icon={<Icons.copy size={12} stroke={RT.textDim} />} label="Copy session ID" onClick={handleCopy} />

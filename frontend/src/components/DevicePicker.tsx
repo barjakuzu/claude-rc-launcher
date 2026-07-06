@@ -1,6 +1,6 @@
 // DevicePicker.tsx — modal overlay to pick a target device (used by Copy/Move).
 import { useEffect, useState } from 'react';
-import { RT, FONT_MONO, tintFor, hueForId, kindForOs } from '../tokens';
+import { RT, FONT_MONO, tintFor, hueForId, kindForOs, Z } from '../tokens';
 import { Icons, Dot } from './primitives';
 import type { DeviceCard } from '../types';
 
@@ -55,7 +55,7 @@ export function DevicePicker({
   return (
     <div
       style={{
-        position: 'fixed', inset: 0, zIndex: 100,
+        position: 'fixed', inset: 0, zIndex: Z.picker,
         background: 'rgba(0,0,0,0.55)',
         display: 'flex', alignItems: 'center', justifyContent: 'center',
       }}

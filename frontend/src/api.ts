@@ -34,4 +34,6 @@ export const api = {
   tunnelStop: () => req('POST', '/tunnel/stop'),
   updateCheck: () => req('GET', '/update-check'),
   update: () => req('POST', '/update'),
+  // Device registry lives on the hub — never proxied, so no device arg.
+  deviceRename: (id: string, name: string) => req('POST', '/devices/rename', undefined, { id, name }),
 };

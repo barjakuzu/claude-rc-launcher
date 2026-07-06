@@ -1,6 +1,6 @@
 // DirBrowser.tsx — directory picker modal/overlay for MiniLauncher.
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { RT, FONT_MONO } from '../tokens';
+import { RT, FONT_MONO, Z } from '../tokens';
 import { Icons } from './primitives';
 import { btn } from './btn';
 import { api } from '../api';
@@ -63,7 +63,7 @@ export function DirBrowser({ deviceId, initialPath, onSelect, onClose }: DirBrow
       style={{
         position: 'absolute',
         inset: 0,
-        zIndex: 50,
+        zIndex: Z.modal,
         background: 'rgba(0,0,0,0.55)',
         display: 'flex',
         alignItems: 'flex-start',

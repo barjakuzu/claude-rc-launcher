@@ -20,8 +20,62 @@ browser — see list_devices_public().
 """
 
 import json
+import os
+import socket
 
-from config import DEVICES_FILE
+from config import DEVICES_FILE, RC_HOME
+
+# The local device's display name lives in a tiny state file so it can be
+# renamed from the UI. Falls back to RC_DEVICE_NAME env, then hostname.
+LOCAL_NAME_FILE = os.path.join(RC_HOME, "device-name")
+
+
+def get_local_name():
+    """Display name for this machine (the implicit 'local' device)."""
+    try:
+        with open(LOCAL_NAME_FILE) as f:
+            name = f.read().strip()
+        if name:
+            return name
+    except OSError:
+        pass
+    env_name = os.environ.get("RC_DEVICE_NAME", "").strip()
+    if env_name:
+        return env_name
+    return f"This machine ({socket.gethostname()})"
+
+
+def set_local_name(name):
+    with open(LOCAL_NAME_FILE, "w") as f:
+        f.write(name.strip() + "\n")
+
+
+def rename_device(device_id, name):
+    """Rename a device. 'local'/empty renames this machine; otherwise the
+    matching entry in devices.json is updated. Returns (ok, message)."""
+    name = (name or "").strip()
+    if not name:
+        return False, "Name cannot be empty"
+    if len(name) > 60:
+        return False, "Name too long (max 60 chars)"
+    if not device_id or device_id == "local":
+        set_local_name(name)
+        return True, "Renamed"
+    try:
+        with open(DEVICES_FILE) as f:
+            data = json.load(f)
+    except (FileNotFoundError, ValueError, OSError):
+        return False, "No device registry"
+    if not isinstance(data, list):
+        return False, "Invalid device registry"
+    for d in data:
+        if isinstance(d, dict) and d.get("id") == device_id:
+            d["name"] = name
+            with open(DEVICES_FILE, "w") as f:
+                json.dump(data, f, indent=2)
+            os.chmod(DEVICES_FILE, 0o600)
+            return True, "Renamed"
+    return False, f"Unknown device: {device_id}"
 
 
 def load_devices():

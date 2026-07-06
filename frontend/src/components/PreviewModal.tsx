@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
-import { RT, FONT_MONO, FONT_SANS } from '../tokens';
+import { RT, FONT_MONO, FONT_SANS, Z } from '../tokens';
 import { Icons } from './primitives';
 import { api } from '../api';
 
@@ -186,7 +186,7 @@ export function PreviewModal({ deviceId, name, onClose }: PreviewModalProps) {
     <div style={{
       position: 'fixed', inset: 0, background: 'rgba(0,0,0,.55)',
       display: 'flex', alignItems: 'center', justifyContent: 'center',
-      zIndex: 50, padding: 16,
+      zIndex: Z.modal, padding: 16,
       fontFamily: FONT_SANS,
     }} onClick={onClose}>
       <div
@@ -238,7 +238,7 @@ export function PreviewModal({ deviceId, name, onClose }: PreviewModalProps) {
             <button
               onClick={() => { termRef.current?.scrollToBottom(); }}
               style={{
-                position: 'absolute', right: 14, bottom: 14, zIndex: 5,
+                position: 'absolute', right: 14, bottom: 14, zIndex: Z.raised,
                 background: RT.green, color: RT.bg,
                 border: 'none', borderRadius: 999,
                 padding: '8px 14px', fontFamily: FONT_MONO, fontSize: 11,

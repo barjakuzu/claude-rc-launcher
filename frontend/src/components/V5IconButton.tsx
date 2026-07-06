@@ -7,13 +7,16 @@ interface Props {
   accent?: string;
   disabled?: boolean;
   pending?: boolean;
+  /** Larger hit target (40×40) for touch screens. */
+  mobile?: boolean;
   onClick?: (e: React.MouseEvent) => void;
   children: ReactElement;
 }
 
-export function V5IconButton({ label, accent, disabled, pending, onClick, children }: Props) {
+export function V5IconButton({ label, accent, disabled, pending, mobile, onClick, children }: Props) {
   const [hover, setHover] = useState(false);
   const color = accent || RT.textDim;
+  const size = mobile ? 40 : 34;
   return (
     <button
       title={label}
@@ -26,8 +29,8 @@ export function V5IconButton({ label, accent, disabled, pending, onClick, childr
         color,
         border: `1px solid ${hover && accent && !disabled ? accent : RT.border}`,
         borderRadius: 7,
-        width: 34,
-        height: 34,
+        width: size,
+        height: size,
         padding: 0,
         cursor: disabled || pending ? 'default' : 'pointer',
         display: 'inline-flex',

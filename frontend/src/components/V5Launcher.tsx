@@ -1,12 +1,12 @@
 // V5Launcher.tsx — horizontal launcher bar with segmented mode pills + progressive disclosure.
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { RT, FONT_MONO } from '../tokens';
+import { RT, FONT_MONO, Z } from '../tokens';
 import { Icons } from './primitives';
 import { api } from '../api';
 import { DirBrowser } from './DirBrowser';
 
 type ModeLabel = 'STANDARD' | 'TEAMMATE' | 'SAFE';
-type ModelLabel = '1' | '2' | '3';
+type ModelLabel = '1' | '2' | '3' | '4';
 
 function mapMode(label: ModeLabel): string {
   if (label === 'STANDARD') return 'c';
@@ -37,6 +37,8 @@ export function V5Launcher({ deviceId, deviceName, mobile = false, onLaunched }:
   const [showBrowser, setShowBrowser] = useState(false);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [nameFocus, setNameFocus] = useState(false);
+  const [dirFocus, setDirFocus] = useState(false);
   const mounted = useRef(true);
 
   useEffect(() => () => { mounted.current = false; }, []);
@@ -99,16 +101,44 @@ export function V5Launcher({ deviceId, deviceName, mobile = false, onLaunched }:
 
       {/* Main row */}
       <div style={{ display: 'flex', gap: 8, flexWrap: mobile ? 'wrap' : 'nowrap', alignItems: 'center' }}>
+        {/* Name input — inline, Enter launches */}
+        <div style={{
+          flex: mobile ? '1 1 100%' : '1 1 auto', minWidth: mobile ? '100%' : 140,
+          background: RT.panel, borderRadius: 8,
+          border: `1px solid ${nameFocus ? RT.textDim : RT.border}`,
+          transition: 'border-color .15s',
+          padding: '9px 12px', display: 'flex', alignItems: 'center', gap: 8,
+        }}>
+          <Icons.edit size={12} stroke={RT.textLow} />
+          <input
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') handleLaunch(); }}
+            onFocus={() => setNameFocus(true)}
+            onBlur={() => setNameFocus(false)}
+            placeholder="session name · ↵ to launch"
+            style={{
+              flex: 1, background: 'transparent', color: RT.text,
+              border: 'none', outline: 'none', fontFamily: FONT_MONO, fontSize: 12,
+            }}
+          />
+        </div>
+
         {/* Workdir input */}
         <div style={{
-          flex: mobile ? '1 1 100%' : '1 1 auto', minWidth: mobile ? '100%' : 200,
-          background: RT.panel, border: `1px solid ${RT.border}`, borderRadius: 8,
+          flex: mobile ? '1 1 100%' : '1.4 1 auto', minWidth: mobile ? '100%' : 200,
+          background: RT.panel, borderRadius: 8,
+          border: `1px solid ${dirFocus ? RT.textDim : RT.border}`,
+          transition: 'border-color .15s',
           padding: '9px 12px', display: 'flex', alignItems: 'center', gap: 8,
         }}>
           <Icons.folder size={12} stroke={RT.textLow} />
           <input
             value={workdir}
             onChange={(e) => setWorkdir(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') handleLaunch(); }}
+            onFocus={() => setDirFocus(true)}
+            onBlur={() => setDirFocus(false)}
             placeholder="/path/to/project"
             style={{
               flex: 1, background: 'transparent', color: RT.text,
@@ -133,7 +163,7 @@ export function V5Launcher({ deviceId, deviceName, mobile = false, onLaunched }:
                 fontFamily: FONT_MONO, fontSize: 10.5, fontWeight: 600,
                 letterSpacing: '.04em',
                 flex: mobile ? 1 : 'none',
-                zIndex: mode === m ? 1 : 0,
+                zIndex: mode === m ? Z.raised : 0,
                 position: 'relative',
               }}
             >
@@ -199,21 +229,11 @@ export function V5Launcher({ deviceId, deviceName, mobile = false, onLaunched }:
               onChange={(e) => setModel(e.target.value as ModelLabel | '')}
               style={{ ...optionFieldStyle, flex: 1 }}
             >
-              <option value="">Default (Opus)</option>
-              <option value="2">Sonnet 4.6</option>
+              <option value="">Default (Opus 4.8)</option>
+              <option value="2">Sonnet 5</option>
               <option value="3">Haiku 4.5</option>
+              <option value="4">Fable 5</option>
             </select>
-          </div>
-
-          {/* Name input */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <label style={{ fontSize: 11, color: RT.textLow, fontFamily: FONT_MONO, flex: 'none', width: 64 }}>Name</label>
-            <input
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder="auto-generated"
-              style={{ ...optionFieldStyle, flex: 1 }}
-            />
           </div>
 
           {/* Workdir + Browse */}

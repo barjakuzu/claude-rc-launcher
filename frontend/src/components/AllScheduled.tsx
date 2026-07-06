@@ -1,6 +1,6 @@
 // AllScheduled.tsx — cross-device flattened schedules list (V5AllScheduled port).
 import { useState } from 'react';
-import { RT, FONT_MONO, tintFor, hueForId } from '../tokens';
+import { RT, FONT_MONO, tintFor, hueForId, Z } from '../tokens';
 import { Icons, Dot } from './primitives';
 import { MobileHeader } from './MobileHeader';
 import { mobileActionBtn } from './mobileActionBtn';
@@ -156,7 +156,7 @@ export function AllScheduled({ cards }: AllScheduledProps) {
                       <div style={{
                         position: 'absolute', bottom: '100%', left: 0, marginBottom: 4,
                         background: RT.panel, border: `1px solid ${RT.borderHi}`,
-                        borderRadius: 8, padding: 4, zIndex: 30,
+                        borderRadius: 8, padding: 4, zIndex: Z.menu,
                         boxShadow: '0 8px 24px rgba(0,0,0,.4)', minWidth: 160,
                       }}>
                         <button

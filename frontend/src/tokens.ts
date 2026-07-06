@@ -1,5 +1,16 @@
 // tokens.ts — design tokens and shared helpers.
 
+// Z-index scale — single source of truth for stacking. Higher layers must
+// always beat lower ones: raised < sticky < menu < sheet < modal < picker.
+export const Z = {
+  raised: 1,    // active pill in a segmented control
+  sticky: 30,   // sticky headers / toolbars
+  menu: 60,     // row-action popover menus (must beat sticky bars)
+  sheet: 70,    // mobile bottom sheets (backdrop 70, panel 71)
+  modal: 80,    // full-screen modal overlays
+  picker: 100,  // device picker (may sit on top of a modal)
+} as const;
+
 export const FONT_SANS = "'Inter', system-ui, sans-serif";
 export const FONT_SERIF = "'Instrument Serif', Georgia, serif";
 export const FONT_MONO = "'Geist Mono', ui-monospace, SFMono-Regular, monospace";

@@ -150,6 +150,7 @@ export const Icons: Record<string, IconFn> = {
   link: (p) => <I {...p}><path d="M10 14a4 4 0 0 0 5.6 0l3-3a4 4 0 1 0-5.6-5.6L11 7" /><path d="M14 10a4 4 0 0 0-5.6 0l-3 3a4 4 0 1 0 5.6 5.6L13 17" /></I>,
   spinner: (p) => <I {...p}><path d="M21 12a9 9 0 1 1-9-9" opacity=".25" /><path d="M21 12a9 9 0 0 0-9-9" /></I>,
   filter: (p) => <I {...p}><path d="M4 5h16l-6 8v6l-4-2v-4L4 5z" /></I>,
+  edit: (p) => <I {...p}><path d="M12 20h9" /><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z" /></I>,
 };
 
 // Status pill — uses the RT palette mapping from the V4 panel.

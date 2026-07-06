@@ -2,7 +2,7 @@
 
 import os
 
-VERSION = "1.7.2"
+VERSION = "1.8.0"
 
 # Single home directory for all claude-rc data
 RC_HOME = os.environ.get("RC_HOME", os.path.expanduser("~/.claude-rc"))
@@ -26,9 +26,10 @@ RC_FLAGS = {
 }
 
 MODEL_MAP = {
-    "1": None,       # Default (Opus)
-    "2": "sonnet",   # Sonnet 4.6
+    "1": None,       # Default (Opus 4.8)
+    "2": "sonnet",   # Sonnet 5
     "3": "haiku",    # Haiku 4.5
+    "4": "fable",    # Fable 5
 }
 
 SCHEDULES_FILE = os.path.join(RC_HOME, "schedules.json")

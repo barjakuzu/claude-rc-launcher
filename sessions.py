@@ -239,6 +239,42 @@ def _kill_dead_session(session_name):
     subprocess.run(["tmux", "kill-session", "-t", session_name], capture_output=True)
 
 
+def _send_rename(session_name, display_name):
+    """Rename the Claude session (sets its title), verifying it applied.
+
+    The slash-command autocomplete popup can swallow the first Enter, so
+    after sending we check the pane for the 'Session renamed' confirmation
+    and retry (with Escape to clear popup state) up to 3 times.
+    """
+    display_name = (display_name or "").replace("\n", " ").strip()
+    if not display_name:
+        return False
+    for attempt in range(3):
+        if attempt > 0:
+            # Clear any open popup/menu state before retrying
+            subprocess.run(["tmux", "send-keys", "-t", session_name, "Escape"], capture_output=True)
+            time.sleep(0.4)
+        subprocess.run(["tmux", "send-keys", "-t", session_name, "-l", f"/rename {display_name}"], capture_output=True)
+        time.sleep(0.8)
+        subprocess.run(["tmux", "send-keys", "-t", session_name, "Enter"], capture_output=True)
+        time.sleep(1.2)
+        pane = _capture_pane_text(session_name) or ""
+        if "renamed to" in pane.lower():
+            print(f"  {session_name}: renamed to '{display_name}'")
+            return True
+        # Command still sitting in the input box → Enter got swallowed
+        if "/rename" in pane:
+            subprocess.run(["tmux", "send-keys", "-t", session_name, "Enter"], capture_output=True)
+            time.sleep(1.0)
+            pane = _capture_pane_text(session_name) or ""
+            if "renamed to" in pane.lower():
+                print(f"  {session_name}: renamed to '{display_name}' (second Enter)")
+                return True
+        print(f"  {session_name}: rename attempt {attempt + 1} not confirmed, retrying...")
+    print(f"  {session_name}: rename to '{display_name}' could not be confirmed")
+    return False
+
+
 def setup_session(session_name, display_name, mode):
     """Handle trust prompt, send /remote-control, wait for URL, then /rename."""
     # Keep the tmux PTY output flowing by piping to /dev/null.
@@ -386,9 +422,7 @@ def setup_session(session_name, display_name, mode):
                     capture_output=True,
                 )
                 time.sleep(1)
-                subprocess.run(["tmux", "send-keys", "-t", session_name, "-l", f"/rename {display_name}"], capture_output=True)
-                time.sleep(0.5)
-                subprocess.run(["tmux", "send-keys", "-t", session_name, "Enter"], capture_output=True)
+                _send_rename(session_name, display_name)
                 return
     except Exception:
         pass
@@ -458,9 +492,7 @@ def setup_session(session_name, display_name, mode):
                 capture_output=True,
             )
             time.sleep(1)
-            subprocess.run(["tmux", "send-keys", "-t", session_name, "-l", f"/rename {display_name}"], capture_output=True)
-            time.sleep(0.5)
-            subprocess.run(["tmux", "send-keys", "-t", session_name, "Enter"], capture_output=True)
+            _send_rename(session_name, display_name)
             return
         # Wait before retry
         print(f"  {session_name}: attempt {attempt + 1} failed, waiting before retry...")
@@ -646,7 +678,8 @@ def restart_session(name, mode=None, workdir=None, model=None, sandbox=False,
         print(f"  ERROR: {error}")
         return False, error
 
-    display_name = name
+    # Strip the tmux prefix for the visible session title
+    display_name = name[len(SESSION_PREFIX):] if name.startswith(SESSION_PREFIX) else name
     threading.Thread(
         target=setup_session, args=(name, display_name, mode), daemon=True
     ).start()
@@ -825,7 +858,8 @@ def resume_session(session_name, session_title, project_dir, mode="c"):
         print(f"  ERROR: {error}")
         return False, error, tmux_name
 
+    display_name = tmux_name[len(SESSION_PREFIX):] if tmux_name.startswith(SESSION_PREFIX) else tmux_name
     threading.Thread(
-        target=setup_session, args=(tmux_name, tmux_name, mode), daemon=True
+        target=setup_session, args=(tmux_name, display_name, mode), daemon=True
     ).start()
     return True, "Resuming", tmux_name

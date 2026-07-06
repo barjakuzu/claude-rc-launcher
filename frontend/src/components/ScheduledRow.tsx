@@ -1,6 +1,6 @@
 // ScheduledRow.tsx — V5 full-width 3-col grid with V5IconButton actions.
 import { useEffect, useRef, useState } from 'react';
-import { RT, FONT_MONO } from '../tokens';
+import { RT, FONT_MONO, Z } from '../tokens';
 import { Icons } from './primitives';
 import { V5IconButton } from './V5IconButton';
 import { DevicePicker, rewriteHomePaths, type DevicePickResult } from './DevicePicker';
@@ -218,7 +218,7 @@ export function ScheduledRow({ s, deviceId, mobile = false, cards, onChanged, on
             <div style={{
               position: 'absolute', bottom: '100%', right: 0, marginBottom: 4,
               background: RT.panel, border: `1px solid ${RT.borderHi}`,
-              borderRadius: 8, padding: 4, zIndex: 20,
+              borderRadius: 8, padding: 4, zIndex: Z.menu,
               boxShadow: '0 8px 24px rgba(0,0,0,.4)', minWidth: 170,
             }}>
               <button

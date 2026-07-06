@@ -1,6 +1,6 @@
 // ResumeList.tsx — list and resume Claude sessions.
 import { useState, useEffect, useRef } from 'react';
-import { RT, FONT_MONO, fmtDate } from '../tokens';
+import { RT, FONT_MONO, fmtDate, Z } from '../tokens';
 import { btn } from './btn';
 import { api } from '../api';
 
@@ -87,7 +87,7 @@ export function ResumeList({ deviceId, onClose, onResumed }: ResumeListProps) {
       style={{
         position: 'fixed',
         inset: 0,
-        zIndex: 50,
+        zIndex: Z.modal,
         background: 'rgba(0,0,0,.5)',
         display: 'flex',
         alignItems: 'center',

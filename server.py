@@ -32,7 +32,9 @@ from schedules import (
     load_schedules, create_schedule, update_schedule, delete_schedule,
 )
 from scheduler import validate_cron, next_cron_run, _fire_schedule, WIZARD_PROMPT
-from devices import get_device, list_devices_public, load_devices
+from devices import (
+    get_device, list_devices_public, load_devices, get_local_name, rename_device,
+)
 import overview
 
 
@@ -374,7 +376,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         p = self.path.split('?')[0]
         if p.startswith("/rc"):
             p = p[3:]
-        if p.startswith("/static/") or p == "/devices":
+        if p.startswith("/static/") or p == "/devices" or p == "/devices/rename":
             return False
         return True
 
@@ -487,7 +489,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._json({"name": name, "output": result.stdout, "status": "running"})
 
         elif path == "/devices":
-            self._json({"devices": [{"id": "local", "name": "This machine (VM)"}]
+            self._json({"devices": [{"id": "local", "name": get_local_name()}]
                         + list_devices_public()})
 
         elif path == "/projects":
@@ -565,7 +567,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif path == "/overview":
             local_sess = list_rc_sessions()
             local_stats = {**stats.system_stats(), "token_history": stats.token_history()}
-            local_card = {"id": "local", "name": "This machine (VM)", "base_url": ""}
+            local_card = {"id": "local", "name": get_local_name(), "base_url": ""}
             cards = overview.build_overview(local_card, local_sess, local_stats, load_devices())
             self._json({"devices": cards})
 
@@ -725,6 +727,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if path == "/start":
             body = self._read_body()
             name = body.get("name", "").strip()
+            # Keep the user's original name (spaces and all) for /rename —
+            # `name` below gets prefixed and sanitized for tmux.
+            display_name = name
             mode = body.get("mode", "c")
             model = body.get("model")
             workdir = body.get("workdir", "").strip()
@@ -785,9 +790,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
             else:
                 print(f"  Session {name} created")
             threading.Thread(
-                target=setup_session, args=(name, name, mode), daemon=True
+                target=setup_session,
+                args=(name, display_name or name, mode), daemon=True,
             ).start()
             self._json({"ok": True, "message": "Started", "name": name})
+
+        elif path == "/devices/rename":
+            body = self._read_body()
+            ok, message = rename_device(
+                body.get("id", ""), body.get("name", ""),
+            )
+            self._json({"ok": ok, "message": message}, 200 if ok else 400)
 
         elif path == "/stop":
             body = self._read_body()

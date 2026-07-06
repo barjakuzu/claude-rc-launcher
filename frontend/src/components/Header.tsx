@@ -2,7 +2,7 @@
 import { useState, useEffect, useRef } from 'react';
 import type { DeviceCard } from '../types';
 import type { Layout } from '../useLayout';
-import { RT, FONT_MONO, FONT_SANS, tintFor, hueForId, fmtK } from '../tokens';
+import { RT, FONT_MONO, FONT_SANS, tintFor, hueForId, fmtK, Z } from '../tokens';
 import { Dot, Icons } from './primitives';
 import { btn } from './btn';
 import { api } from '../api';
@@ -147,7 +147,7 @@ function MachineSelector({ cards, openId, setOpenId, layout }: MachineSelectorPr
           width: layout.mobile ? 'calc(100vw - 28px)' : 340,
           maxWidth: 'calc(100vw - 28px)',
           padding: 6,
-          zIndex: 30,
+          zIndex: Z.sticky,
           boxShadow: '0 12px 36px rgba(0,0,0,.4)',
         }}>
           <DropItem
@@ -328,7 +328,7 @@ function GlobalMenu({ openId, onRefresh }: GlobalMenuProps) {
           borderRadius: 10,
           width: 180,
           padding: 6,
-          zIndex: 30,
+          zIndex: Z.sticky,
           boxShadow: '0 12px 36px rgba(0,0,0,.4)',
         }}>
           <button

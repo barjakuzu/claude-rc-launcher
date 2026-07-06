@@ -8,7 +8,7 @@ import { DirBrowser } from './DirBrowser';
 
 // Mode select value → backend mode string
 type ModeLabel = 'STANDARD' | 'TEAMMATE' | 'SAFE';
-type ModelLabel = '1' | '2' | '3';
+type ModelLabel = '1' | '2' | '3' | '4';
 
 function mapMode(label: ModeLabel): string {
   if (label === 'STANDARD') return 'c';
@@ -114,11 +114,23 @@ export function MiniLauncher({ deviceId, deviceName, mobile = false, onLaunched 
         Launch on {deviceName}
       </div>
 
-      {/* Minimal row — workdir + mode + Launch */}
+      {/* Minimal row — name + workdir + mode + Launch */}
       <div style={{ display: 'flex', gap: 6, flexWrap: mobile ? 'wrap' : 'nowrap' }}>
+        <input
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter') handleLaunch(); }}
+          placeholder="session name · ↵ launches"
+          style={{
+            ...fieldStyle,
+            flex: 1,
+            minWidth: mobile ? '100%' : 0,
+          }}
+        />
         <input
           value={workdir}
           onChange={(e) => setWorkdir(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter') handleLaunch(); }}
           placeholder="/path/to/project"
           style={{
             ...fieldStyle,
@@ -211,23 +223,11 @@ export function MiniLauncher({ deviceId, deviceName, mobile = false, onLaunched 
               onChange={(e) => setModel(e.target.value as ModelLabel | '')}
               style={{ ...fieldStyle, flex: 1, fontSize: 11, padding: '5px 8px' }}
             >
-              <option value="">Default (Opus)</option>
-              <option value="2">Sonnet 4.6</option>
+              <option value="">Default (Opus 4.8)</option>
+              <option value="2">Sonnet 5</option>
               <option value="3">Haiku 4.5</option>
+              <option value="4">Fable 5</option>
             </select>
-          </div>
-
-          {/* Name input */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <label style={{ fontSize: 11, color: RT.textLow, fontFamily: FONT_MONO, flex: 'none', width: 64 }}>
-              Name
-            </label>
-            <input
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder="auto-generated"
-              style={{ ...fieldStyle, flex: 1, fontSize: 11, padding: '5px 8px' }}
-            />
           </div>
 
           {/* Workdir + Browse button */}
