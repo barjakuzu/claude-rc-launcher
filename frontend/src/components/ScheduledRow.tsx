@@ -5,6 +5,7 @@ import { Icons } from './primitives';
 import { V5IconButton } from './V5IconButton';
 import { DevicePicker, rewriteHomePaths, type DevicePickResult } from './DevicePicker';
 import { api } from '../api';
+import { fixedMenuPos } from './menuPos';
 import type { Schedule, DeviceCard } from '../types';
 
 export interface ScheduledRowProps {
@@ -19,6 +20,7 @@ export interface ScheduledRowProps {
 export function ScheduledRow({ s, deviceId, mobile = false, cards, onChanged, onEdit }: ScheduledRowProps) {
   const [pending, setPending] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [menuPos, setMenuPos] = useState<React.CSSProperties | null>(null);
   const [pickerMode, setPickerMode] = useState<'copy' | 'move' | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -209,14 +211,17 @@ export function ScheduledRow({ s, deviceId, mobile = false, cards, onChanged, on
           <V5IconButton
             label="More options"
             pending={pending}
-            onClick={() => setMenuOpen((o) => !o)}
+            onClick={() => {
+              if (!menuOpen && menuRef.current) setMenuPos(fixedMenuPos(menuRef.current));
+              setMenuOpen((o) => !o);
+            }}
           >
             <Icons.more size={14} stroke={RT.textDim} />
           </V5IconButton>
 
           {menuOpen && (
             <div style={{
-              position: 'absolute', bottom: '100%', right: 0, marginBottom: 4,
+              ...(menuPos ?? {}),
               background: RT.panel, border: `1px solid ${RT.borderHi}`,
               borderRadius: 8, padding: 4, zIndex: Z.menu,
               boxShadow: '0 8px 24px rgba(0,0,0,.4)', minWidth: 170,

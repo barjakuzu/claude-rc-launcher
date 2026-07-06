@@ -8,6 +8,7 @@ import { ScheduleModal } from './ScheduleModal';
 import { DevicePicker, rewriteHomePaths, type DevicePickResult } from './DevicePicker';
 import { useAllSchedules } from '../useCrossDevice';
 import { api } from '../api';
+import { fixedMenuPos } from './menuPos';
 import type { DeviceCard, Schedule } from '../types';
 
 interface AllScheduledProps {
@@ -22,6 +23,7 @@ export function AllScheduled({ cards }: AllScheduledProps) {
   const [newDeviceId, setNewDeviceId] = useState<string | null>(null);
   const [pickerEntry, setPickerEntry] = useState<PickerEntry | null>(null);
   const [moreOpenId, setMoreOpenId] = useState<string | null>(null);
+  const [morePos, setMorePos] = useState<React.CSSProperties | null>(null);
 
   async function handlePick(result: DevicePickResult, entry: PickerEntry) {
     const targetDeviceId = result.deviceId;
@@ -148,13 +150,16 @@ export function AllScheduled({ cards }: AllScheduledProps) {
                   <div style={{ position: 'relative' }}>
                     <button
                       style={mobileActionBtn()}
-                      onClick={() => setMoreOpenId(moreOpenId === d.id + s.id ? null : d.id + s.id)}
+                      onClick={(e) => {
+                        if (moreOpenId !== d.id + s.id) setMorePos(fixedMenuPos(e.currentTarget, { align: 'left' }));
+                        setMoreOpenId(moreOpenId === d.id + s.id ? null : d.id + s.id);
+                      }}
                     >
                       <Icons.more size={13} stroke={RT.textDim} />
                     </button>
                     {moreOpenId === d.id + s.id && (
                       <div style={{
-                        position: 'absolute', bottom: '100%', left: 0, marginBottom: 4,
+                        ...(morePos ?? {}),
                         background: RT.panel, border: `1px solid ${RT.borderHi}`,
                         borderRadius: 8, padding: 4, zIndex: Z.menu,
                         boxShadow: '0 8px 24px rgba(0,0,0,.4)', minWidth: 160,

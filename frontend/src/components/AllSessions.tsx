@@ -6,6 +6,7 @@ import { MobileHeader } from './MobileHeader';
 import { mobileActionBtn } from './mobileActionBtn';
 import { useAllSessions } from '../useCrossDevice';
 import { api } from '../api';
+import { fixedMenuPos } from './menuPos';
 import { PreviewModal } from './PreviewModal';
 import type { DeviceCard } from '../types';
 
@@ -145,6 +146,7 @@ interface MoreMenuProps {
 }
 function MoreMenu({ sessionName, sessionId, url, pending, onUnstick }: MoreMenuProps) {
   const [open, setOpen] = useState(false);
+  const [menuPos, setMenuPos] = useState<React.CSSProperties | null>(null);
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const off = (e: MouseEvent) => {
@@ -171,7 +173,10 @@ function MoreMenu({ sessionName, sessionId, url, pending, onUnstick }: MoreMenuP
   return (
     <div ref={ref} style={{ position: 'relative' }}>
       <button
-        onClick={() => setOpen((o) => !o)}
+        onClick={() => {
+          if (!open && ref.current) setMenuPos(fixedMenuPos(ref.current));
+          setOpen((o) => !o);
+        }}
         disabled={pending}
         title="More options"
         style={{
@@ -184,7 +189,7 @@ function MoreMenu({ sessionName, sessionId, url, pending, onUnstick }: MoreMenuP
       </button>
       {open && (
         <div style={{
-          position: 'absolute', bottom: '100%', right: 0, marginBottom: 4,
+          ...(menuPos ?? {}),
           background: RT.panel, border: `1px solid ${RT.borderHi}`,
           borderRadius: 8, padding: 4, zIndex: Z.menu,
           boxShadow: '0 8px 24px rgba(0,0,0,.4)', minWidth: 180,

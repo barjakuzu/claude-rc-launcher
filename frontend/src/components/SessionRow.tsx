@@ -3,6 +3,7 @@ import { useState, useEffect, useRef } from 'react';
 import { RT, FONT_MONO, tintFor, Z } from '../tokens';
 import { Icons, CapBar, Dot } from './primitives';
 import { V5IconButton } from './V5IconButton';
+import { fixedMenuPos } from './menuPos';
 import type { Session } from '../types';
 import { api } from '../api';
 
@@ -46,6 +47,7 @@ function V5StatusPill({ status }: { status: string }) {
 export function SessionRow({ s, hue, deviceId, mobile = false, onChanged, onPreview }: SessionRowProps) {
   const [pending, setPending] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [menuPos, setMenuPos] = useState<React.CSSProperties | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const hueColor = tintFor(hue, 0.70, 0.10);
 
@@ -192,14 +194,17 @@ export function SessionRow({ s, hue, deviceId, mobile = false, onChanged, onPrev
             label="More options"
             mobile={mobile}
             pending={pending}
-            onClick={() => setMenuOpen((o) => !o)}
+            onClick={() => {
+              if (!menuOpen && menuRef.current) setMenuPos(fixedMenuPos(menuRef.current));
+              setMenuOpen((o) => !o);
+            }}
           >
             <Icons.more size={14} stroke={RT.textDim} />
           </V5IconButton>
 
           {menuOpen && (
             <div style={{
-              position: 'absolute', bottom: '100%', right: 0, marginBottom: 4,
+              ...(menuPos ?? {}),
               background: RT.panel, border: `1px solid ${RT.borderHi}`,
               borderRadius: 8, padding: 4, zIndex: Z.menu,
               boxShadow: '0 8px 24px rgba(0,0,0,.4)', minWidth: 160,
