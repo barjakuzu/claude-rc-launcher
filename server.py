@@ -530,6 +530,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             return
 
+        # Public app icons + manifest — iOS fetches the home-screen icon
+        # WITHOUT cookies, so these must not require auth. Nothing sensitive.
+        icon_path = raw_path[3:] if raw_path.startswith("/rc/") else raw_path
+        if icon_path in ("/static/apple-touch-icon.png", "/static/icon-192.png",
+                         "/static/icon-512.png", "/static/manifest.json",
+                         "/apple-touch-icon.png", "/apple-touch-icon-precomposed.png"):
+            if icon_path.startswith("/apple-touch-icon"):
+                icon_path = "/static/apple-touch-icon.png"
+            return self._serve_static(icon_path)
+
         if not _check_auth(self):
             return _send_auth_required(self)
 
