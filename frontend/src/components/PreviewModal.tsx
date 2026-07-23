@@ -51,6 +51,17 @@ export function PreviewModal({ deviceId, name, onClose }: PreviewModalProps) {
   // guard pauses rendering the moment the user starts scrolling so they can
   // actually reach old messages.
   const scrollIntentRef = useRef(0);
+  // Alternate-screen flag from /preview. Claude Code runs in the alternate
+  // screen with ZERO tmux history — there is nothing to scroll in the
+  // browser buffer. Scrolling must be forwarded to the app as PgUp/PgDn.
+  const altRef = useRef(false);
+  // Immediate refresh hook (set by the polling effect) — called right after
+  // keystrokes land so the echo shows up without waiting for the next tick.
+  const refreshRef = useRef<() => void>(() => {});
+  // Typed-character batch: coalesce a typing burst into one request instead
+  // of one HTTP round-trip per keystroke.
+  const keyBufRef = useRef('');
+  const keyTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   useEffect(() => () => { mounted.current = false; }, []);
 
@@ -95,11 +106,35 @@ export function PreviewModal({ deviceId, name, onClose }: PreviewModalProps) {
     // font are wrong, which shows up as overlapping glyphs.
     document.fonts?.ready?.then(() => { if (mounted.current) syncSize(); });
 
-    // Forward keystrokes (printable text) to the session.
+    // Flush the typed-character batch as a single request, then refresh
+    // right away so the echo appears without waiting for the next poll.
+    const flushKeys = (): Promise<unknown> => {
+      clearTimeout(keyTimerRef.current);
+      const buf = keyBufRef.current;
+      keyBufRef.current = '';
+      if (!buf) return Promise.resolve();
+      return api.sendKeys(deviceId, name, { keys: buf })
+        .then(() => refreshRef.current())
+        .catch(() => { /* ignore */ });
+    };
+
+    // Special keys flush pending text first so ordering is preserved
+    // (typed chars land before the Enter that submits them).
+    const sendSpecial = (special: string) => {
+      activityRef.current = true;
+      flushKeys()
+        .then(() => api.sendKeys(deviceId, name, { special: [special] }))
+        .then(() => refreshRef.current())
+        .catch(() => { /* ignore */ });
+    };
+
+    // Forward keystrokes (printable text) to the session, batched ~40ms.
     term.onData((data) => {
       if (!mounted.current) return;
       activityRef.current = true;
-      api.sendKeys(deviceId, name, { keys: data }).catch(() => { /* ignore */ });
+      keyBufRef.current += data;
+      clearTimeout(keyTimerRef.current);
+      keyTimerRef.current = setTimeout(flushKeys, 40);
     });
 
     // Forward known special keys.
@@ -108,14 +143,12 @@ export function PreviewModal({ deviceId, name, onClose }: PreviewModalProps) {
       const key = ev.key;
       // Ctrl combinations: send as e.g. "C-c", "C-d", "C-l".
       if (ev.ctrlKey && key.length === 1 && /[a-zA-Z]/.test(key)) {
-        activityRef.current = true;
-        api.sendKeys(deviceId, name, { special: [`C-${key.toLowerCase()}`] }).catch(() => {});
+        sendSpecial(`C-${key.toLowerCase()}`);
         return false; // prevent xterm from also sending the char
       }
       const mapped = SPECIAL_KEY_MAP[key];
       if (mapped) {
-        activityRef.current = true;
-        api.sendKeys(deviceId, name, { special: [mapped] }).catch(() => {});
+        sendSpecial(mapped);
         return false; // we handled it
       }
       return true; // let onData handle printable
@@ -142,15 +175,44 @@ export function PreviewModal({ deviceId, name, onClose }: PreviewModalProps) {
       lastY = e.touches[0].clientY;
       accumulator = 0;
     };
-    const onWheel = () => { scrollIntentRef.current = Date.now(); };
+    // Scroll forwarding. Claude Code lives in the alternate screen with no
+    // tmux history — the transcript can only be scrolled by the app itself,
+    // so wheel/touch gestures become PgUp/PgDn keys. Non-alt content (plain
+    // shells) keeps native browser-buffer scrolling.
+    let pagePx = 0;
+    let lastPageAt = 0;
+    const forwardScroll = (deltaPx: number) => {
+      pagePx += deltaPx;
+      const now = Date.now();
+      const THRESHOLD = 70;   // px of gesture per page key
+      const MIN_GAP = 130;    // ms between page keys
+      if (Math.abs(pagePx) >= THRESHOLD && now - lastPageAt >= MIN_GAP) {
+        const dir = pagePx < 0 ? 'PPage' : 'NPage';
+        pagePx = 0;
+        lastPageAt = now;
+        api.sendKeys(deviceId, name, { special: [dir] })
+          .then(() => refreshRef.current())
+          .catch(() => { /* ignore */ });
+      }
+    };
+
+    const onWheel = (e: WheelEvent) => {
+      if (altRef.current) { forwardScroll(e.deltaY); return; }
+      scrollIntentRef.current = Date.now();
+    };
     el.addEventListener('wheel', onWheel, { passive: true });
 
     const onTouchMove = (e: TouchEvent) => {
       if (!active || e.touches.length !== 1 || !termRef.current) return;
-      scrollIntentRef.current = Date.now();
       const y = e.touches[0].clientY;
       const dy = lastY - y;        // positive: finger moved up → scroll down
       lastY = y;
+      if (altRef.current) {
+        forwardScroll(dy);
+        if (e.cancelable) e.preventDefault();
+        return;
+      }
+      scrollIntentRef.current = Date.now();
       const rows = Math.max(1, termRef.current.rows);
       const lineHeight = el!.clientHeight / rows;
       accumulator += dy / lineHeight;
@@ -202,14 +264,15 @@ export function PreviewModal({ deviceId, name, onClose }: PreviewModalProps) {
         if (cancelled || !mounted.current) return;
         const output: string = data?.output ?? '';
         const cursor = data?.cursor as { x: number; y: number; visible: boolean } | null;
+        altRef.current = !!data?.alt;
         const term = termRef.current;
         if (output !== lastContentRef.current && term) {
-          // Pause re-rendering while the user has scrolled back, so the view
-          // doesn't snap to the bottom every poll. Once they scroll back down,
-          // the next poll re-renders normally.
+          // Alt-screen apps (Claude Code) scroll inside the app — always
+          // render. For normal content, pause re-rendering while the user
+          // is scrolled back so the view doesn't snap to the bottom.
           const atBottom = term.buffer.active.viewportY >= term.buffer.active.length - term.rows;
-          const userScrolling = Date.now() - scrollIntentRef.current < 1500;
-          if (atBottom && !userScrolling) {
+          const userScrolling = !altRef.current && Date.now() - scrollIntentRef.current < 1500;
+          if (altRef.current || (atBottom && !userScrolling)) {
             lastContentRef.current = output;
             term.reset();
             // capture-pane terminates the last row with \n — writing it as-is
@@ -235,9 +298,11 @@ export function PreviewModal({ deviceId, name, onClose }: PreviewModalProps) {
         if (mounted.current) setStatus('reconnecting…');
       }
     };
+    // Let input handlers trigger an immediate refresh (typed echo, PgUp).
+    refreshRef.current = () => { if (!cancelled) fetchOnce(); };
     fetchOnce();
     const id = setInterval(fetchOnce, 700);
-    return () => { cancelled = true; clearInterval(id); };
+    return () => { cancelled = true; clearInterval(id); refreshRef.current = () => {}; };
   }, [autoRefresh, deviceId, name]);
 
   // Esc closes
@@ -383,6 +448,8 @@ function KeyBar({ deviceId, name, onActivity }: { deviceId: string; name: string
   const keys: { label: string; special: string; flex?: number; accent?: string }[] = [
     { label: 'Esc', special: 'Escape' },
     { label: 'Tab', special: 'Tab' },
+    { label: '⇞',   special: 'PPage' },
+    { label: '⇟',   special: 'NPage' },
     { label: '←',   special: 'Left' },
     { label: '↓',   special: 'Down' },
     { label: '↑',   special: 'Up' },

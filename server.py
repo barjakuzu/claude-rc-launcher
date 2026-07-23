@@ -242,6 +242,7 @@ def _login_html(csrf_token="", error=""):
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
 <title>Claude RC — Sign in</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect width='64' height='64' rx='14' fill='%231a1a18'/><rect x='5' y='5' width='54' height='54' rx='11' fill='none' stroke='%233d3d39' stroke-width='2'/><text x='31' y='43' font-family='ui-monospace,Menlo,monospace' font-size='28' font-weight='700' fill='%23e8e7e3' text-anchor='middle'>rc</text><circle cx='50' cy='15' r='5' fill='%234ade80'/></svg>">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Geist+Mono:wght@400;500;600&family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
@@ -594,18 +595,21 @@ class Handler(http.server.BaseHTTPRequestHandler):
             # Real cursor position (relative to the visible pane) so the
             # browser terminal can place its cursor where tmux's actually is.
             cursor = None
+            alt_screen = False
             cur = subprocess.run(
                 ["tmux", "display-message", "-p", "-t", name,
-                 "#{cursor_x} #{cursor_y} #{cursor_flag}"],
+                 "#{cursor_x} #{cursor_y} #{cursor_flag} #{alternate_on}"],
                 capture_output=True, text=True,
             )
             if cur.returncode == 0:
                 parts = cur.stdout.split()
-                if len(parts) == 3 and all(p.isdigit() for p in parts):
+                if len(parts) == 4 and all(p.isdigit() for p in parts):
                     cursor = {"x": int(parts[0]), "y": int(parts[1]),
                               "visible": parts[2] == "1"}
+                    alt_screen = parts[3] == "1"
             self._json({"name": name, "output": result.stdout,
-                        "cursor": cursor, "status": "running"})
+                        "cursor": cursor, "alt": alt_screen,
+                        "status": "running"})
 
         elif path == "/devices":
             self._json({"devices": [{"id": "local", "name": get_local_name()}]
