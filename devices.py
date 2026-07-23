@@ -71,7 +71,9 @@ def rename_device(device_id, name):
     for d in data:
         if isinstance(d, dict) and d.get("id") == device_id:
             d["name"] = name
-            with open(DEVICES_FILE, "w") as f:
+            # Create with 0600 atomically (file holds device credentials).
+            fd = os.open(DEVICES_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as f:
                 json.dump(data, f, indent=2)
             os.chmod(DEVICES_FILE, 0o600)
             return True, "Renamed"

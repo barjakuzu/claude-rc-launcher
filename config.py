@@ -2,7 +2,7 @@
 
 import os
 
-VERSION = "1.8.9"
+VERSION = "1.8.10"
 
 # Single home directory for all claude-rc data
 RC_HOME = os.environ.get("RC_HOME", os.path.expanduser("~/.claude-rc"))
@@ -47,5 +47,11 @@ BROWSE_ROOTS = [
     if p.strip()
 ]
 
-# Ensure directories exist
+# Ensure directories exist. RC_HOME holds credentials (env, devices.json,
+# auth tokens) — keep it out of reach of other local users.
+os.makedirs(RC_HOME, mode=0o700, exist_ok=True)
+try:
+    os.chmod(RC_HOME, 0o700)
+except OSError:
+    pass
 os.makedirs(os.path.join(RC_HOME, "logs"), exist_ok=True)

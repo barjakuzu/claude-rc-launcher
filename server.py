@@ -78,9 +78,12 @@ def _load_auth_tokens():
 
 def _save_auth_tokens():
     try:
-        with open(_AUTH_TOKENS_FILE, "w") as f:
+        # Create with 0600 atomically — never expose tokens via a
+        # default-umask window between open() and chmod().
+        fd = os.open(_AUTH_TOKENS_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
             json.dump(_auth_tokens, f)
-        os.chmod(_AUTH_TOKENS_FILE, 0o600)
+        os.chmod(_AUTH_TOKENS_FILE, 0o600)  # correct pre-existing files too
     except OSError:
         pass
 
