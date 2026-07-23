@@ -5,6 +5,7 @@ import '@xterm/xterm/css/xterm.css';
 import { RT, FONT_MONO, FONT_SANS, Z } from '../tokens';
 import { Icons } from './primitives';
 import { api } from '../api';
+import { TranscriptView } from './TranscriptView';
 
 interface PreviewModalProps {
   deviceId: string;
@@ -35,6 +36,7 @@ export function PreviewModal({ deviceId, name, onClose }: PreviewModalProps) {
   const fitRef = useRef<FitAddon | null>(null);
   const mounted = useRef(true);
   const [autoRefresh, setAutoRefresh] = useState(true);
+  const [showHistory, setShowHistory] = useState(false);
   const [status, setStatus] = useState<string>('connecting…');
   const lastContentRef = useRef<string>('');
   // Stable viewer id — the server sizes the tmux window to the minimum
@@ -379,6 +381,22 @@ export function PreviewModal({ deviceId, name, onClose }: PreviewModalProps) {
             letterSpacing: '.06em', textTransform: 'uppercase',
           }}>{status}</div>
           <div style={{ flex: 1 }} />
+          {/* History ↔ Live toggle — history is DOM-scrolled (real scrollbar) */}
+          <button
+            onClick={() => setShowHistory((v) => !v)}
+            style={{
+              background: showHistory ? RT.text : RT.panel,
+              color: showHistory ? RT.bg : RT.textDim,
+              border: `1px solid ${showHistory ? RT.text : RT.border}`,
+              borderRadius: 6, padding: '5px 10px',
+              fontFamily: FONT_MONO, fontSize: 10.5, fontWeight: 600,
+              letterSpacing: '.05em', cursor: 'pointer',
+              display: 'inline-flex', alignItems: 'center', gap: 5,
+            }}
+          >
+            <Icons.clock size={11} stroke={showHistory ? RT.bg : RT.textDim} />
+            {showHistory ? 'Back to live' : 'History'}
+          </button>
           <label style={{
             display: 'inline-flex', alignItems: 'center', gap: 6,
             fontSize: 11, color: RT.textDim, fontFamily: FONT_MONO, cursor: 'pointer',
@@ -404,7 +422,8 @@ export function PreviewModal({ deviceId, name, onClose }: PreviewModalProps) {
               touchAction: 'pan-y',
             }}
           />
-          {status === 'paused (scrolled)' && (
+          {showHistory && <TranscriptView deviceId={deviceId} name={name} />}
+          {!showHistory && status === 'paused (scrolled)' && (
             <button
               onClick={() => { scrollIntentRef.current = 0; termRef.current?.scrollToBottom(); }}
               style={{

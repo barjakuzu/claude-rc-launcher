@@ -272,6 +272,8 @@ def _send_rename(session_name, display_name):
         pane = _capture_pane_text(session_name) or ""
         if "renamed to" in pane.lower():
             print(f"  {session_name}: renamed to '{display_name}'")
+            subprocess.run(["tmux", "set-environment", "-t", session_name,
+                            "RC_TITLE", display_name], capture_output=True)
             return True
         # Command still sitting in the input box → Enter got swallowed
         if "/rename" in pane:
@@ -570,6 +572,16 @@ def _find_session_uuid(tmux_name, workdir):
     if not os.path.isdir(claude_projects):
         return None
 
+    # Titles that may appear as customTitle: the stored display title
+    # (set by _send_rename), the tmux name (pre-1.8 sessions), and the
+    # prefix-stripped tmux name (restart/resume renames).
+    titles = {tmux_name}
+    if tmux_name.startswith(SESSION_PREFIX):
+        titles.add(tmux_name[len(SESSION_PREFIX):])
+    stored_title = get_session_env(tmux_name, "RC_TITLE")
+    if stored_title:
+        titles.add(stored_title)
+
     # Build ordered list of project dirs — prefer ones matching the workdir
     all_proj_dirs = sorted(glob.glob(os.path.join(claude_projects, "*")),
                            key=os.path.getmtime, reverse=True)
@@ -597,7 +609,7 @@ def _find_session_uuid(tmux_name, workdir):
                 for line in head_lines:
                     try:
                         d = json.loads(line.strip())
-                        if d.get("customTitle") == tmux_name:
+                        if d.get("customTitle") in titles:
                             return os.path.splitext(os.path.basename(f))[0]
                     except (json.JSONDecodeError, KeyError):
                         continue
@@ -613,13 +625,71 @@ def _find_session_uuid(tmux_name, workdir):
                 for line in tail_lines:
                     try:
                         d = json.loads(line.strip())
-                        if d.get("customTitle") == tmux_name:
+                        if d.get("customTitle") in titles:
                             return os.path.splitext(os.path.basename(f))[0]
                     except (json.JSONDecodeError, KeyError):
                         continue
             except Exception:
                 continue
     return None
+
+
+def get_transcript(tmux_name, limit=300):
+    """Parse the session's JSONL transcript into displayable messages.
+
+    Claude Code runs in the alternate screen with no tmux history, so the
+    browser can't scroll the terminal. The full conversation lives in
+    ~/.claude/projects/<dir>/<uuid>.jsonl — serve it for a natively
+    scrollable history view. Returns None if the session can't be mapped.
+    """
+    workdir = get_session_env(tmux_name, "RC_WORKDIR") or ""
+    uuid = _find_session_uuid(tmux_name, workdir)
+    if not uuid:
+        return None
+    paths = glob.glob(os.path.expanduser(
+        os.path.join("~/.claude/projects", "*", uuid + ".jsonl")))
+    if not paths:
+        return None
+    messages = []
+    try:
+        with open(paths[0]) as fh:
+            for line in fh:
+                try:
+                    d = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if d.get("type") not in ("user", "assistant") or d.get("isMeta"):
+                    continue
+                m = d.get("message") or {}
+                role = m.get("role") or d.get("type")
+                content = m.get("content")
+                texts, tools = [], []
+                if isinstance(content, str):
+                    texts.append(content)
+                elif isinstance(content, list):
+                    for b in content:
+                        if not isinstance(b, dict):
+                            continue
+                        bt = b.get("type")
+                        if bt == "text" and b.get("text"):
+                            texts.append(b["text"])
+                        elif bt == "tool_use":
+                            try:
+                                arg = json.dumps(b.get("input", {}), ensure_ascii=False)
+                            except (TypeError, ValueError):
+                                arg = ""
+                            tools.append(f"{b.get('name', 'tool')} {arg[:160]}")
+                if not texts and not tools:
+                    continue
+                messages.append({
+                    "role": role,
+                    "text": "\n\n".join(texts),
+                    "tools": tools,
+                    "ts": d.get("timestamp"),
+                })
+    except OSError:
+        return None
+    return {"sessionId": uuid, "messages": messages[-limit:]}
 
 
 def restart_session(name, mode=None, workdir=None, model=None, sandbox=False,

@@ -23,7 +23,7 @@ from config import (
 from sessions import (
     list_rc_sessions, session_exists, setup_session, stop_session,
     restart_session, list_resumable_sessions, resume_session,
-    get_all_session_errors, unstick_session,
+    get_all_session_errors, unstick_session, get_transcript,
 )
 from tunnel import (
     cloudflared_available, start_tunnel, stop_tunnel, get_tunnel_status,
@@ -566,6 +566,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if errors:
                 resp["errors"] = errors
             self._json(resp)
+
+        elif path.startswith("/sessions/") and path.endswith("/transcript"):
+            name = path[len("/sessions/"):-len("/transcript")]
+            if not name or ".." in name or "/" in name:
+                self.send_error(404)
+                return
+            if not session_exists(name):
+                self._json({"ok": False, "message": "Session not found"}, 404)
+                return
+            data = get_transcript(name)
+            if data is None:
+                self._json({"ok": False, "message": "No transcript found for this session"}, 404)
+                return
+            self._json({"ok": True, **data})
 
         elif path.split('?')[0].startswith("/sessions/") and path.split('?')[0].endswith("/preview"):
             clean = path.split('?')[0]
