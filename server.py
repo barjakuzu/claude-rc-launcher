@@ -36,6 +36,7 @@ from devices import (
     get_device, list_devices_public, load_devices, get_local_name, rename_device,
 )
 import overview
+import ws as ws_terminal
 
 
 def _parse_projects():
@@ -549,6 +550,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             device = get_device(dev_id)
             if device is None:
                 return self._json({"error": "unknown device"}, 404)
+            # WebSocket upgrades can't go through urllib — raw TCP tunnel.
+            if (self.headers.get("Upgrade", "").lower() == "websocket"
+                    and self.path.split('?')[0].endswith("/ws")):
+                self.close_connection = True
+                return ws_terminal.tunnel_to_device(self, device)
             return self._proxy_to_device(device)
 
         # Serve static files (handles both /static/* and /rc/static/*)
@@ -576,6 +582,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if errors:
                 resp["errors"] = errors
             self._json(resp)
+
+        elif path.split('?')[0].startswith("/sessions/") and path.split('?')[0].endswith("/ws"):
+            # Live terminal WebSocket (see ws.py). Takes over the socket.
+            clean = path.split('?')[0]
+            name = clean[len("/sessions/"):-len("/ws")]
+            if not name or ".." in name or "/" in name:
+                self.send_error(404)
+                return
+            if not session_exists(name):
+                self.send_error(404)
+                return
+            if self.headers.get("Upgrade", "").lower() != "websocket":
+                self._json({"ok": False, "message": "WebSocket upgrade required"}, 400)
+                return
+            self.close_connection = True
+            ws_terminal.serve_terminal(self, name)
 
         elif path.startswith("/sessions/") and path.endswith("/transcript"):
             name = path[len("/sessions/"):-len("/transcript")]
