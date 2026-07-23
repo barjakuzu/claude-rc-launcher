@@ -181,7 +181,10 @@ export function PreviewModal({ deviceId, name, onClose }: PreviewModalProps) {
           if (atBottom) {
             lastContentRef.current = output;
             term.reset();
-            term.write(output);
+            // capture-pane terminates the last row with \n — writing it as-is
+            // creates a phantom empty line that shifts the screen (and our
+            // cursor placement) up by one row.
+            term.write(output.endsWith('\n') ? output.slice(0, -1) : output);
             term.scrollToBottom();
             // Place the terminal cursor where tmux's real cursor is —
             // otherwise it just trails the last written character.
