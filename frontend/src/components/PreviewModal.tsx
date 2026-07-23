@@ -171,6 +171,7 @@ export function PreviewModal({ deviceId, name, onClose }: PreviewModalProps) {
         const data = await api.preview(deviceId, name);
         if (cancelled || !mounted.current) return;
         const output: string = data?.output ?? '';
+        const cursor = data?.cursor as { x: number; y: number; visible: boolean } | null;
         const term = termRef.current;
         if (output !== lastContentRef.current && term) {
           // Pause re-rendering while the user has scrolled back, so the view
@@ -182,6 +183,13 @@ export function PreviewModal({ deviceId, name, onClose }: PreviewModalProps) {
             term.reset();
             term.write(output);
             term.scrollToBottom();
+            // Place the terminal cursor where tmux's real cursor is —
+            // otherwise it just trails the last written character.
+            if (cursor?.visible) {
+              term.write(`\x1b[${cursor.y + 1};${cursor.x + 1}H\x1b[?25h`);
+            } else {
+              term.write('\x1b[?25l');
+            }
             if (mounted.current) setStatus('live');
           } else {
             if (mounted.current) setStatus('paused (scrolled)');

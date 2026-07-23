@@ -124,13 +124,19 @@ export function SessionRow({ s, hue, deviceId, mobile = false, onChanged, onPrev
   };
 
   return (
-    <div style={{
-      background: RT.card, border: `1px solid ${RT.border}`,
-      borderRadius: 10, padding: mobile ? 14 : '14px 18px',
-      display: 'grid',
-      gridTemplateColumns: mobile ? '1fr' : 'minmax(220px, 1.4fr) minmax(180px, 1fr) auto',
-      gap: mobile ? 12 : 18, alignItems: 'center',
-    }}>
+    <div
+      onClick={() => onPreview(s.name)}
+      onMouseEnter={(e) => { e.currentTarget.style.borderColor = RT.borderHi; }}
+      onMouseLeave={(e) => { e.currentTarget.style.borderColor = RT.border; }}
+      title="Open terminal"
+      style={{
+        background: RT.card, border: `1px solid ${RT.border}`,
+        borderRadius: 10, padding: mobile ? 14 : '14px 18px',
+        display: 'grid',
+        gridTemplateColumns: mobile ? '1fr' : 'minmax(220px, 1.4fr) minmax(180px, 1fr) auto',
+        gap: mobile ? 12 : 18, alignItems: 'center',
+        cursor: 'pointer', transition: 'border-color .12s',
+      }}>
       {/* Col 1: Name + dir + sessionId */}
       <div style={{ minWidth: 0 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 5 }}>
@@ -167,8 +173,12 @@ export function SessionRow({ s, hue, deviceId, mobile = false, onChanged, onPrev
         <CapBar pct={pct} height={4} bg="rgba(255,255,255,.04)" color={hueColor} />
       </div>
 
-      {/* Col 3: Actions — consolidated to 3 buttons (Restart / Stop / More) */}
-      <div style={{ display: 'flex', gap: 6, justifyContent: mobile ? 'flex-end' : 'flex-end' }}>
+      {/* Col 3: Actions — consolidated to 3 buttons (Restart / Stop / More).
+          stopPropagation so buttons don't also open the terminal. */}
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{ display: 'flex', gap: 6, justifyContent: mobile ? 'flex-end' : 'flex-end' }}
+      >
         <V5IconButton
           label="Restart session"
           accent={RT.green}

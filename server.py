@@ -486,7 +486,21 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if result.returncode != 0:
                 self._json({"error": "Session not found"}, 404)
                 return
-            self._json({"name": name, "output": result.stdout, "status": "running"})
+            # Real cursor position (relative to the visible pane) so the
+            # browser terminal can place its cursor where tmux's actually is.
+            cursor = None
+            cur = subprocess.run(
+                ["tmux", "display-message", "-p", "-t", name,
+                 "#{cursor_x} #{cursor_y} #{cursor_flag}"],
+                capture_output=True, text=True,
+            )
+            if cur.returncode == 0:
+                parts = cur.stdout.split()
+                if len(parts) == 3 and all(p.isdigit() for p in parts):
+                    cursor = {"x": int(parts[0]), "y": int(parts[1]),
+                              "visible": parts[2] == "1"}
+            self._json({"name": name, "output": result.stdout,
+                        "cursor": cursor, "status": "running"})
 
         elif path == "/devices":
             self._json({"devices": [{"id": "local", "name": get_local_name()}]
