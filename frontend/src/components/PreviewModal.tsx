@@ -43,6 +43,14 @@ export function PreviewModal({ deviceId, name, onClose }: PreviewModalProps) {
     typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : String(Math.random()).slice(2),
   );
   const sizeRef = useRef<{ cols: number; rows: number }>({ cols: 0, rows: 0 });
+  // Set when the user types here; the next poll reports active=1 so this
+  // viewer's size wins (most-recently-active viewer controls the window).
+  const activityRef = useRef(false);
+  // Timestamp of the last wheel/touch scroll gesture. While Claude streams,
+  // output changes every poll and the re-render snaps to the bottom — this
+  // guard pauses rendering the moment the user starts scrolling so they can
+  // actually reach old messages.
+  const scrollIntentRef = useRef(0);
 
   useEffect(() => () => { mounted.current = false; }, []);
 
@@ -90,6 +98,7 @@ export function PreviewModal({ deviceId, name, onClose }: PreviewModalProps) {
     // Forward keystrokes (printable text) to the session.
     term.onData((data) => {
       if (!mounted.current) return;
+      activityRef.current = true;
       api.sendKeys(deviceId, name, { keys: data }).catch(() => { /* ignore */ });
     });
 
@@ -99,11 +108,13 @@ export function PreviewModal({ deviceId, name, onClose }: PreviewModalProps) {
       const key = ev.key;
       // Ctrl combinations: send as e.g. "C-c", "C-d", "C-l".
       if (ev.ctrlKey && key.length === 1 && /[a-zA-Z]/.test(key)) {
+        activityRef.current = true;
         api.sendKeys(deviceId, name, { special: [`C-${key.toLowerCase()}`] }).catch(() => {});
         return false; // prevent xterm from also sending the char
       }
       const mapped = SPECIAL_KEY_MAP[key];
       if (mapped) {
+        activityRef.current = true;
         api.sendKeys(deviceId, name, { special: [mapped] }).catch(() => {});
         return false; // we handled it
       }
@@ -131,8 +142,12 @@ export function PreviewModal({ deviceId, name, onClose }: PreviewModalProps) {
       lastY = e.touches[0].clientY;
       accumulator = 0;
     };
+    const onWheel = () => { scrollIntentRef.current = Date.now(); };
+    el.addEventListener('wheel', onWheel, { passive: true });
+
     const onTouchMove = (e: TouchEvent) => {
       if (!active || e.touches.length !== 1 || !termRef.current) return;
+      scrollIntentRef.current = Date.now();
       const y = e.touches[0].clientY;
       const dy = lastY - y;        // positive: finger moved up → scroll down
       lastY = y;
@@ -155,6 +170,7 @@ export function PreviewModal({ deviceId, name, onClose }: PreviewModalProps) {
     return () => {
       window.removeEventListener('resize', onResize);
       clearTimeout(resizeTimer);
+      el.removeEventListener('wheel', onWheel);
       el.removeEventListener('touchstart', onTouchStart);
       el.removeEventListener('touchmove',  onTouchMove);
       el.removeEventListener('touchend',   onTouchEnd);
@@ -175,9 +191,13 @@ export function PreviewModal({ deviceId, name, onClose }: PreviewModalProps) {
     const fetchOnce = async () => {
       try {
         const { cols, rows } = sizeRef.current;
+        const active = activityRef.current;
+        activityRef.current = false;
         const data = await api.preview(
           deviceId, name,
-          cols >= 40 && rows >= 10 ? { viewer: viewerIdRef.current, cols, rows } : undefined,
+          cols >= 40 && rows >= 10
+            ? { viewer: viewerIdRef.current, cols, rows, active }
+            : undefined,
         );
         if (cancelled || !mounted.current) return;
         const output: string = data?.output ?? '';
@@ -188,7 +208,8 @@ export function PreviewModal({ deviceId, name, onClose }: PreviewModalProps) {
           // doesn't snap to the bottom every poll. Once they scroll back down,
           // the next poll re-renders normally.
           const atBottom = term.buffer.active.viewportY >= term.buffer.active.length - term.rows;
-          if (atBottom) {
+          const userScrolling = Date.now() - scrollIntentRef.current < 1500;
+          if (atBottom && !userScrolling) {
             lastContentRef.current = output;
             term.reset();
             // capture-pane terminates the last row with \n — writing it as-is
@@ -229,10 +250,44 @@ export function PreviewModal({ deviceId, name, onClose }: PreviewModalProps) {
   // Fullscreen on small screens — every row of terminal space counts.
   const fullscreen = typeof window !== 'undefined' && window.innerWidth < 700;
 
+  // When the on-screen keyboard opens, the visual viewport shrinks but the
+  // layout viewport doesn't — without this the input line hides behind the
+  // keyboard. Track visualViewport height and refit the terminal to it.
+  const [vvH, setVvH] = useState<number | null>(null);
+  useEffect(() => {
+    if (!fullscreen || !window.visualViewport) return;
+    const vv = window.visualViewport;
+    let t: ReturnType<typeof setTimeout> | undefined;
+    const upd = () => {
+      setVvH(Math.round(vv.height));
+      window.scrollTo(0, 0);
+      clearTimeout(t);
+      t = setTimeout(() => {
+        const term = termRef.current, fit = fitRef.current;
+        if (term && fit) {
+          try {
+            fit.fit();
+            if (term.cols >= 40 && term.rows >= 10) {
+              sizeRef.current = { cols: term.cols, rows: term.rows };
+            }
+          } catch { /* ignore */ }
+        }
+      }, 80);
+    };
+    upd();
+    vv.addEventListener('resize', upd);
+    vv.addEventListener('scroll', upd);
+    return () => {
+      clearTimeout(t);
+      vv.removeEventListener('resize', upd);
+      vv.removeEventListener('scroll', upd);
+    };
+  }, [fullscreen]);
+
   return (
     <div style={{
       position: 'fixed', inset: 0, background: 'rgba(0,0,0,.55)',
-      display: 'flex', alignItems: 'center', justifyContent: 'center',
+      display: 'flex', alignItems: fullscreen ? 'flex-start' : 'center', justifyContent: 'center',
       zIndex: Z.modal, padding: fullscreen ? 0 : 16,
       fontFamily: FONT_SANS,
     }} onClick={onClose}>
@@ -243,7 +298,7 @@ export function PreviewModal({ deviceId, name, onClose }: PreviewModalProps) {
           border: fullscreen ? 'none' : `1px solid ${RT.borderHi}`,
           borderRadius: fullscreen ? 0 : 12,
           width: '100%', maxWidth: fullscreen ? '100%' : 1000,
-          height: fullscreen ? '100dvh' : '85vh',
+          height: fullscreen ? (vvH ? `${vvH}px` : '100dvh') : '85vh',
           display: 'flex', flexDirection: 'column', overflow: 'hidden',
           boxShadow: '0 24px 64px rgba(0,0,0,.5)',
         }}
@@ -286,7 +341,7 @@ export function PreviewModal({ deviceId, name, onClose }: PreviewModalProps) {
           />
           {status === 'paused (scrolled)' && (
             <button
-              onClick={() => { termRef.current?.scrollToBottom(); }}
+              onClick={() => { scrollIntentRef.current = 0; termRef.current?.scrollToBottom(); }}
               style={{
                 position: 'absolute', right: 14, bottom: 14, zIndex: Z.raised,
                 background: RT.green, color: RT.bg,
@@ -303,7 +358,7 @@ export function PreviewModal({ deviceId, name, onClose }: PreviewModalProps) {
             </button>
           )}
         </div>
-        <KeyBar deviceId={deviceId} name={name} />
+        <KeyBar deviceId={deviceId} name={name} onActivity={() => { activityRef.current = true; }} />
         <div style={{
           flex: 'none', padding: '6px 14px', borderTop: `1px solid ${RT.border}`,
           background: RT.bgRaised, display: 'flex', alignItems: 'center', gap: 10,
@@ -320,8 +375,9 @@ export function PreviewModal({ deviceId, name, onClose }: PreviewModalProps) {
 }
 
 // On-screen key bar for mobile — taps map to tmux send-keys specials.
-function KeyBar({ deviceId, name }: { deviceId: string; name: string }) {
+function KeyBar({ deviceId, name, onActivity }: { deviceId: string; name: string; onActivity?: () => void }) {
   const send = (special: string) => {
+    onActivity?.();
     api.sendKeys(deviceId, name, { special: [special] }).catch(() => { /* ignore */ });
   };
   const keys: { label: string; special: string; flex?: number; accent?: string }[] = [

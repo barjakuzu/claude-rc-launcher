@@ -101,10 +101,13 @@ def _auth_token_valid(token):
         return False
     return True
 
-# Live preview viewers per session: {session: {viewer_id: (cols, rows, ts)}}.
-# Each /preview poll refreshes its entry; the tmux window is sized to the
-# MINIMUM cols/rows across live viewers (like native tmux multi-client), and
-# restored to 200×50 when the last viewer leaves.
+# Live preview viewers per session:
+# {session: {viewer_id: (cols, rows, ts_seen, ts_active)}}.
+# Each /preview poll refreshes ts_seen; opening the preview or typing bumps
+# ts_active. The window takes the size of the MOST RECENTLY ACTIVE live
+# viewer (tmux 'window-size latest' behavior) — a phone glancing at a
+# session doesn't shrink the desktop for good, and whoever interacts last
+# gets a native layout. Restored to 200×50 when the last viewer leaves.
 _preview_viewers = {}
 _preview_applied = {}   # {session: (cols, rows)} last size we set
 _PREVIEW_VIEWER_TTL = 6  # seconds without a poll → viewer considered gone
@@ -119,8 +122,7 @@ def _apply_preview_size(name):
                 if now - s[2] < _PREVIEW_VIEWER_TTL}
         if live:
             _preview_viewers[name] = live
-            cols = min(s[0] for s in live.values())
-            rows = min(s[1] for s in live.values())
+            cols, rows, _, _ = max(live.values(), key=lambda s: s[3])
         else:
             _preview_viewers.pop(name, None)
             cols, rows = 200, 50
@@ -133,9 +135,11 @@ def _apply_preview_size(name):
     )
 
 
-def _preview_viewer_seen(name, viewer, cols, rows):
+def _preview_viewer_seen(name, viewer, cols, rows, active=False):
     with _preview_lock:
-        _preview_viewers.setdefault(name, {})[viewer] = (cols, rows, time.time())
+        prev = _preview_viewers.get(name, {}).get(viewer)
+        ts_active = time.time() if (active or prev is None) else prev[3]
+        _preview_viewers.setdefault(name, {})[viewer] = (cols, rows, time.time(), ts_active)
     _apply_preview_size(name)
 
 
@@ -578,7 +582,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             except ValueError:
                 v_cols = v_rows = 0
             if viewer and 40 <= v_cols <= 500 and 10 <= v_rows <= 200:
-                _preview_viewer_seen(name, viewer, v_cols, v_rows)
+                active = qs.get("active", ["0"])[0] == "1"
+                _preview_viewer_seen(name, viewer, v_cols, v_rows, active)
             result = subprocess.run(
                 ["tmux", "capture-pane", "-t", name, "-e", "-p", "-S", "-2000"],
                 capture_output=True, text=True,
