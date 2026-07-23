@@ -216,18 +216,24 @@ export function PreviewModal({ deviceId, name, onClose }: PreviewModalProps) {
     return () => document.removeEventListener('keydown', onKey);
   }, [onClose]);
 
+  // Fullscreen on small screens — every row of terminal space counts.
+  const fullscreen = typeof window !== 'undefined' && window.innerWidth < 700;
+
   return (
     <div style={{
       position: 'fixed', inset: 0, background: 'rgba(0,0,0,.55)',
       display: 'flex', alignItems: 'center', justifyContent: 'center',
-      zIndex: Z.modal, padding: 16,
+      zIndex: Z.modal, padding: fullscreen ? 0 : 16,
       fontFamily: FONT_SANS,
     }} onClick={onClose}>
       <div
         onClick={(e) => e.stopPropagation()}
         style={{
-          background: RT.panel, border: `1px solid ${RT.borderHi}`,
-          borderRadius: 12, width: '100%', maxWidth: 1000, height: '85vh',
+          background: RT.panel,
+          border: fullscreen ? 'none' : `1px solid ${RT.borderHi}`,
+          borderRadius: fullscreen ? 0 : 12,
+          width: '100%', maxWidth: fullscreen ? '100%' : 1000,
+          height: fullscreen ? '100dvh' : '85vh',
           display: 'flex', flexDirection: 'column', overflow: 'hidden',
           boxShadow: '0 24px 64px rgba(0,0,0,.5)',
         }}

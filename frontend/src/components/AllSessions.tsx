@@ -54,18 +54,23 @@ export function AllSessions({ cards, onOpenDevice }: AllSessionsProps) {
           const chipColor = tintFor(hue, 0.70, 0.10);
           const key = d.id + (s.sessionId ?? s.name);
           return (
-            <div key={key} style={{
-              background: RT.card, border: `1px solid ${RT.border}`,
-              borderRadius: 10, padding: 12,
-              display: 'flex', flexDirection: 'column', gap: 8,
-            }}>
+            <div
+              key={key}
+              onClick={() => setPreview({ deviceId: d.id, name: s.name })}
+              title="Open terminal"
+              style={{
+                background: RT.card, border: `1px solid ${RT.border}`,
+                borderRadius: 10, padding: 12,
+                display: 'flex', flexDirection: 'column', gap: 8,
+                cursor: 'pointer',
+              }}>
               {/* Name + status */}
               <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                 <div style={{ flex: 1, fontSize: 14, fontWeight: 600, letterSpacing: '-.005em', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{s.name}</div>
                 <StatusPill status={s.status ?? 'idle'} />
               </div>
               {/* Device chip */}
-              <button onClick={() => onOpenDevice(d.id)} style={{
+              <button onClick={(e) => { e.stopPropagation(); onOpenDevice(d.id); }} style={{
                 background: 'transparent', border: 'none', cursor: 'pointer', padding: 0,
                 display: 'inline-flex', alignItems: 'center', gap: 6,
                 color: chipColor, fontFamily: FONT_MONO, fontSize: 10.5, fontWeight: 500,
@@ -86,8 +91,9 @@ export function AllSessions({ cards, onOpenDevice }: AllSessionsProps) {
                   </>
                 )}
               </div>
-              {/* Actions: Preview (terminal) | Restart | More (⋯) | Stop */}
-              <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+              {/* Actions: Preview (terminal) | Restart | More (⋯) | Stop.
+                  stopPropagation so buttons don't also open the terminal. */}
+              <div onClick={(e) => e.stopPropagation()} style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
                 <button
                   style={mobileActionBtn()}
                   onClick={() => setPreview({ deviceId: d.id, name: s.name })}
