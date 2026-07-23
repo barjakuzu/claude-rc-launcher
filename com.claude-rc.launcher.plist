@@ -11,6 +11,9 @@
         <string>__BIN_LINK__</string>
     </array>
 
+    <key>AbandonProcessGroup</key>
+    <true/>
+
     <key>RunAtLoad</key>
     <true/>
 

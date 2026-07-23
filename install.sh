@@ -341,6 +341,7 @@ After=network.target
 
 [Service]
 Type=simple
+KillMode=process
 EnvironmentFile=%h/.claude-rc/env
 ExecStart=/usr/bin/env python3 %h/.claude-rc/app/app.py
 Restart=on-failure
@@ -372,6 +373,9 @@ elif [ "$OS" = "Darwin" ]; then
     <array>
         <string>${BIN_LINK}</string>
     </array>
+
+    <key>AbandonProcessGroup</key>
+    <true/>
 
     <key>RunAtLoad</key>
     <true/>

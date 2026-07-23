@@ -4,6 +4,9 @@ After=network.target
 
 [Service]
 Type=simple
+# Only kill the launcher itself on stop/restart — the tmux server (and every
+# Claude session in it) lives in the same cgroup and must survive updates.
+KillMode=process
 EnvironmentFile=%h/.claude-rc/env
 ExecStart=/usr/bin/env python3 %h/.claude-rc/app/app.py
 Restart=on-failure
