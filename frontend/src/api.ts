@@ -14,7 +14,10 @@ export const api = {
   stats: (device: string) => req('GET', '/stats', device),
   projects: (device: string) => req('GET', '/projects', device),
   browse: (device: string, path: string) => req('GET', '/browse?path=' + encodeURIComponent(path), device),
-  preview: (device: string, name: string) => req('GET', `/sessions/${encodeURIComponent(name)}/preview`, device),
+  preview: (device: string, name: string, q?: { viewer: string; cols: number; rows: number }) =>
+    req('GET', `/sessions/${encodeURIComponent(name)}/preview${q ? `?viewer=${encodeURIComponent(q.viewer)}&cols=${q.cols}&rows=${q.rows}` : ''}`, device),
+  previewBye: (device: string, name: string, viewer: string) =>
+    req('POST', `/sessions/${encodeURIComponent(name)}/preview-bye`, device, { viewer }),
   sendKeys: (device: string, name: string, body: { keys?: string; special?: string[] }) =>
     req('POST', `/sessions/${encodeURIComponent(name)}/keys`, device, body),
   resize: (device: string, name: string, cols: number, rows: number) =>

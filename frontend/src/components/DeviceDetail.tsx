@@ -69,7 +69,7 @@ export function DeviceDetail({ device, cards, tab, setTab, onClose, layout }: De
       {/* Body */}
       <div style={{
         flex: 1, overflow: 'auto',
-        padding: mobile ? 12 : '16px 20px',
+        padding: mobile ? '12px 12px 32px' : '16px 20px',
         background: RT.bg,
       }}>
         {tab === 'running' && (

@@ -56,7 +56,91 @@ def _parse_projects():
     return projects
 
 
-_auth_tokens = set()  # valid session cookie tokens
+# Login tokens persist across launcher restarts (frequent self-updates used
+# to log every browser out). {token: expiry_epoch}, chmod 600.
+from config import RC_HOME as _RC_HOME
+_AUTH_TOKENS_FILE = os.path.join(_RC_HOME, "auth-tokens.json")
+_AUTH_TOKEN_TTL = 30 * 86400  # 30 days
+
+
+def _load_auth_tokens():
+    try:
+        with open(_AUTH_TOKENS_FILE) as f:
+            data = json.load(f)
+        now = time.time()
+        if isinstance(data, dict):
+            return {t: exp for t, exp in data.items()
+                    if isinstance(exp, (int, float)) and exp > now}
+    except (FileNotFoundError, ValueError, OSError):
+        pass
+    return {}
+
+
+def _save_auth_tokens():
+    try:
+        with open(_AUTH_TOKENS_FILE, "w") as f:
+            json.dump(_auth_tokens, f)
+        os.chmod(_AUTH_TOKENS_FILE, 0o600)
+    except OSError:
+        pass
+
+
+_auth_tokens = _load_auth_tokens()  # {token: expiry_epoch}
+
+
+def _auth_token_valid(token):
+    exp = _auth_tokens.get(token)
+    if exp is None:
+        return False
+    if exp < time.time():
+        _auth_tokens.pop(token, None)
+        _save_auth_tokens()
+        return False
+    return True
+
+# Live preview viewers per session: {session: {viewer_id: (cols, rows, ts)}}.
+# Each /preview poll refreshes its entry; the tmux window is sized to the
+# MINIMUM cols/rows across live viewers (like native tmux multi-client), and
+# restored to 200×50 when the last viewer leaves.
+_preview_viewers = {}
+_preview_applied = {}   # {session: (cols, rows)} last size we set
+_PREVIEW_VIEWER_TTL = 6  # seconds without a poll → viewer considered gone
+_preview_lock = threading.Lock()
+
+
+def _apply_preview_size(name):
+    """Recompute and apply the effective window size for a session."""
+    with _preview_lock:
+        now = time.time()
+        live = {v: s for v, s in _preview_viewers.get(name, {}).items()
+                if now - s[2] < _PREVIEW_VIEWER_TTL}
+        if live:
+            _preview_viewers[name] = live
+            cols = min(s[0] for s in live.values())
+            rows = min(s[1] for s in live.values())
+        else:
+            _preview_viewers.pop(name, None)
+            cols, rows = 200, 50
+        if _preview_applied.get(name) == (cols, rows):
+            return
+        _preview_applied[name] = (cols, rows)
+    subprocess.run(
+        ["tmux", "resize-window", "-t", name, "-x", str(cols), "-y", str(rows)],
+        capture_output=True, timeout=5,
+    )
+
+
+def _preview_viewer_seen(name, viewer, cols, rows):
+    with _preview_lock:
+        _preview_viewers.setdefault(name, {})[viewer] = (cols, rows, time.time())
+    _apply_preview_size(name)
+
+
+def _preview_viewer_bye(name, viewer):
+    with _preview_lock:
+        _preview_viewers.get(name, {}).pop(viewer, None)
+    _apply_preview_size(name)
+
 
 # Rate limiting for login attempts: {ip: [(timestamp, ...)] }
 _login_attempts = {}
@@ -94,7 +178,7 @@ def _check_auth(handler):
     if cookie_header:
         cookie = SimpleCookie()
         cookie.load(cookie_header)
-        if "rc_session" in cookie and cookie["rc_session"].value in _auth_tokens:
+        if "rc_session" in cookie and _auth_token_valid(cookie["rc_session"].value):
             return True
     # Fall back to Basic Auth (for curl/API)
     auth_header = handler.headers.get("Authorization", "")
@@ -430,7 +514,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 cookie = SimpleCookie()
                 cookie.load(cookie_header)
                 if "rc_session" in cookie:
-                    _auth_tokens.discard(cookie["rc_session"].value)
+                    _auth_tokens.pop(cookie["rc_session"].value, None)
+                    _save_auth_tokens()
             self.send_response(302)
             self.send_header("Location", "/login")
             self.send_header("Set-Cookie", "rc_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax")
@@ -474,11 +559,23 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 resp["errors"] = errors
             self._json(resp)
 
-        elif path.startswith("/sessions/") and path.endswith("/preview"):
-            name = path[len("/sessions/"):-len("/preview")]
+        elif path.split('?')[0].startswith("/sessions/") and path.split('?')[0].endswith("/preview"):
+            clean = path.split('?')[0]
+            name = clean[len("/sessions/"):-len("/preview")]
             if not name or ".." in name:
                 self.send_error(404)
                 return
+            # Viewer size negotiation: each poll reports its terminal size;
+            # the window is sized to the min across live viewers.
+            qs = parse_qs(urlparse(self.path).query)
+            viewer = qs.get("viewer", [""])[0]
+            try:
+                v_cols = int(qs.get("cols", ["0"])[0])
+                v_rows = int(qs.get("rows", ["0"])[0])
+            except ValueError:
+                v_cols = v_rows = 0
+            if viewer and 40 <= v_cols <= 500 and 10 <= v_rows <= 200:
+                _preview_viewer_seen(name, viewer, v_cols, v_rows)
             result = subprocess.run(
                 ["tmux", "capture-pane", "-t", name, "-e", "-p", "-S", "-2000"],
                 capture_output=True, text=True,
@@ -707,12 +804,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     hmac.compare_digest(user, AUTH_USER) and
                     hmac.compare_digest(password, AUTH_PASS)):
                 token = secrets.token_hex(32)
-                _auth_tokens.add(token)
+                _auth_tokens[token] = time.time() + _AUTH_TOKEN_TTL
+                _save_auth_tokens()
                 self.send_response(302)
                 self.send_header("Location", "/")
                 secure = "Secure; " if self.headers.get("X-Forwarded-Proto") == "https" else ""
                 self.send_header("Set-Cookie",
-                    f"rc_session={token}; Path=/; HttpOnly; SameSite=Lax; {secure}Max-Age=604800")
+                    f"rc_session={token}; Path=/; HttpOnly; SameSite=Lax; {secure}Max-Age=2592000")
                 # Clear CSRF cookie
                 self.send_header("Set-Cookie", "csrf=; Path=/; Max-Age=0; HttpOnly")
                 self.end_headers()
@@ -855,6 +953,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
             resume = body.get("resume", True)
             ok, msg = restart_session(name, resume=resume)
             self._json({"ok": ok, "message": msg, "name": name})
+
+        elif path.startswith("/sessions/") and path.endswith("/preview-bye"):
+            # A viewer closed its preview: drop it from the registry and
+            # re-apply the effective size (restores 200×50 when none remain).
+            name = path[len("/sessions/"):-len("/preview-bye")]
+            if not name or ".." in name or "/" in name:
+                self.send_error(404)
+                return
+            body = self._read_body()
+            viewer = str(body.get("viewer", ""))
+            if viewer and session_exists(name):
+                _preview_viewer_bye(name, viewer)
+            self._json({"ok": True})
 
         elif path.startswith("/sessions/") and path.endswith("/resize"):
             # Resize the tmux window to match the browser terminal so the

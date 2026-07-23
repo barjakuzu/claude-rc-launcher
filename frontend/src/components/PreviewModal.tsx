@@ -37,6 +37,12 @@ export function PreviewModal({ deviceId, name, onClose }: PreviewModalProps) {
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [status, setStatus] = useState<string>('connecting…');
   const lastContentRef = useRef<string>('');
+  // Stable viewer id — the server sizes the tmux window to the minimum
+  // across live viewers, so web + mobile can watch the same session.
+  const viewerIdRef = useRef<string>(
+    typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : String(Math.random()).slice(2),
+  );
+  const sizeRef = useRef<{ cols: number; rows: number }>({ cols: 0, rows: 0 });
 
   useEffect(() => () => { mounted.current = false; }, []);
 
@@ -66,13 +72,13 @@ export function PreviewModal({ deviceId, name, onClose }: PreviewModalProps) {
     termRef.current = term;
     fitRef.current = fit;
 
-    // Match the tmux window to the browser terminal's real cols/rows so the
-    // TUI lays out at the size we actually display (no 200-col wrap soup).
+    // Track the browser terminal's real cols/rows; every /preview poll
+    // reports them, and the server applies the min across live viewers.
     const syncSize = () => {
       try {
         fit.fit();
         if (term.cols >= 40 && term.rows >= 10) {
-          api.resize(deviceId, name, term.cols, term.rows).catch(() => { /* ignore */ });
+          sizeRef.current = { cols: term.cols, rows: term.rows };
         }
       } catch { /* ignore */ }
     };
@@ -153,9 +159,9 @@ export function PreviewModal({ deviceId, name, onClose }: PreviewModalProps) {
       el.removeEventListener('touchmove',  onTouchMove);
       el.removeEventListener('touchend',   onTouchEnd);
       el.removeEventListener('touchcancel',onTouchEnd);
-      // Restore the wide default so background parsing (status bar, tokens,
-      // URL capture) sees the layout it expects.
-      api.resize(deviceId, name, 200, 50).catch(() => { /* ignore */ });
+      // Tell the server this viewer is gone — it restores 200×50 when the
+      // last viewer leaves (background parsing expects the wide layout).
+      api.previewBye(deviceId, name, viewerIdRef.current).catch(() => { /* ignore */ });
       term.dispose();
       termRef.current = null;
       fitRef.current = null;
@@ -168,7 +174,11 @@ export function PreviewModal({ deviceId, name, onClose }: PreviewModalProps) {
     let cancelled = false;
     const fetchOnce = async () => {
       try {
-        const data = await api.preview(deviceId, name);
+        const { cols, rows } = sizeRef.current;
+        const data = await api.preview(
+          deviceId, name,
+          cols >= 40 && rows >= 10 ? { viewer: viewerIdRef.current, cols, rows } : undefined,
+        );
         if (cancelled || !mounted.current) return;
         const output: string = data?.output ?? '';
         const cursor = data?.cursor as { x: number; y: number; visible: boolean } | null;

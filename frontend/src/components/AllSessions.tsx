@@ -43,7 +43,7 @@ export function AllSessions({ cards, onOpenDevice }: AllSessionsProps) {
           </button>
         }
       />
-      <div style={{ padding: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
+      <div style={{ padding: '12px 12px 32px', display: 'flex', flexDirection: 'column', gap: 8 }}>
         {items.length === 0 && (
           <div style={{ padding: 32, textAlign: 'center', color: RT.textLow, fontFamily: FONT_MONO, fontSize: 13, border: `1px dashed ${RT.border}`, borderRadius: 10 }}>
             No active sessions across devices.
