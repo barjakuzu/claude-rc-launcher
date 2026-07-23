@@ -212,6 +212,17 @@ def serve_terminal(handler, name):
         pass
 
     stop = threading.Event()
+    cur_size = [None]  # last size this client requested
+
+    def assert_size():
+        """Re-assert this client's size — makes tmux 'window-size latest'
+        follow the viewer that most recently typed."""
+        if cur_size[0]:
+            try:
+                proc.stdin.write(f"refresh-client -C {cur_size[0]}\n".encode())
+                proc.stdin.flush()
+            except OSError:
+                pass
 
     def pump_tmux():
         """tmux control-mode stdout → WS data frames."""
@@ -282,11 +293,13 @@ def serve_terminal(handler, name):
                 continue
             mtype = msg.get("type")
             if mtype == "keys" and msg.get("keys"):
+                assert_size()
                 subprocess.run(
                     ["tmux", "send-keys", "-t", name, "-l", str(msg["keys"])],
                     capture_output=True, timeout=5,
                 )
             elif mtype == "special" and isinstance(msg.get("special"), list):
+                assert_size()
                 keys = [str(k) for k in msg["special"][:8]]
                 subprocess.run(
                     ["tmux", "send-keys", "-t", name, *keys],
@@ -298,6 +311,7 @@ def serve_terminal(handler, name):
                     rows = max(10, min(200, int(msg.get("rows"))))
                 except (TypeError, ValueError):
                     continue
+                cur_size[0] = f"{cols}x{rows}"
                 try:
                     proc.stdin.write(f"refresh-client -C {cols}x{rows}\n".encode())
                     proc.stdin.flush()

@@ -38,6 +38,10 @@ export function PreviewModal({ deviceId, name, onClose }: PreviewModalProps) {
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [showHistory, setShowHistory] = useState(false);
   const [status, setStatus] = useState<string>('connecting…');
+  // Transport: try WebSocket streaming first (instant echo, fluid output);
+  // fall back to capture-pane polling if WS can't connect.
+  const [transport, setTransport] = useState<'connecting' | 'ws' | 'poll'>('connecting');
+  const wsRef = useRef<WebSocket | null>(null);
   const lastContentRef = useRef<string>('');
   // Stable viewer id — the server sizes the tmux window to the minimum
   // across live viewers, so web + mobile can watch the same session.
@@ -100,6 +104,9 @@ export function PreviewModal({ deviceId, name, onClose }: PreviewModalProps) {
         fit.fit();
         if (term.cols >= 40 && term.rows >= 10) {
           sizeRef.current = { cols: term.cols, rows: term.rows };
+          if (wsRef.current?.readyState === WebSocket.OPEN) {
+            wsRef.current.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
+          }
         }
       } catch { /* ignore */ }
     };
@@ -108,13 +115,20 @@ export function PreviewModal({ deviceId, name, onClose }: PreviewModalProps) {
     // font are wrong, which shows up as overlapping glyphs.
     document.fonts?.ready?.then(() => { if (mounted.current) syncSize(); });
 
+    const wsOpen = () => wsRef.current?.readyState === WebSocket.OPEN;
+
     // Flush the typed-character batch as a single request, then refresh
     // right away so the echo appears without waiting for the next poll.
+    // Over WS the stream echoes by itself — just send.
     const flushKeys = (): Promise<unknown> => {
       clearTimeout(keyTimerRef.current);
       const buf = keyBufRef.current;
       keyBufRef.current = '';
       if (!buf) return Promise.resolve();
+      if (wsOpen()) {
+        wsRef.current!.send(JSON.stringify({ type: 'keys', keys: buf }));
+        return Promise.resolve();
+      }
       return api.sendKeys(deviceId, name, { keys: buf })
         .then(() => refreshRef.current())
         .catch(() => { /* ignore */ });
@@ -124,6 +138,11 @@ export function PreviewModal({ deviceId, name, onClose }: PreviewModalProps) {
     // (typed chars land before the Enter that submits them).
     const sendSpecial = (special: string) => {
       activityRef.current = true;
+      if (wsOpen()) {
+        flushKeys();
+        wsRef.current!.send(JSON.stringify({ type: 'special', special: [special] }));
+        return;
+      }
       flushKeys()
         .then(() => api.sendKeys(deviceId, name, { special: [special] }))
         .then(() => refreshRef.current())
@@ -192,6 +211,10 @@ export function PreviewModal({ deviceId, name, onClose }: PreviewModalProps) {
         const dir = pagePx < 0 ? 'PPage' : 'NPage';
         pagePx = 0;
         lastPageAt = now;
+        if (wsOpen()) {
+          wsRef.current!.send(JSON.stringify({ type: 'special', special: [dir] }));
+          return;
+        }
         api.sendKeys(deviceId, name, { special: [dir] })
           .then(() => refreshRef.current())
           .catch(() => { /* ignore */ });
@@ -248,9 +271,62 @@ export function PreviewModal({ deviceId, name, onClose }: PreviewModalProps) {
     };
   }, [deviceId, name]);
 
-  // Polling loop: refresh pane content
+  // WebSocket transport — instant streaming; falls back to polling.
   useEffect(() => {
-    if (!autoRefresh) return;
+    let ws: WebSocket | null = null;
+    let opened = false;
+    let unmounting = false;
+    const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const dev = deviceId !== 'local' ? `?device=${encodeURIComponent(deviceId)}` : '';
+    try {
+      ws = new WebSocket(`${proto}//${window.location.host}/rc/sessions/${encodeURIComponent(name)}/ws${dev}`);
+    } catch {
+      setTransport('poll');
+      return;
+    }
+    wsRef.current = ws;
+    // If the socket can't open quickly (old server, proxy without WS), poll.
+    const fallTimer = setTimeout(() => {
+      if (!opened) { try { ws?.close(); } catch { /* ignore */ } }
+    }, 4000);
+    ws.onopen = () => {
+      opened = true;
+      setTransport('ws');
+      setStatus('live · stream');
+      // Clear any poll-rendered content before the snapshot streams in.
+      termRef.current?.reset();
+      lastContentRef.current = '';
+      const { cols, rows } = sizeRef.current;
+      if (cols >= 40 && rows >= 10) {
+        ws!.send(JSON.stringify({ type: 'resize', cols, rows }));
+      }
+    };
+    ws.onmessage = (ev) => {
+      try {
+        const m = JSON.parse(ev.data as string);
+        if (m.type === 'data' && termRef.current) termRef.current.write(m.data);
+      } catch { /* ignore */ }
+    };
+    ws.onerror = () => { try { ws?.close(); } catch { /* ignore */ } };
+    ws.onclose = () => {
+      clearTimeout(fallTimer);
+      if (wsRef.current === ws) wsRef.current = null;
+      if (!unmounting && mounted.current) {
+        setTransport('poll');
+        setStatus('live · poll');
+      }
+    };
+    return () => {
+      unmounting = true;
+      clearTimeout(fallTimer);
+      try { ws?.close(); } catch { /* ignore */ }
+      if (wsRef.current === ws) wsRef.current = null;
+    };
+  }, [deviceId, name]);
+
+  // Polling loop: refresh pane content (fallback transport only)
+  useEffect(() => {
+    if (!autoRefresh || transport !== 'poll') return;
     let cancelled = false;
     const fetchOnce = async () => {
       try {
@@ -305,7 +381,7 @@ export function PreviewModal({ deviceId, name, onClose }: PreviewModalProps) {
     fetchOnce();
     const id = setInterval(fetchOnce, 700);
     return () => { cancelled = true; clearInterval(id); refreshRef.current = () => {}; };
-  }, [autoRefresh, deviceId, name]);
+  }, [autoRefresh, deviceId, name, transport]);
 
   // Esc closes
   useEffect(() => {
