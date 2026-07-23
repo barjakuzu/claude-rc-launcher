@@ -17,6 +17,8 @@ export const api = {
   preview: (device: string, name: string) => req('GET', `/sessions/${encodeURIComponent(name)}/preview`, device),
   sendKeys: (device: string, name: string, body: { keys?: string; special?: string[] }) =>
     req('POST', `/sessions/${encodeURIComponent(name)}/keys`, device, body),
+  resize: (device: string, name: string, cols: number, rows: number) =>
+    req('POST', `/sessions/${encodeURIComponent(name)}/resize`, device, { cols, rows }),
   start: (device: string, body: unknown) => req('POST', '/start', device, body),
   stop: (device: string, name: string) => req('POST', '/stop', device, { name }),
   restart: (device: string, name: string) => req('POST', '/restart', device, { name }),

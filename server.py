@@ -842,6 +842,30 @@ class Handler(http.server.BaseHTTPRequestHandler):
             ok, msg = restart_session(name, resume=resume)
             self._json({"ok": ok, "message": msg, "name": name})
 
+        elif path.startswith("/sessions/") and path.endswith("/resize"):
+            # Resize the tmux window to match the browser terminal so the
+            # TUI renders at the viewer's real cols/rows (no wrap artifacts).
+            name = path[len("/sessions/"):-len("/resize")]
+            if not name or ".." in name or "/" in name:
+                self.send_error(404)
+                return
+            body = self._read_body()
+            try:
+                cols = max(40, min(500, int(body.get("cols"))))
+                rows = max(10, min(200, int(body.get("rows"))))
+            except (TypeError, ValueError):
+                self._json({"ok": False, "message": "Invalid size"}, 400)
+                return
+            if not session_exists(name):
+                self._json({"ok": False, "message": "Session not found"}, 404)
+                return
+            r = subprocess.run(
+                ["tmux", "resize-window", "-t", name, "-x", str(cols), "-y", str(rows)],
+                capture_output=True, text=True, timeout=5,
+            )
+            self._json({"ok": r.returncode == 0,
+                        "message": r.stderr.strip() if r.returncode != 0 else "Resized"})
+
         elif path.startswith("/sessions/") and path.endswith("/keys"):
             name = path[len("/sessions/"):-len("/keys")]
             if not name or ".." in name or "/" in name:

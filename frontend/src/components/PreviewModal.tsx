@@ -66,6 +66,21 @@ export function PreviewModal({ deviceId, name, onClose }: PreviewModalProps) {
     termRef.current = term;
     fitRef.current = fit;
 
+    // Match the tmux window to the browser terminal's real cols/rows so the
+    // TUI lays out at the size we actually display (no 200-col wrap soup).
+    const syncSize = () => {
+      try {
+        fit.fit();
+        if (term.cols >= 40 && term.rows >= 10) {
+          api.resize(deviceId, name, term.cols, term.rows).catch(() => { /* ignore */ });
+        }
+      } catch { /* ignore */ }
+    };
+    syncSize();
+    // Re-fit once webfonts load — cell metrics measured against a fallback
+    // font are wrong, which shows up as overlapping glyphs.
+    document.fonts?.ready?.then(() => { if (mounted.current) syncSize(); });
+
     // Forward keystrokes (printable text) to the session.
     term.onData((data) => {
       if (!mounted.current) return;
@@ -89,8 +104,12 @@ export function PreviewModal({ deviceId, name, onClose }: PreviewModalProps) {
       return true; // let onData handle printable
     });
 
-    // Resize handler — refit when container resizes.
-    const onResize = () => { try { fit.fit(); } catch { /* ignore */ } };
+    // Resize handler — refit and re-sync tmux size when the window resizes.
+    let resizeTimer: ReturnType<typeof setTimeout> | undefined;
+    const onResize = () => {
+      clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(syncSize, 250);
+    };
     window.addEventListener('resize', onResize);
 
     // Touch-scroll handler — xterm.js doesn't translate touch swipes into
@@ -129,10 +148,14 @@ export function PreviewModal({ deviceId, name, onClose }: PreviewModalProps) {
 
     return () => {
       window.removeEventListener('resize', onResize);
+      clearTimeout(resizeTimer);
       el.removeEventListener('touchstart', onTouchStart);
       el.removeEventListener('touchmove',  onTouchMove);
       el.removeEventListener('touchend',   onTouchEnd);
       el.removeEventListener('touchcancel',onTouchEnd);
+      // Restore the wide default so background parsing (status bar, tokens,
+      // URL capture) sees the layout it expects.
+      api.resize(deviceId, name, 200, 50).catch(() => { /* ignore */ });
       term.dispose();
       termRef.current = null;
       fitRef.current = null;
