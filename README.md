@@ -1,3 +1,5 @@
+
+
 # Claude RC Launcher
 
 Launch and manage [Claude Code](https://docs.anthropic.com/en/docs/claude-code) remote-control sessions from anywhere — your phone, another laptop, wherever you are.
@@ -33,6 +35,8 @@ The installer will:
 After install, open **http://localhost:8200** or use the remote URL printed by the installer.
 
 Works on **Linux** and **macOS**.
+
+No Node.js is required for the core launcher (the web UI is prebuilt); Node is only needed for the optional `playwright-cli` integration.
 
 ## Browser Automation
 
@@ -253,4 +257,3 @@ curl -fsSL https://raw.githubusercontent.com/barjakuzu/claude-rc-launcher/main/u
 ## License
 
 [MIT](LICENSE)
-
