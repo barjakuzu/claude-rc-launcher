@@ -433,6 +433,13 @@ def setup_session(session_name, display_name, mode):
         # Accept trust folder prompt in all modes
         if not prompt_found and "trust" in text.lower() and "Yes, I trust" in text:
             print(f"  {session_name}: accepting trust prompt")
+            # The cursor starts on "No, exit", so a bare Enter *declines* and
+            # Claude quits — the session then dies seconds after starting, with
+            # no error to show for it. Move down first, exactly as the bypass
+            # prompt above does. Only a directory Claude has never been run in
+            # shows this, which is why long-lived sessions never hit it.
+            subprocess.run(["tmux", "send-keys", "-t", session_name, "Down"], capture_output=True)
+            time.sleep(0.3)
             subprocess.run(["tmux", "send-keys", "-t", session_name, "Enter"], capture_output=True)
             continue
         # Handle --resume session picker (must check BEFORE prompt detection,
