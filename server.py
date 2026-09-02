@@ -18,12 +18,15 @@ from urllib.parse import urlparse, parse_qs
 
 from config import (
     VERSION, HOST, PORT, SESSION_PREFIX, WORKING_DIR, CLAUDE_BIN,
-    AUTH_USER, AUTH_PASS, RC_FLAGS, MODEL_MAP, SHELL_BIN, BROWSE_ROOTS,
+    AUTH_USER, AUTH_PASS, RC_FLAGS, MODEL_MAP, SHELL_BIN, SHELL_MODE,
+    resolve_claude_mode,
+    BROWSE_ROOTS,
 )
 from sessions import (
     list_rc_sessions, session_exists, setup_session, stop_session,
     restart_session, list_resumable_sessions, resume_session,
     get_all_session_errors, unstick_session, get_transcript,
+    build_tmux_command,
 )
 from tunnel import (
     cloudflared_available, start_tunnel, stop_tunnel, get_tunnel_status,
@@ -926,43 +929,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._json({"ok": True, "message": "Already running", "name": name})
                 return
 
-            claude_flags = RC_FLAGS[mode]
-            model_flag = MODEL_MAP.get(model) if model else None
-            claude_args = claude_flags.split()
-            if model_flag:
-                claude_args.extend(["--model", model_flag])
-            env_flags = [
-                "-e", f"RC_MODE={mode}",
-                "-e", f"RC_WORKDIR={session_dir}",
-                "-e", "DISPLAY=:1",
-                "-e", "TERM=xterm-256color",
-            ]
-            if sandbox or os.geteuid() == 0:
-                env_flags.extend(["-e", "IS_SANDBOX=1"])
-            # Wrap command in shell: run claude, and if it exits non-zero,
-            # print stderr and sleep so setup_session can read the error
-            claude_cmd = " ".join(
-                [f"CLAUDECODE= {CLAUDE_BIN}"] + claude_args
-            )
-            wrapper = f'{claude_cmd} 2>&1 || {{ echo ""; sleep 30; }}'
-            cmd = [
-                "tmux", "new-session", "-d", "-s", name,
-                "-c", session_dir,
-                "-x", "200", "-y", "50",
-                *env_flags,
-                "bash", "-c", wrapper,
-            ]
-            print(f"  Starting session: {name} (mode={mode}, model={model_flag}, dir={session_dir})")
+            cmd = build_tmux_command(name, session_dir, mode, model=model,
+                                     sandbox=sandbox)
+            print(f"  Starting session: {name} (mode={mode}, model={model}, dir={session_dir})")
             print(f"  CMD: {' '.join(cmd)}")
             result = subprocess.run(cmd, capture_output=True, text=True)
             if result.returncode != 0:
                 print(f"  ERROR: tmux failed: {result.stderr.strip()}")
             else:
                 print(f"  Session {name} created")
-            threading.Thread(
-                target=setup_session,
-                args=(name, display_name or name, mode), daemon=True,
-            ).start()
+            # A shell session has no trust prompt, no /remote-control handshake
+            # and no /rename — it is usable the moment tmux returns.
+            if mode != SHELL_MODE:
+                threading.Thread(
+                    target=setup_session,
+                    args=(name, display_name or name, mode), daemon=True,
+                ).start()
             self._json({"ok": True, "message": "Started", "name": name})
 
         elif path == "/devices/rename":
@@ -1197,8 +1179,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._json({"ok": False, "message": "Missing task description"}, 400)
                 return
 
-            if mode not in RC_FLAGS:
-                mode = "c"
+            # The wizard drives a Claude session to author the schedule.
+            mode = resolve_claude_mode(mode)
 
             if not name:
                 name = SESSION_PREFIX + "wizard-" + time.strftime("%H%M%S")
@@ -1215,7 +1197,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._json({"ok": True, "message": "Already running", "name": name})
                 return
 
-            mode_labels = {"c": "Standard RC", "ci": "Teammate", "safe": "Safe mode"}
+            mode_labels = {"c": "Standard RC", "ci": "Teammate",
+                           "safe": "Safe mode", SHELL_MODE: "Shell"}
             api_url = f"http://localhost:{PORT}/rc"
             # Use a one-time token file for wizard auth instead of embedding credentials
             wizard_token = os.urandom(16).hex()

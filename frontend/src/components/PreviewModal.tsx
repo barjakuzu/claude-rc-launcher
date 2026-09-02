@@ -10,6 +10,8 @@ import { TranscriptView } from './TranscriptView';
 interface PreviewModalProps {
   deviceId: string;
   name: string;
+  /** Backend mode string; 'sh' sessions have no transcript to show. */
+  mode?: string;
   onClose: () => void;
 }
 
@@ -30,7 +32,7 @@ const SPECIAL_KEY_MAP: Record<string, string> = {
   'Delete': 'DC',
 };
 
-export function PreviewModal({ deviceId, name, onClose }: PreviewModalProps) {
+export function PreviewModal({ deviceId, name, mode, onClose }: PreviewModalProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -457,7 +459,9 @@ export function PreviewModal({ deviceId, name, onClose }: PreviewModalProps) {
             letterSpacing: '.06em', textTransform: 'uppercase',
           }}>{status}</div>
           <div style={{ flex: 1 }} />
-          {/* History ↔ Live toggle — history is DOM-scrolled (real scrollbar) */}
+          {/* History ↔ Live toggle — history is DOM-scrolled (real scrollbar).
+              A shell session writes no transcript, so it has no history. */}
+          {mode !== 'sh' && (
           <button
             onClick={() => setShowHistory((v) => !v)}
             style={{
@@ -473,6 +477,7 @@ export function PreviewModal({ deviceId, name, onClose }: PreviewModalProps) {
             <Icons.clock size={11} stroke={showHistory ? RT.bg : RT.textDim} />
             {showHistory ? 'Back to live' : 'History'}
           </button>
+          )}
           <label style={{
             display: 'inline-flex', alignItems: 'center', gap: 6,
             fontSize: 11, color: RT.textDim, fontFamily: FONT_MONO, cursor: 'pointer',

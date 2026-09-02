@@ -204,6 +204,11 @@ Edit `~/.claude-rc/env`:
 - **Standard** — skip permissions, no approval prompts
 - **Teammate** — skip permissions + teammate mode
 - **Safe** — normal permission checks apply
+- **Shell** — a plain login shell instead of Claude Code, for running ordinary
+  commands from the browser. It has no model, no remote-control URL, no token
+  meter and no history view; restarting it just gives you a fresh shell.
+  Set `RC_SHELL_BIN` to override which shell is launched (defaults to `$SHELL`,
+  then `/bin/bash`).
 
 ## Security
 

@@ -5,12 +5,14 @@ import { Icons } from './primitives';
 import { api } from '../api';
 import { DirBrowser } from './DirBrowser';
 
-type ModeLabel = 'STANDARD' | 'TEAMMATE' | 'SAFE';
+type ModeLabel = 'STANDARD' | 'TEAMMATE' | 'SAFE' | 'SHELL';
+const MODES: ModeLabel[] = ['STANDARD', 'TEAMMATE', 'SAFE', 'SHELL'];
 type ModelLabel = '1' | '2' | '3' | '4';
 
 function mapMode(label: ModeLabel): string {
   if (label === 'STANDARD') return 'c';
   if (label === 'TEAMMATE') return 'ci';
+  if (label === 'SHELL') return 'sh';
   return 'safe';
 }
 
@@ -110,7 +112,7 @@ export function V5Launcher({ deviceId, deviceName, mobile = false, onLaunched }:
     try {
       const body: Record<string, unknown> = { mode: mapMode(mode), workdir };
       if (name.trim()) body.name = name.trim();
-      if (model) body.model = model;
+      if (model && mode !== 'SHELL') body.model = model;
       if (sandbox) body.sandbox = sandbox;
 
       const res = await api.start(deviceId, body) as { ok?: boolean; message?: string };
@@ -247,7 +249,7 @@ export function V5Launcher({ deviceId, deviceName, mobile = false, onLaunched }:
 
         {/* Segmented mode pills */}
         <div style={{ display: 'flex', gap: 0, flex: mobile ? '1 1 100%' : 'none' }}>
-          {(['STANDARD', 'TEAMMATE', 'SAFE'] as ModeLabel[]).map((m, i) => (
+          {MODES.map((m, i) => (
             <button
               key={m}
               onClick={() => setMode(m)}
@@ -255,9 +257,10 @@ export function V5Launcher({ deviceId, deviceName, mobile = false, onLaunched }:
                 background: mode === m ? RT.text : RT.panel,
                 color: mode === m ? RT.bg : RT.textDim,
                 border: `1px solid ${mode === m ? RT.text : RT.border}`,
-                borderRadius: i === 0 ? '8px 0 0 8px' : i === 2 ? '0 8px 8px 0' : '0',
+                borderRadius: i === 0 ? '8px 0 0 8px'
+                  : i === MODES.length - 1 ? '0 8px 8px 0' : '0',
                 marginLeft: i > 0 ? -1 : 0,
-                padding: '9px 12px', cursor: 'pointer',
+                padding: mobile ? '9px 6px' : '9px 12px', cursor: 'pointer',
                 fontFamily: FONT_MONO, fontSize: 10.5, fontWeight: 600,
                 letterSpacing: '.04em',
                 flex: mobile ? 1 : 'none',
@@ -319,7 +322,8 @@ export function V5Launcher({ deviceId, deviceName, mobile = false, onLaunched }:
           flexDirection: 'column',
           gap: 8,
         }}>
-          {/* Model select */}
+          {/* Model select — a shell session runs no model */}
+          {mode !== 'SHELL' && (
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <label style={{ fontSize: 11, color: RT.textLow, fontFamily: FONT_MONO, flex: 'none', width: 64 }}>Model</label>
             <select
@@ -333,6 +337,7 @@ export function V5Launcher({ deviceId, deviceName, mobile = false, onLaunched }:
               <option value="4">Fable 5</option>
             </select>
           </div>
+          )}
 
           {/* Workdir + Browse */}
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>

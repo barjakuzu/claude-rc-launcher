@@ -9,7 +9,8 @@ import subprocess
 import time
 import threading
 
-from config import SESSION_PREFIX, CLAUDE_BIN, RC_FLAGS, SHELL_BIN
+from config import (SESSION_PREFIX, CLAUDE_BIN, RC_FLAGS, MODEL_MAP,
+                    SHELL_BIN, SHELL_MODE)
 
 # Stores error messages for sessions that failed to start.
 # Key: session name, Value: (error string, timestamp).
@@ -17,6 +18,56 @@ from config import SESSION_PREFIX, CLAUDE_BIN, RC_FLAGS, SHELL_BIN
 _session_errors = {}
 _session_errors_lock = threading.Lock()
 ERROR_TTL = 30
+
+
+def is_shell_session(session_name):
+    """True if the session runs a plain shell rather than Claude Code."""
+    return (get_session_env(session_name, "RC_MODE") or "") == SHELL_MODE
+
+
+def build_tmux_command(name, session_dir, mode, model=None, sandbox=False,
+                       resume=False, resume_id=None, resume_search=None):
+    """Build the `tmux new-session` argv for a session.
+
+    Shared by /start and restart_session so both paths stay identical.
+    In SHELL_MODE the pane runs a login shell directly; every other mode
+    wraps Claude Code in bash so a startup failure leaves its message on
+    screen long enough for setup_session to read it.
+    """
+    env_flags = [
+        "-e", f"RC_MODE={mode}",
+        "-e", f"RC_WORKDIR={session_dir}",
+        "-e", "DISPLAY=:1",
+        "-e", "TERM=xterm-256color",
+    ]
+    if resume_search:
+        # After RC_WORKDIR, matching the ordering restart_session has always used.
+        env_flags[4:4] = ["-e", f"RC_RESUME_SEARCH={resume_search}"]
+    if sandbox or os.geteuid() == 0:
+        env_flags.extend(["-e", "IS_SANDBOX=1"])
+
+    if mode == SHELL_MODE:
+        # A shell takes no Claude flags: model and resume do not apply.
+        payload = [SHELL_BIN, "-l"]
+    else:
+        claude_args = RC_FLAGS.get(mode, RC_FLAGS["c"]).split()
+        if resume:
+            claude_args.append("--resume")
+            if resume_id:
+                claude_args.append(resume_id)
+        model_flag = MODEL_MAP.get(model) if model else None
+        if model_flag:
+            claude_args.extend(["--model", model_flag])
+        claude_cmd = " ".join([f"CLAUDECODE= {CLAUDE_BIN}"] + claude_args)
+        payload = ["bash", "-c", f'{claude_cmd} 2>&1 || {{ echo ""; sleep 30; }}']
+
+    return [
+        "tmux", "new-session", "-d", "-s", name,
+        "-c", session_dir,
+        "-x", "200", "-y", "50",
+        *env_flags,
+        *payload,
+    ]
 
 
 def get_all_session_errors():
@@ -51,9 +102,10 @@ def list_rc_sessions():
         mode = get_session_env(name, "RC_MODE") or "c"
         workdir = get_session_env(name, "RC_WORKDIR")
         wizard = get_session_env(name, "RC_WIZARD")
-        url = get_url(name)
+        is_sh = mode == SHELL_MODE
+        url = None if is_sh else get_url(name)
         status = get_session_status(name)
-        tokens = get_tokens(name)
+        tokens = None if is_sh else get_tokens(name)
         s = {"name": name, "mode": mode, "url": url, "status": status}
         if tokens is not None:
             s["tokens"] = tokens
@@ -93,6 +145,10 @@ _RC_ACTIVE_MARKERS = (
 
 def _is_rc_active(session_name):
     """Check if the session shows remote-control as active (not connecting/failed/reconnecting)."""
+    if is_shell_session(session_name):
+        # A shell never runs remote-control, and its pane could echo a marker
+        # string verbatim (e.g. `grep "/rc active"`) and be misread as active.
+        return False
     try:
         r = subprocess.run(
             ["tmux", "capture-pane", "-t", session_name, "-e", "-p",
@@ -125,7 +181,10 @@ def get_active_rc_session():
 
 def get_url(session_name):
     """Extract the claude.ai URL from a tmux session's pane output.
-    Only returns a URL if remote-control is actually active (not connecting/failed)."""
+    Only returns a URL if remote-control is actually active (not connecting/failed).
+    Shell sessions have no URL."""
+    if is_shell_session(session_name):
+        return None
     # First check if remote-control is in a healthy state
     # If it's "connecting", "reconnecting", or "failed", URL is not usable
     if not _is_rc_active(session_name):
@@ -183,7 +242,10 @@ def _get_url_internal(session_name):
 
 
 def get_tokens(session_name):
-    """Extract token count from Claude Code's TUI status bar."""
+    """Extract token count from Claude Code's TUI status bar.
+    Shell sessions have no status bar."""
+    if is_shell_session(session_name):
+        return None
     try:
         r = subprocess.run(
             ["tmux", "capture-pane", "-t", session_name, "-e", "-p",
@@ -640,8 +702,11 @@ def get_transcript(tmux_name, limit=300):
     Claude Code runs in the alternate screen with no tmux history, so the
     browser can't scroll the terminal. The full conversation lives in
     ~/.claude/projects/<dir>/<uuid>.jsonl — serve it for a natively
-    scrollable history view. Returns None if the session can't be mapped.
+    scrollable history view. Returns None if the session can't be mapped —
+    including shell sessions, which write no JSONL at all.
     """
+    if is_shell_session(tmux_name):
+        return None
     workdir = get_session_env(tmux_name, "RC_WORKDIR") or ""
     uuid = _find_session_uuid(tmux_name, workdir)
     if not uuid:
@@ -697,8 +762,6 @@ def restart_session(name, mode=None, workdir=None, model=None, sandbox=False,
     """Restart a dead or stale session. Kills the old tmux session and creates
     a new one with the same parameters. If resume=True, passes --resume to
     Claude so conversation context is preserved."""
-    from config import CLAUDE_BIN, RC_FLAGS, MODEL_MAP, SESSION_PREFIX, SHELL_BIN
-
     # Read existing session env before killing
     if mode is None:
         mode = get_session_env(name, "RC_MODE") or "c"
@@ -706,6 +769,10 @@ def restart_session(name, mode=None, workdir=None, model=None, sandbox=False,
         workdir = get_session_env(name, "RC_WORKDIR") or "."
 
     session_dir = os.path.abspath(workdir)
+
+    # A shell keeps no conversation, so there is nothing to resume into.
+    if mode == SHELL_MODE:
+        resume = False
 
     # Find the Claude session UUID BEFORE killing (so JSONL is still fresh)
     resume_id = None
@@ -719,46 +786,21 @@ def restart_session(name, mode=None, workdir=None, model=None, sandbox=False,
         # Brief wait for tmux cleanup
         time.sleep(0.5)
 
-    claude_flags = RC_FLAGS.get(mode, RC_FLAGS["c"])
-    claude_args = claude_flags.split()
-
-    if resume:
-        if resume_id:
-            claude_args.extend(["--resume", resume_id])
-        else:
-            claude_args.append("--resume")
-
-    model_flag = MODEL_MAP.get(model) if model else None
-    if model_flag:
-        claude_args.extend(["--model", model_flag])
-
     # Use the display name to search in the picker if no exact UUID found
-    display_name = name.replace(SESSION_PREFIX, "")
-    env_flags = [
-        "-e", f"RC_MODE={mode}",
-        "-e", f"RC_WORKDIR={session_dir}",
-        "-e", f"RC_RESUME_SEARCH={display_name}",
-        "-e", "DISPLAY=:1",
-        "-e", "TERM=xterm-256color",
-    ]
-    if sandbox or os.geteuid() == 0:
-        env_flags.extend(["-e", "IS_SANDBOX=1"])
-
-    claude_cmd = " ".join([f"CLAUDECODE= {CLAUDE_BIN}"] + claude_args)
-    wrapper = f'{claude_cmd} 2>&1 || {{ echo ""; sleep 30; }}'
-    cmd = [
-        "tmux", "new-session", "-d", "-s", name,
-        "-c", session_dir,
-        "-x", "200", "-y", "50",
-        *env_flags,
-        "bash", "-c", wrapper,
-    ]
+    cmd = build_tmux_command(
+        name, session_dir, mode, model=model, sandbox=sandbox,
+        resume=resume, resume_id=resume_id,
+        resume_search=name.replace(SESSION_PREFIX, ""),
+    )
     print(f"  Restarting session: {name} (mode={mode}, resume={resume}, dir={session_dir})")
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
         error = f"tmux failed: {result.stderr.strip()}"
         print(f"  ERROR: {error}")
         return False, error
+
+    if mode == SHELL_MODE:
+        return True, "Restarting"
 
     # Strip the tmux prefix for the visible session title
     display_name = name[len(SESSION_PREFIX):] if name.startswith(SESSION_PREFIX) else name

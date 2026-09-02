@@ -8,7 +8,8 @@ import time
 from datetime import datetime, timedelta
 
 import stats
-from config import SESSION_PREFIX, CLAUDE_BIN, RC_FLAGS, MODEL_MAP
+from config import (SESSION_PREFIX, CLAUDE_BIN, RC_FLAGS, MODEL_MAP,
+                    resolve_claude_mode)
 from sessions import session_exists, setup_session, get_url, list_rc_sessions
 from schedules import load_schedules, save_schedules, add_history_entry
 
@@ -263,6 +264,8 @@ def _fire_schedule(schedule):
         return
 
     # Create tmux session (use sandbox workaround for root, same as server.py)
+    # A scheduled run always needs Claude, never a plain shell.
+    mode = resolve_claude_mode(mode)
     claude_flags = RC_FLAGS[mode]
     model_flag = MODEL_MAP.get(model) if model else None
     claude_args = claude_flags.split()

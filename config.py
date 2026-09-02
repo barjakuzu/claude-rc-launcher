@@ -2,7 +2,7 @@
 
 import os
 
-VERSION = "2.0.0"
+VERSION = "2.1.0"
 
 # Single home directory for all claude-rc data
 RC_HOME = os.environ.get("RC_HOME", os.path.expanduser("~/.claude-rc"))
@@ -14,16 +14,33 @@ WORKING_DIR = os.environ.get("RC_WORKING_DIR", ".")
 CLAUDE_BIN = os.environ.get("RC_CLAUDE_BIN", "claude")
 AUTH_USER = os.environ.get("RC_AUTH_USER", "")
 AUTH_PASS = os.environ.get("RC_AUTH_PASS", "")
-SHELL_BIN = os.environ.get("SHELL", "/bin/bash")
+SHELL_BIN = os.environ.get("RC_SHELL_BIN") or os.environ.get("SHELL") or "/bin/bash"
 
 # Resolve relative working dir to absolute
 WORKING_DIR = os.path.abspath(WORKING_DIR)
+
+# Mode for plain terminal sessions: tmux runs SHELL_BIN instead of Claude Code.
+# It carries no Claude flags, so its RC_FLAGS entry is a sentinel that only keeps
+# the mode valid for /start's `mode not in RC_FLAGS` check.
+SHELL_MODE = "sh"
 
 RC_FLAGS = {
     "c": "--dangerously-skip-permissions --verbose",
     "ci": "--dangerously-skip-permissions --teammate-mode in-process --verbose",
     "safe": "--verbose",
+    SHELL_MODE: "",
 }
+
+def resolve_claude_mode(mode):
+    """Coerce a mode to one that actually runs Claude Code.
+
+    The scheduler and the schedule wizard always need a Claude session; a
+    shell (or an unknown mode) would leave them driving a bare prompt.
+    """
+    if mode == SHELL_MODE or mode not in RC_FLAGS:
+        return "c"
+    return mode
+
 
 MODEL_MAP = {
     "1": None,       # Default (Opus 4.8)

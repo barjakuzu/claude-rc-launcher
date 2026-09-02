@@ -15,7 +15,7 @@ interface AllSessionsProps {
   onOpenDevice: (id: string) => void;
 }
 
-interface PreviewState { deviceId: string; name: string; }
+interface PreviewState { deviceId: string; name: string; mode?: string; }
 
 export function AllSessions({ cards, onOpenDevice }: AllSessionsProps) {
   const items = useAllSessions(cards, true);
@@ -56,7 +56,7 @@ export function AllSessions({ cards, onOpenDevice }: AllSessionsProps) {
           return (
             <div
               key={key}
-              onClick={() => setPreview({ deviceId: d.id, name: s.name })}
+              onClick={() => setPreview({ deviceId: d.id, name: s.name, mode: s.mode })}
               title="Open terminal"
               style={{
                 background: RT.card, border: `1px solid ${RT.border}`,
@@ -96,7 +96,7 @@ export function AllSessions({ cards, onOpenDevice }: AllSessionsProps) {
               <div onClick={(e) => e.stopPropagation()} style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
                 <button
                   style={mobileActionBtn()}
-                  onClick={() => setPreview({ deviceId: d.id, name: s.name })}
+                  onClick={() => setPreview({ deviceId: d.id, name: s.name, mode: s.mode })}
                   title="Show terminal output"
                 >
                   <Icons.search size={13} stroke={RT.textDim} /> Preview
@@ -134,6 +134,7 @@ export function AllSessions({ cards, onOpenDevice }: AllSessionsProps) {
         <PreviewModal
           deviceId={preview.deviceId}
           name={preview.name}
+          mode={preview.mode}
           onClose={() => setPreview(null)}
         />
       )}

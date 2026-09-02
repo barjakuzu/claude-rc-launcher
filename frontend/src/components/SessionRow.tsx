@@ -73,6 +73,9 @@ export function SessionRow({ s, hue, deviceId, mobile = false, onChanged, onPrev
   // tokens label
   const tokensLabel = `${Math.round((s.tokens || 0) / 1000)}K`;
 
+  // shell sessions have no tokens, URL or transcript
+  const isShell = s.mode === 'sh';
+
   // sessionId display
   let sessionIdDisplay = '—';
   if (s.sessionId) {
@@ -164,13 +167,21 @@ export function SessionRow({ s, hue, deviceId, mobile = false, onChanged, onPrev
         </div>
       </div>
 
-      {/* Col 2: Tokens + bar */}
+      {/* Col 2: Tokens + bar — a shell session has no context window to meter */}
       <div style={{ minWidth: 0 }}>
-        <div style={{ display: 'flex', alignItems: 'baseline', gap: 6, marginBottom: 5 }}>
-          <span style={{ fontFamily: FONT_MONO, fontSize: 14, fontWeight: 500 }}>{tokensLabel}</span>
-          <span style={{ fontFamily: FONT_MONO, fontSize: 11, color: RT.textLow }}>tokens · {pct}%</span>
-        </div>
-        <CapBar pct={pct} height={4} bg="rgba(255,255,255,.04)" color={hueColor} />
+        {isShell ? (
+          <span style={{ fontFamily: FONT_MONO, fontSize: 11, color: RT.textLow }}>
+            plain shell
+          </span>
+        ) : (
+          <>
+            <div style={{ display: 'flex', alignItems: 'baseline', gap: 6, marginBottom: 5 }}>
+              <span style={{ fontFamily: FONT_MONO, fontSize: 14, fontWeight: 500 }}>{tokensLabel}</span>
+              <span style={{ fontFamily: FONT_MONO, fontSize: 11, color: RT.textLow }}>tokens · {pct}%</span>
+            </div>
+            <CapBar pct={pct} height={4} bg="rgba(255,255,255,.04)" color={hueColor} />
+          </>
+        )}
       </div>
 
       {/* Col 3: Actions — consolidated to 3 buttons (Restart / Stop / More).

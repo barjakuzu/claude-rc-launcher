@@ -7,12 +7,13 @@ import { api } from '../api';
 import { DirBrowser } from './DirBrowser';
 
 // Mode select value → backend mode string
-type ModeLabel = 'STANDARD' | 'TEAMMATE' | 'SAFE';
+type ModeLabel = 'STANDARD' | 'TEAMMATE' | 'SAFE' | 'SHELL';
 type ModelLabel = '1' | '2' | '3' | '4';
 
 function mapMode(label: ModeLabel): string {
   if (label === 'STANDARD') return 'c';
   if (label === 'TEAMMATE') return 'ci';
+  if (label === 'SHELL') return 'sh';
   return 'safe';
 }
 
@@ -146,6 +147,7 @@ export function MiniLauncher({ deviceId, deviceName, mobile = false, onLaunched 
           <option value="STANDARD">STANDARD</option>
           <option value="TEAMMATE">TEAMMATE</option>
           <option value="SAFE">SAFE</option>
+          <option value="SHELL">SHELL</option>
         </select>
         <button
           onClick={handleLaunch}

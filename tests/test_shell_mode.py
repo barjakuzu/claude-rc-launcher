@@ -1,0 +1,117 @@
+"""Tests for SHELL session mode (mode 'sh') — plain terminal sessions."""
+import os, sys, unittest
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import config
+import sessions
+
+
+class BuildTmuxCommandTest(unittest.TestCase):
+    def _env_value(self, cmd, key):
+        """Return the value of an -e KEY=VALUE pair in a tmux argv."""
+        for i, arg in enumerate(cmd):
+            if arg == "-e" and cmd[i + 1].startswith(key + "="):
+                return cmd[i + 1][len(key) + 1:]
+        return None
+
+    def test_claude_mode_runs_claude_in_a_bash_wrapper(self):
+        cmd = sessions.build_tmux_command("rc-x", "/tmp", "c")
+        self.assertEqual(cmd[:4], ["tmux", "new-session", "-d", "-s"])
+        self.assertEqual(cmd[-3:-1], ["bash", "-c"])
+        self.assertIn(config.CLAUDE_BIN, cmd[-1])
+        self.assertIn("--dangerously-skip-permissions", cmd[-1])
+        self.assertEqual(self._env_value(cmd, "RC_MODE"), "c")
+
+    def test_claude_mode_appends_model_flag(self):
+        cmd = sessions.build_tmux_command("rc-x", "/tmp", "c", model="2")
+        self.assertIn("--model sonnet", cmd[-1])
+
+    def test_claude_mode_resume_uses_uuid_when_known(self):
+        cmd = sessions.build_tmux_command("rc-x", "/tmp", "c", resume=True,
+                                          resume_id="abc-123")
+        self.assertIn("--resume abc-123", cmd[-1])
+
+    def test_claude_mode_resume_without_uuid_is_bare_flag(self):
+        cmd = sessions.build_tmux_command("rc-x", "/tmp", "c", resume=True)
+        self.assertIn("--resume", cmd[-1])
+        self.assertNotIn("--resume ", cmd[-1].split("--resume")[1][:1])
+
+    def test_shell_mode_runs_login_shell_not_claude(self):
+        cmd = sessions.build_tmux_command("rc-x", "/tmp", config.SHELL_MODE)
+        self.assertEqual(cmd[-2:], [config.SHELL_BIN, "-l"])
+        self.assertNotIn(config.CLAUDE_BIN, " ".join(cmd))
+        self.assertNotIn("bash -c", " ".join(cmd))
+
+    def test_shell_mode_sets_session_env(self):
+        cmd = sessions.build_tmux_command("rc-x", "/srv/app", config.SHELL_MODE)
+        self.assertEqual(self._env_value(cmd, "RC_MODE"), config.SHELL_MODE)
+        self.assertEqual(self._env_value(cmd, "RC_WORKDIR"), "/srv/app")
+        self.assertEqual(self._env_value(cmd, "TERM"), "xterm-256color")
+
+    def test_shell_mode_ignores_model_and_resume(self):
+        cmd = sessions.build_tmux_command("rc-x", "/tmp", config.SHELL_MODE,
+                                          model="2", resume=True, resume_id="abc")
+        joined = " ".join(cmd)
+        self.assertNotIn("sonnet", joined)
+        self.assertNotIn("--resume", joined)
+        self.assertNotIn("abc", joined)
+
+    def test_working_dir_and_size_are_set(self):
+        cmd = sessions.build_tmux_command("rc-x", "/srv/app", config.SHELL_MODE)
+        self.assertEqual(cmd[cmd.index("-c") + 1], "/srv/app")
+        self.assertEqual(cmd[cmd.index("-x") + 1], "200")
+        self.assertEqual(cmd[cmd.index("-y") + 1], "50")
+
+
+class ShellSessionsSkipClaudeScrapingTest(unittest.TestCase):
+    """A shell session has no claude.ai URL, no token counter and no JSONL
+    transcript — the Claude-specific probes must not run against it."""
+
+    def setUp(self):
+        self._real_env = sessions.get_session_env
+        self._real_run = sessions.subprocess.run
+        sessions.get_session_env = lambda name, var: (
+            config.SHELL_MODE if var == "RC_MODE" else None
+        )
+
+        def _fail(*a, **kw):
+            raise AssertionError(f"subprocess.run called for a shell session: {a}")
+
+        self._fail = _fail
+
+    def tearDown(self):
+        sessions.get_session_env = self._real_env
+        sessions.subprocess.run = self._real_run
+
+    def test_get_url_returns_none_without_scraping(self):
+        sessions.subprocess.run = self._fail
+        self.assertIsNone(sessions.get_url("rc-shell"))
+
+    def test_get_tokens_returns_none_without_scraping(self):
+        sessions.subprocess.run = self._fail
+        self.assertIsNone(sessions.get_tokens("rc-shell"))
+
+    def test_transcript_is_none_without_lookup(self):
+        sessions.subprocess.run = self._fail
+        self.assertIsNone(sessions.get_transcript("rc-shell"))
+
+    def test_shell_session_is_never_the_active_rc_session(self):
+        self.assertFalse(sessions._is_rc_active("rc-shell"))
+
+
+class ResolveClaudeModeTest(unittest.TestCase):
+    """The scheduler and the wizard must never end up running a bare shell."""
+
+    def test_shell_mode_falls_back_to_standard(self):
+        self.assertEqual(config.resolve_claude_mode(config.SHELL_MODE), "c")
+
+    def test_unknown_mode_falls_back_to_standard(self):
+        self.assertEqual(config.resolve_claude_mode("nonsense"), "c")
+
+    def test_claude_modes_pass_through(self):
+        for mode in ("c", "ci", "safe"):
+            self.assertEqual(config.resolve_claude_mode(mode), mode)
+
+
+if __name__ == "__main__":
+    unittest.main()

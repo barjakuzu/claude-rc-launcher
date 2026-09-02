@@ -157,6 +157,7 @@ export function DeviceDetail({ device, cards, tab, setTab, onClose, layout }: De
         <PreviewModal
           deviceId={device.id}
           name={previewName}
+          mode={sessions.find((s) => s.name === previewName)?.mode}
           onClose={() => setPreviewName(null)}
         />
       )}
