@@ -564,6 +564,7 @@ def setup_session(session_name, display_name, mode):
         return None
 
     # Try /remote-control up to 3 times
+    url = None
     for attempt in range(3):
         print(f"  {session_name}: sending /remote-control (attempt {attempt + 1}/3)")
         _send_rc(session_name)
@@ -574,13 +575,19 @@ def setup_session(session_name, display_name, mode):
                 ["tmux", "set-environment", "-t", session_name, "RC_URL", url],
                 capture_output=True,
             )
-            time.sleep(1)
-            _send_rename(session_name, display_name)
-            return
+            break
         # Wait before retry
         print(f"  {session_name}: attempt {attempt + 1} failed, waiting before retry...")
         time.sleep(5)
-    print(f"  {session_name}: timed out after 3 attempts")
+    if not url:
+        print(f"  {session_name}: timed out after 3 attempts")
+
+    # Rename whatever happened above. Renaming does not depend on remote
+    # control — a session that has never been remote-controlled renames
+    # fine — and gating the two together meant that when RC detection broke,
+    # sessions silently kept their generated names.
+    time.sleep(1)
+    _send_rename(session_name, display_name)
 
 
 def unstick_session(name):
