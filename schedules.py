@@ -2,6 +2,8 @@
 
 import json
 import os
+import shutil
+import tempfile
 import threading
 import uuid
 
@@ -25,11 +27,30 @@ def load_schedules():
 
 
 def save_schedules(schedules):
-    """Write schedules list to JSON file. Creates parent dir if needed."""
+    """Write schedules list to JSON file atomically (temp file in the same
+    directory + os.replace), mode 0600. Keeps one rolling backup of the
+    previous contents at SCHEDULES_FILE + '.bak' before overwriting."""
     with _schedules_lock:
-        os.makedirs(os.path.dirname(SCHEDULES_FILE), exist_ok=True)
-        with open(SCHEDULES_FILE, "w") as f:
-            json.dump(schedules, f, indent=2)
+        directory = os.path.dirname(SCHEDULES_FILE)
+        os.makedirs(directory, exist_ok=True)
+        if os.path.isfile(SCHEDULES_FILE):
+            try:
+                shutil.copyfile(SCHEDULES_FILE, SCHEDULES_FILE + ".bak")
+            except OSError as e:
+                print(f"  Warning: could not update schedules.json.bak: {e}")
+        fd, tmp_path = tempfile.mkstemp(
+            prefix=".schedules-", suffix=".json.tmp", dir=directory)
+        try:
+            with os.fdopen(fd, "w") as f:
+                json.dump(schedules, f, indent=2)
+            os.chmod(tmp_path, 0o600)
+            os.replace(tmp_path, SCHEDULES_FILE)
+        except Exception:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
 
 
 def get_schedule_by_id(schedule_id):
