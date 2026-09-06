@@ -88,15 +88,15 @@ class GetCapsLazyTest(unittest.TestCase):
 
     def test_get_caps_memoizes_across_calls(self):
         calls = []
-        real_run = subprocess.run
+        real_detect = compat.detect_caps
 
-        def counting_run(cmd, **kw):
-            calls.append(cmd)
-            return real_run(cmd, **kw)
+        def counting_detect(claude_bin, run=subprocess.run):
+            calls.append(claude_bin)
+            return real_detect(claude_bin, run=run)
 
         compat.CAPS.clear()
         compat._detected = False
-        compat.subprocess.run = counting_run
+        compat.detect_caps = counting_detect
         try:
             import config
             old_bin = config.CLAUDE_BIN
@@ -108,10 +108,11 @@ class GetCapsLazyTest(unittest.TestCase):
             finally:
                 config.CLAUDE_BIN = old_bin
         finally:
-            compat.subprocess.run = real_run
+            compat.detect_caps = real_detect
 
-        self.assertIs(first, second)
-        self.assertEqual(len(calls), count_after_first)  # no new subprocess calls
+        self.assertEqual(first, second)
+        self.assertEqual(count_after_first, 1)
+        self.assertEqual(len(calls), count_after_first)  # no new probe on second call
 
 
 class ClaudeVersionTest(unittest.TestCase):

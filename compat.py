@@ -18,6 +18,7 @@ import config
 import json
 import re
 import subprocess
+import threading
 
 VERSION_RE = re.compile(r'(\d+\.\d+\.\d+)')
 
@@ -26,11 +27,25 @@ NAME_RE = re.compile(r'(^|\s)--name(\s|,|<|=|$)', re.M)
 REMOTE_CONTROL_RE = re.compile(r'(^|\s)--remote-control(\s|,|<|=|$)', re.M)
 PERMISSION_MODE_RE = re.compile(r'(^|\s)--permission-mode(\s|,|<|=|$)', re.M)
 
-# CAPS starts empty; get_caps() populates it on first call. Never rebind
-# this name - always CAPS.clear()/CAPS.update() so existing references
+# Default shape, all-False/None, so any reader who sees CAPS before the
+# first get_caps() call still finds every key present (just undetected)
+# instead of an empty dict / KeyError.
+_DEFAULT_CAPS = {
+    "session_id_flag": False,
+    "name_flag": False,
+    "remote_control_flag": False,
+    "permission_mode_flag": False,
+    "agents_json": False,
+    "version": None,
+}
+
+# CAPS starts seeded with the all-False/None defaults; get_caps() replaces
+# its contents on first call. Never rebind this name - always
+# CAPS.clear()/CAPS.update() (under _lock) so existing references
 # (`from compat import CAPS`) keep seeing updates.
-CAPS = {}
+CAPS = dict(_DEFAULT_CAPS)
 _detected = False
+_lock = threading.Lock()
 
 
 def _run_capture(run, cmd, timeout=5, allow_nonzero=False):
@@ -56,14 +71,7 @@ def detect_caps(claude_bin, run=subprocess.run):
     version None rather than raising - callers must be able to trust the
     result even when claude isn't installed yet.
     """
-    caps = {
-        "session_id_flag": False,
-        "name_flag": False,
-        "remote_control_flag": False,
-        "permission_mode_flag": False,
-        "agents_json": False,
-        "version": None,
-    }
+    caps = dict(_DEFAULT_CAPS)
     help_text = _run_capture(run, [claude_bin, "--help"])
     if help_text is not None:
         caps["session_id_flag"] = bool(SESSION_ID_RE.search(help_text))
@@ -97,10 +105,13 @@ def get_caps():
     """
     global _detected
     if not _detected:
-        CAPS.clear()
-        CAPS.update(detect_caps(config.CLAUDE_BIN))
-        _detected = True
-    return CAPS
+        with _lock:
+            if not _detected:
+                new_caps = detect_caps(config.CLAUDE_BIN)
+                CAPS.clear()
+                CAPS.update(new_caps)
+                _detected = True
+    return dict(CAPS)
 
 
 def refresh_caps(claude_bin=None):
@@ -108,10 +119,12 @@ def refresh_caps(claude_bin=None):
     this to swap in a fake binary; production code never needs to call
     this after the first get_caps()."""
     global _detected
-    CAPS.clear()
-    CAPS.update(detect_caps(claude_bin or config.CLAUDE_BIN))
-    _detected = True
-    return CAPS
+    new_caps = detect_caps(claude_bin or config.CLAUDE_BIN)
+    with _lock:
+        CAPS.clear()
+        CAPS.update(new_caps)
+        _detected = True
+    return dict(CAPS)
 
 
 def claude_version():
