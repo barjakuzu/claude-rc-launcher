@@ -134,7 +134,10 @@ def cron_matches(expr, dt):
 
 
 def validate_cron(expr):
-    """Validate a cron expression. Returns None if valid, error string if invalid."""
+    """Validate a cron expression. Returns None if valid (including the
+    null cron of a manual task), error string if invalid."""
+    if expr is None:
+        return None
     try:
         fields = expr.strip().split()
         if len(fields) != 5:
@@ -150,7 +153,10 @@ def validate_cron(expr):
 
 
 def next_cron_run(expr, after_dt=None):
-    """Calculate next run time for a cron expression. Returns ISO string or None."""
+    """Calculate next run time for a cron expression. Returns ISO string or
+    None (always None for a manual task's null cron)."""
+    if expr is None:
+        return None
     if after_dt is None:
         after_dt = datetime.now()
     dt = after_dt.replace(second=0, microsecond=0) + timedelta(minutes=1)

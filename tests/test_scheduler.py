@@ -38,5 +38,19 @@ class ScheduleErrorLoggingTest(unittest.TestCase):
         self.assertIsNone(scheduler._schedule_error_to_log(None))
 
 
+class NullSafeCronTest(unittest.TestCase):
+    def test_validate_cron_accepts_null(self):
+        self.assertIsNone(scheduler.validate_cron(None))
+
+    def test_next_cron_run_returns_none_for_null(self):
+        self.assertIsNone(scheduler.next_cron_run(None))
+
+    def test_validate_cron_still_rejects_bad_strings(self):
+        self.assertIsNotNone(scheduler.validate_cron("not a cron"))
+
+    def test_validate_cron_still_accepts_good_strings(self):
+        self.assertIsNone(scheduler.validate_cron("0 9 * * *"))
+
+
 if __name__ == "__main__":
     unittest.main()
