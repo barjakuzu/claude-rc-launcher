@@ -1,19 +1,26 @@
-"""agents.py: wraps `claude agents --json`, normalizes rows, caches 30s."""
-import os, sys, unittest
+"""agents.py: wraps `claude agents --json`, normalizes rows, caches 30s,
+single-flight refreshes, gated on compat's agents_json capability."""
+import os, sys, threading, time, unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import agents
+import compat
 
 
 class FakeRun:
-    def __init__(self, stdout="[]", returncode=0, raises=None):
+    def __init__(self, stdout="[]", returncode=0, raises=None, delay=0):
         self.stdout = stdout
         self.returncode = returncode
         self.raises = raises
+        self.delay = delay
         self.calls = []
+        self.lock = threading.Lock()
 
     def __call__(self, cmd, **kw):
-        self.calls.append(cmd)
+        with self.lock:
+            self.calls.append(cmd)
+        if self.delay:
+            time.sleep(self.delay)
         if self.raises:
             raise self.raises
 
@@ -39,10 +46,28 @@ RAW_JSON = '''[
 ]'''
 
 
-class ListClaudeSessionsTest(unittest.TestCase):
-    def setUp(self):
-        agents._cache = {"rows": [], "at": 0.0}
+def _reset_agents_state():
+    agents._cache = {"rows": [], "at": 0.0, "bin": None}
+    agents._refreshing = False
+    agents._last_refresh_thread = None
 
+
+class AgentsJsonCapsGateMixin:
+    """Force compat.get_caps() to report agents_json: True for tests that
+    exercise the spawn path, restoring the real get_caps on tearDown."""
+
+    def setUp(self):
+        _reset_agents_state()
+        self._patched_get_caps = compat.get_caps
+        compat.get_caps = lambda: {"agents_json": True}
+        super().setUp()
+
+    def tearDown(self):
+        compat.get_caps = self._patched_get_caps
+        super().tearDown()
+
+
+class ListClaudeSessionsTest(AgentsJsonCapsGateMixin, unittest.TestCase):
     def test_normalizes_rows(self):
         fake = FakeRun(stdout=RAW_JSON)
         rows = agents.list_claude_sessions(claude_bin="claude", run=fake)
@@ -50,10 +75,11 @@ class ListClaudeSessionsTest(unittest.TestCase):
         self.assertEqual(rows[0], {
             "session_id": "abc-123", "name": "portugal", "cwd": "/home/user/proj",
             "kind": "interactive", "status": "idle", "started_at": 1757100000000,
-            "pid": 111, "waiting_for": None,
+            "pid": 111, "waiting_for": None, "state": None,
         })
         self.assertEqual(rows[2]["waiting_for"], "permission_prompt")
         self.assertIsNone(rows[2]["name"])
+        self.assertEqual(rows[1]["state"], "running")
 
     def test_empty_on_nonzero_exit(self):
         fake = FakeRun(stdout="", returncode=1)
@@ -85,12 +111,76 @@ class ListClaudeSessionsTest(unittest.TestCase):
         self.assertEqual(len(fake.calls), 1)  # second call served from cache
         clock["t"] += 30
         agents.list_claude_sessions(claude_bin="claude", run=fake, now_fn=lambda: clock["t"])
-        self.assertEqual(len(fake.calls), 2)  # cache expired, re-ran
+        if agents._last_refresh_thread:
+            agents._last_refresh_thread.join(timeout=5)
+        self.assertEqual(len(fake.calls), 2)  # cache expired, re-ran (in background)
+
+    def test_cache_is_keyed_on_claude_bin(self):
+        fake_a = FakeRun(stdout=RAW_JSON)
+        fake_b = FakeRun(stdout="[]")
+        clock = {"t": 1000.0}
+        rows_a = agents.list_claude_sessions(claude_bin="claude-a", run=fake_a, now_fn=lambda: clock["t"])
+        self.assertEqual(len(rows_a), 3)
+        # A different bin must not be served the first bin's cached rows —
+        # nothing cached for it yet, so it blocks and fetches its own.
+        rows_b = agents.list_claude_sessions(claude_bin="claude-b", run=fake_b, now_fn=lambda: clock["t"])
+        self.assertEqual(rows_b, [])
+        self.assertEqual(len(fake_a.calls), 1)
+        self.assertEqual(len(fake_b.calls), 1)
+
+    def test_gated_on_agents_json_cap(self):
+        compat.get_caps = lambda: {"agents_json": False}
+        fake = FakeRun(stdout=RAW_JSON)
+        rows = agents.list_claude_sessions(claude_bin="claude", run=fake)
+        self.assertEqual(rows, [])
+        self.assertEqual(fake.calls, [])  # never even spawned
+
+
+class SingleFlightRefreshTest(AgentsJsonCapsGateMixin, unittest.TestCase):
+    """Two concurrent callers with nothing cached yet must trigger exactly
+    one `claude agents --json` spawn, not one each."""
+
+    def test_two_threads_share_one_spawn(self):
+        fake = FakeRun(stdout=RAW_JSON, delay=0.2)
+        results = []
+
+        def worker():
+            results.append(agents.list_claude_sessions(claude_bin="claude", run=fake))
+
+        threads = [threading.Thread(target=worker) for _ in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=5)
+
+        self.assertEqual(len(fake.calls), 1)
+        for r in results:
+            self.assertEqual(len(r), 3)
+
+    def test_stale_cache_triggers_background_refresh_not_a_block(self):
+        # First call populates the cache (blocking, nothing cached yet).
+        fake = FakeRun(stdout=RAW_JSON)
+        clock = {"t": 1000.0}
+        agents.list_claude_sessions(claude_bin="claude", run=fake, now_fn=lambda: clock["t"])
+        self.assertEqual(len(fake.calls), 1)
+
+        # Now make the underlying spawn slow, expire the TTL, and confirm
+        # the stale rows come back immediately (not after the delay).
+        slow_fake = FakeRun(stdout=RAW_JSON, delay=0.3)
+        clock["t"] += 31
+        started = time.time()
+        rows = agents.list_claude_sessions(claude_bin="claude", run=slow_fake, now_fn=lambda: clock["t"])
+        elapsed = time.time() - started
+        self.assertEqual(len(rows), 3)  # stale rows, served immediately
+        self.assertLess(elapsed, 0.2, "stale read must not block on the slow refresh")
+        if agents._last_refresh_thread:
+            agents._last_refresh_thread.join(timeout=5)
+        self.assertEqual(len(slow_fake.calls), 1)
 
 
 class ListRcSessionsMergesExternalTest(unittest.TestCase):
     def setUp(self):
-        agents._cache = {"rows": [], "at": 0.0}
+        _reset_agents_state()
         import sessions
         self.sessions = sessions
         self._patched_run = sessions.subprocess.run
@@ -117,9 +207,11 @@ class ListRcSessionsMergesExternalTest(unittest.TestCase):
         }.get(var)
         agents.list_claude_sessions = lambda: [
             {"session_id": "known-uuid-1", "name": "portugal", "cwd": "/home/user/proj",
-             "kind": "interactive", "status": "idle", "started_at": 1, "pid": 1, "waiting_for": None},
+             "kind": "interactive", "status": "idle", "started_at": 1, "pid": 1,
+             "waiting_for": None, "state": None},
             {"session_id": "external-uuid-2", "name": "hand-started", "cwd": "/home/user/other",
-             "kind": "interactive", "status": "busy", "started_at": 2, "pid": 2, "waiting_for": None},
+             "kind": "interactive", "status": "busy", "started_at": 2, "pid": 2,
+             "waiting_for": None, "state": None},
         ]
 
         result = self.sessions.list_rc_sessions()
@@ -131,6 +223,28 @@ class ListRcSessionsMergesExternalTest(unittest.TestCase):
         self.assertEqual(external_rows[0]["session_id"], "external-uuid-2")
         self.assertTrue(external_rows[0]["external"])
         self.assertEqual(external_rows[0]["name"], "hand-started")
+
+    def test_external_row_carries_claude_state_for_needs_attention(self):
+        class FakeRun:
+            def __call__(self, cmd, **kw):
+                class R:
+                    returncode = 0
+                    stderr = ""
+                    stdout = ""
+                return R()
+        self.sessions.subprocess.run = FakeRun()
+        self.sessions.get_session_env = lambda name, var: None
+        agents.list_claude_sessions = lambda: [
+            {"session_id": "external-uuid-3", "name": "bg-task", "cwd": "/home/user/other",
+             "kind": "background", "status": "busy", "started_at": 2, "pid": 3,
+             "waiting_for": None, "state": "blocked"},
+        ]
+
+        result = self.sessions.list_rc_sessions()
+
+        external_rows = [s for s in result if s.get("kind") == "external"]
+        self.assertEqual(len(external_rows), 1)
+        self.assertEqual(external_rows[0]["claude"]["state"], "blocked")
 
 
 if __name__ == "__main__":

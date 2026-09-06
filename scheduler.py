@@ -12,7 +12,7 @@ import stats
 from config import (SESSION_PREFIX, RC_FLAGS,
                     resolve_claude_mode, RC_MAX_SESSIONS)
 from sessions import (session_exists, setup_session, get_url, list_rc_sessions,
-                      get_session_env, build_tmux_command)
+                      get_session_env, build_tmux_command, count_launcher_sessions)
 from schedules import load_schedules, save_schedules, add_history_entry
 import schedules as schedules_module
 
@@ -242,7 +242,7 @@ def _fire_schedule(schedule):
     # and the claim are atomic too (the server's own /start, /resume/start
     # cap check is advisory only - it can't hold this lock across a request).
     with _active_scheduled_sessions_lock:
-        if RC_MAX_SESSIONS > 0 and len(list_rc_sessions()) >= RC_MAX_SESSIONS:
+        if RC_MAX_SESSIONS > 0 and count_launcher_sessions(list_rc_sessions()) >= RC_MAX_SESSIONS:
             add_history_entry(schedule_id, "skipped", f"Session cap reached ({RC_MAX_SESSIONS})")
             print(f"  Scheduler: skipped '{name}', session cap reached ({RC_MAX_SESSIONS})")
             return

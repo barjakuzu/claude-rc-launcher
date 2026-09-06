@@ -31,7 +31,7 @@ from sessions import (
     list_rc_sessions, session_exists, setup_session, stop_session,
     restart_session, list_resumable_sessions, resume_session,
     get_all_session_errors, unstick_session, get_transcript,
-    build_tmux_command,
+    build_tmux_command, count_launcher_sessions,
 )
 from tunnel import (
     cloudflared_available, start_tunnel, stop_tunnel, get_tunnel_status,
@@ -561,12 +561,22 @@ def _session_cap_message(current_count, max_sessions):
     return None
 
 
-def _derive_session_state(session_row):
+# A launcher session younger than this still reports status unknown/None
+# while its pane settles — after this age, an unknown status is treated as
+# idle rather than starting forever (a session that's been "starting" for
+# minutes almost certainly just never finished booting).
+STARTING_GRACE_SECONDS = 90
+
+
+def _derive_session_state(session_row, now=None):
     """One of starting|busy|idle|needs_attention|ended from a session row
     (either shape list_rc_sessions returns: a launcher rc-* row with
     status running|dead|unknown, or an external row with status from
-    claude agents --json: idle|busy|ended)."""
+    claude agents --json: idle|busy|ended). `now` is injectable for tests;
+    defaults to time.time()."""
     if session_row.get("waiting_for"):
+        return "needs_attention"
+    if (session_row.get("claude") or {}).get("state") == "blocked":
         return "needs_attention"
     status = session_row.get("status")
     if status == "dead" or status == "ended":
@@ -574,8 +584,39 @@ def _derive_session_state(session_row):
     if status == "busy":
         return "busy"
     if status in ("unknown", None) and session_row.get("kind") != "external":
-        return "starting"
+        created_at = session_row.get("created_at")
+        if created_at is None:
+            return "starting"
+        if now is None:
+            now = time.time()
+        if now - created_at < STARTING_GRACE_SECONDS:
+            return "starting"
+        return "idle"
     return "idle"
+
+
+def _stoppable_session_names(rows):
+    """Names to `stop_session` (tmux kill-session) for /stop-all. External
+    rows have no rc-* tmux session of their own — stop_session would
+    `tmux kill-session -t <name>` against whatever tmux session (if any)
+    happens to share that row's synthesized/claude name, which is not
+    this row's process at all, so external rows are excluded here. An
+    external session is only stoppable explicitly, via POST /stop
+    {external: true, pid: ...}."""
+    return [s["name"] for s in rows if not s.get("external")]
+
+
+def _validate_stop_pid(raw_pid):
+    """Validate a pid from a POST /stop {external: true, pid: ...} body
+    before it ever reaches /proc: (pid, None) if it parses as a positive
+    int that isn't 1 (init) or our own process, else (None, reason)."""
+    try:
+        pid = int(raw_pid)
+    except (TypeError, ValueError):
+        return None, "Invalid pid"
+    if pid <= 1 or pid == os.getpid():
+        return None, "Invalid pid"
+    return pid, None
 
 
 def _stop_external_pid(pid, run=subprocess.run):
@@ -587,11 +628,19 @@ def _stop_external_pid(pid, run=subprocess.run):
     `run` is accepted for interface symmetry with other server.py helpers
     that inject subprocess.run for testability, but the actual check reads
     /proc directly (Linux-only) rather than shelling out.
+
+    Caller must pass a validated pid (positive int, not 1, not our own
+    pid) — this function does not re-derive that, it only verifies the
+    /proc identity check before signaling.
     """
     try:
         with open(f"/proc/{pid}/cmdline", "rb") as f:
             raw = f.read()
-    except (FileNotFoundError, OSError):
+    except FileNotFoundError:
+        return False, "Process not found"
+    except PermissionError:
+        return False, "Permission denied"
+    except OSError:
         return False, "Process not found"
     parts = raw.split(b"\x00")
     argv0 = parts[0].decode(errors="replace") if parts else ""
@@ -1055,8 +1104,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._json({"projects": projects})
 
         elif path == "/status":
-            # Backwards compat
-            sessions = list_rc_sessions()
+            # Backwards compat. External rows have no url/terminal and
+            # predate this legacy shape's contract, so they're excluded.
+            sessions = [s for s in list_rc_sessions() if not s.get("external")]
             if sessions:
                 self._json({"running": True, "url": sessions[0].get("url")})
             else:
@@ -1173,7 +1223,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._json({"ok": True, "message": "Already running", "name": name})
                 return
 
-            cap_msg = _session_cap_message(len(list_rc_sessions()), RC_MAX_SESSIONS)
+            cap_msg = _session_cap_message(count_launcher_sessions(list_rc_sessions()), RC_MAX_SESSIONS)
             if cap_msg:
                 self._json({"ok": False, "message": cap_msg}, 429)
                 return
@@ -1206,8 +1256,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         elif path == "/stop":
             body = self._read_body()
-            if body.get("external") and body.get("pid"):
-                ok, reason = _stop_external_pid(int(body["pid"]))
+            if body.get("external") and body.get("pid") is not None:
+                pid, err = _validate_stop_pid(body.get("pid"))
+                if err:
+                    self._json({"ok": False, "message": err}, 400)
+                    return
+                ok, reason = _stop_external_pid(pid)
                 self._json({"ok": ok, "message": reason}, 200 if ok else 400)
                 return
             name = body.get("name", "").strip()
@@ -1231,8 +1285,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._json({"ok": result["unstuck"], "message": result["detail"]})
 
         elif path == "/stop-all":
-            for s in list_rc_sessions():
-                stop_session(s["name"])
+            for name in _stoppable_session_names(list_rc_sessions()):
+                stop_session(name)
             self._json({"ok": True, "message": "All stopped"})
 
         elif path == "/restart":
@@ -1316,7 +1370,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not session_id or not project:
                 self._json({"ok": False, "message": "Missing session_id or project"}, 400)
                 return
-            cap_msg = _session_cap_message(len(list_rc_sessions()), RC_MAX_SESSIONS)
+            cap_msg = _session_cap_message(count_launcher_sessions(list_rc_sessions()), RC_MAX_SESSIONS)
             if cap_msg:
                 self._json({"ok": False, "message": cap_msg}, 429)
                 return

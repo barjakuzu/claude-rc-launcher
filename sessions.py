@@ -146,16 +146,22 @@ def _store_session_error(name, error):
 def list_rc_sessions():
     """Return rc-* tmux sessions (name, mode, URL, workdir, status) plus
     any Claude Code session `claude agents --json` knows about that this
-    launcher didn't start — those get kind: "external", no terminal."""
+    launcher didn't start — those get kind: "external", no terminal.
+
+    Launcher rows also carry created_at (tmux's #{session_created} epoch
+    seconds, or None if unparseable) so callers deriving a "starting"
+    state can bound it by session age instead of forever."""
     r = subprocess.run(
-        ["tmux", "list-sessions", "-F", "#{session_name}"],
+        ["tmux", "list-sessions", "-F", "#{session_name}\t#{session_created}"],
         capture_output=True, text=True,
     )
     sessions = []
     known_session_ids = set()
     if r.returncode == 0:
         for line in r.stdout.strip().splitlines():
-            name = line.strip()
+            parts = line.split("\t", 1)
+            name = parts[0].strip()
+            created_raw = parts[1].strip() if len(parts) > 1 else ""
             if not name.startswith(SESSION_PREFIX):
                 continue
             mode = get_session_env(name, "RC_MODE") or "c"
@@ -167,7 +173,9 @@ def list_rc_sessions():
             rc_session_id = get_session_env(name, "RC_SESSION_ID")
             if rc_session_id:
                 known_session_ids.add(rc_session_id)
-            s = {"name": name, "mode": mode, "url": url, "status": status}
+            created_at = int(created_raw) if created_raw.isdigit() else None
+            s = {"name": name, "mode": mode, "url": url, "status": status,
+                 "created_at": created_at}
             if tokens is not None:
                 s["tokens"] = tokens
             if workdir:
@@ -189,9 +197,19 @@ def list_rc_sessions():
             "cwd": row["cwd"],
             "pid": row["pid"],
             "waiting_for": row["waiting_for"],
+            "claude": {"state": row.get("state")},
         })
 
     return sessions
+
+
+def count_launcher_sessions(rows=None):
+    """Count only launcher-owned (non-external) rows from list_rc_sessions
+    — external rows are informational, not sessions this launcher started
+    or can restart, so they must not count toward RC_MAX_SESSIONS."""
+    if rows is None:
+        rows = list_rc_sessions()
+    return len([s for s in rows if not s.get("external")])
 
 
 def get_session_env(session_name, var_name):

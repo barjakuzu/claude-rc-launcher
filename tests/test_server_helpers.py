@@ -372,5 +372,114 @@ class StopExternalPidTest(unittest.TestCase):
         self.assertEqual(fake_kill.call_args[0], (12345, signal.SIGTERM))
 
 
+class StoppableSessionNamesTest(unittest.TestCase):
+    """/stop-all must never target an external row's name with
+    tmux kill-session — including when that name collides with an
+    unrelated, non-rc-* tmux session that happens to exist."""
+
+    def test_skips_external_rows(self):
+        rows = [
+            {"name": "rc-portugal", "external": False},
+            {"name": "external-abc12345", "external": True, "session_id": "abc12345-x"},
+        ]
+        self.assertEqual(server._stoppable_session_names(rows), ["rc-portugal"])
+
+    def test_name_collision_with_a_non_rc_tmux_session_is_still_skipped(self):
+        # An external row's synthesized/claude-reported name can collide
+        # with some unrelated tmux session name already on the box (e.g.
+        # a plain shell someone opened by hand called "portugal"). It must
+        # still never be passed to stop_session.
+        rows = [
+            {"name": "portugal", "external": True, "session_id": "xyz"},
+            {"name": "rc-real", "external": False},
+        ]
+        self.assertEqual(server._stoppable_session_names(rows), ["rc-real"])
+
+    def test_no_external_key_at_all_is_treated_as_launcher_owned(self):
+        rows = [{"name": "rc-portugal"}]
+        self.assertEqual(server._stoppable_session_names(rows), ["rc-portugal"])
+
+
+class ValidateStopPidTest(unittest.TestCase):
+    def test_accepts_a_normal_pid(self):
+        pid, err = server._validate_stop_pid(12345)
+        self.assertEqual(pid, 12345)
+        self.assertIsNone(err)
+
+    def test_rejects_non_int(self):
+        pid, err = server._validate_stop_pid("not-a-pid")
+        self.assertIsNone(pid)
+        self.assertEqual(err, "Invalid pid")
+
+    def test_rejects_none(self):
+        pid, err = server._validate_stop_pid(None)
+        self.assertIsNone(pid)
+        self.assertEqual(err, "Invalid pid")
+
+    def test_rejects_zero_and_negative(self):
+        for bad in (0, -1, -12345):
+            pid, err = server._validate_stop_pid(bad)
+            self.assertIsNone(pid, bad)
+            self.assertEqual(err, "Invalid pid", bad)
+
+    def test_rejects_pid_1(self):
+        pid, err = server._validate_stop_pid(1)
+        self.assertIsNone(pid)
+        self.assertEqual(err, "Invalid pid")
+
+    def test_rejects_our_own_pid(self):
+        pid, err = server._validate_stop_pid(os.getpid())
+        self.assertIsNone(pid)
+        self.assertEqual(err, "Invalid pid")
+
+
+class DeriveSessionStateStartingBoundaryTest(unittest.TestCase):
+    def test_within_grace_window_is_starting(self):
+        row = {"status": "unknown", "created_at": 1000}
+        self.assertEqual(
+            server._derive_session_state(row, now=1000 + server.STARTING_GRACE_SECONDS - 1),
+            "starting",
+        )
+
+    def test_at_or_past_grace_window_falls_back_to_idle(self):
+        row = {"status": "unknown", "created_at": 1000}
+        self.assertEqual(
+            server._derive_session_state(row, now=1000 + server.STARTING_GRACE_SECONDS),
+            "idle",
+        )
+
+    def test_missing_created_at_is_still_starting(self):
+        row = {"status": "unknown", "created_at": None}
+        self.assertEqual(server._derive_session_state(row, now=999999), "starting")
+
+    def test_blocked_claude_state_is_needs_attention(self):
+        row = {"status": "busy", "claude": {"state": "blocked"}}
+        self.assertEqual(server._derive_session_state(row), "needs_attention")
+
+    def test_working_claude_state_does_not_force_needs_attention(self):
+        row = {"status": "busy", "claude": {"state": "working"}}
+        self.assertEqual(server._derive_session_state(row), "busy")
+
+
+class CountLauncherSessionsCapTest(unittest.TestCase):
+    """RC_MAX_SESSIONS must only count launcher-owned rows — external
+    rows are informational and this launcher can't restart or reap them,
+    so they must never push a real /start or /resume/start into the cap."""
+
+    def test_external_rows_excluded_from_count(self):
+        import sessions
+        rows = [
+            {"name": "rc-a", "external": False},
+            {"name": "rc-b", "external": False},
+            {"name": "external-1", "external": True},
+            {"name": "external-2", "external": True},
+        ]
+        self.assertEqual(sessions.count_launcher_sessions(rows), 2)
+
+    def test_empty_rows(self):
+        import sessions
+        self.assertEqual(sessions.count_launcher_sessions([]), 0)
+
+
 if __name__ == "__main__":
     unittest.main()
