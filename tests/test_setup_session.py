@@ -402,6 +402,18 @@ class RestartSessionPrefersRcSessionIdTest(unittest.TestCase):
         self.assertIn("0d3b8b1a-1111-4a2b-9c3d-abcdef012345", " ".join(cmd))
 
 
+class ListResumableSessionsIsTmuxIndependentTest(unittest.TestCase):
+    """list_resumable_sessions must not read tmux env at all — it only
+    scans ~/.claude/projects/*/*.jsonl. Pinned here so a future change
+    doesn't accidentally couple it to RC_SESSION_ID."""
+
+    def test_does_not_call_get_session_env(self):
+        import unittest.mock as mock
+        with mock.patch.object(sessions, "get_session_env") as m:
+            sessions.list_resumable_sessions()
+            m.assert_not_called()
+
+
 class StripOsc8Test(unittest.TestCase):
     def test_strips_close_sequence(self):
         raw = "hello\x1b]8;;\x1b\\world"
