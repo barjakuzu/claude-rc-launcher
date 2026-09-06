@@ -31,7 +31,7 @@ from sessions import (
     list_rc_sessions, session_exists, setup_session, stop_session,
     restart_session, list_resumable_sessions, resume_session,
     get_all_session_errors, unstick_session, get_transcript,
-    build_tmux_command, count_launcher_sessions,
+    build_tmux_command, count_launcher_sessions, get_url_with_source,
 )
 from tunnel import (
     cloudflared_available, start_tunnel, stop_tunnel, get_tunnel_status,
@@ -673,6 +673,35 @@ def _validate_stop_pid(raw_pid):
     if pid <= 1 or pid == os.getpid():
         return None, "Invalid pid"
     return pid, None
+
+
+ENABLE_RC_POLL_SECONDS = 20
+ENABLE_RC_POLL_INTERVAL = 0.5
+
+
+def _enable_rc_for_adopted(name, run=subprocess.run, sleep=time.sleep, now_fn=time.time):
+    """POST /sessions/<name>/enable-rc backing logic for an already-adopted
+    external tmux session (`name` is the tmux session name, validated by
+    the caller against _adopted_tmux_names() before this is ever reached):
+    type '/remote-control' into the pane, press Enter, then poll
+    get_url_with_source(name) for up to ENABLE_RC_POLL_SECONDS for an
+    'osc8' URL (the only trustworthy signal RC actually activated).
+    Never sends anything but that literal command string."""
+    r = run(["tmux", "send-keys", "-t", name, "-l", "/remote-control"],
+            capture_output=True, text=True, timeout=5)
+    if r.returncode != 0:
+        return {"ok": False, "message": "Could not send /remote-control to the pane"}
+    r2 = run(["tmux", "send-keys", "-t", name, "Enter"],
+             capture_output=True, text=True, timeout=5)
+    if r2.returncode != 0:
+        return {"ok": False, "message": "Could not send Enter to the pane"}
+    deadline = now_fn() + ENABLE_RC_POLL_SECONDS
+    while now_fn() < deadline:
+        url, source = get_url_with_source(name)
+        if source == "osc8" and url:
+            return {"ok": True, "url": url}
+        sleep(ENABLE_RC_POLL_INTERVAL)
+    return {"ok": False, "message": "Remote Control did not activate within 20s"}
 
 
 def _stop_external_pid(pid, run=subprocess.run):
@@ -1427,6 +1456,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._json({"ok": True})
             except subprocess.SubprocessError as e:
                 self._json({"ok": False, "message": str(e)}, 500)
+
+        elif path.startswith("/sessions/") and path.endswith("/enable-rc"):
+            name = path[len("/sessions/"):-len("/enable-rc")]
+            if name not in _adopted_tmux_names():
+                self._json({"ok": False, "message": "Not an adopted external session"}, 400)
+                return
+            result = _enable_rc_for_adopted(name)
+            self._json(result, 200 if result.get("ok") else 502)
 
         elif path == "/resume/start":
             body = self._read_body()
