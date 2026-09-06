@@ -122,6 +122,7 @@ def create_schedule(data):
         "workdir": data.get("workdir", "/tmp"),
         "mode": data.get("mode", "c"),
         "model": data.get("model"),
+        "concurrency": data.get("concurrency", "skip"),
         "enabled": data.get("enabled", True),
         "last_run": None,
         "created_at": datetime.now().isoformat() + 'Z',
@@ -139,7 +140,7 @@ def update_schedule(schedule_id, updates):
     for i, s in enumerate(schedules):
         if s.get("id") == schedule_id:
             allowed = {"name", "cron", "prompt", "instructions_file", "workdir",
-                       "mode", "model", "enabled", "last_run", "history"}
+                       "mode", "model", "concurrency", "enabled", "last_run", "history"}
             for k, v in updates.items():
                 if k in allowed:
                     s[k] = v

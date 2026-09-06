@@ -129,5 +129,29 @@ class ManualTaskCronTest(unittest.TestCase):
         self.assertEqual(updated["cron"], "0 9 * * *")
 
 
+class ConcurrencyFieldTest(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self._orig = schedules.SCHEDULES_FILE
+        schedules.SCHEDULES_FILE = os.path.join(self.tmpdir, "schedules.json")
+
+    def tearDown(self):
+        schedules.SCHEDULES_FILE = self._orig
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_create_schedule_defaults_concurrency_to_skip(self):
+        s = schedules.create_schedule({"name": "task"})
+        self.assertEqual(s["concurrency"], "skip")
+
+    def test_create_schedule_preserves_explicit_kill(self):
+        s = schedules.create_schedule({"name": "task", "concurrency": "kill"})
+        self.assertEqual(s["concurrency"], "kill")
+
+    def test_update_schedule_can_change_concurrency(self):
+        s = schedules.create_schedule({"name": "task"})
+        updated = schedules.update_schedule(s["id"], {"concurrency": "kill"})
+        self.assertEqual(updated["concurrency"], "kill")
+
+
 if __name__ == "__main__":
     unittest.main()
