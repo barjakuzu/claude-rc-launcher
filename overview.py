@@ -33,6 +33,7 @@ def card_from_parts(device, sessions, stats, online=None):
         "sessions": len(sess), "tokens": tokens,
         "loadPct": load_pct, "os": os_name, "spark": spark,
         "user": user, "home_dir": home_dir,
+        "claude_version": (stats or {}).get("claude_version"),
     }
 
 

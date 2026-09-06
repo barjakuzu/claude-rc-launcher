@@ -47,5 +47,21 @@ class OverviewTest(unittest.TestCase):
         )
         self.assertEqual(card["loadPct"], 100)
 
+
+class CardFromPartsClaudeVersionTest(unittest.TestCase):
+    def test_claude_version_read_from_stats(self):
+        card = overview.card_from_parts(
+            {"id": "local", "name": "local"}, [], {"claude_version": "2.1.263"})
+        self.assertEqual(card["claude_version"], "2.1.263")
+
+    def test_claude_version_none_when_stats_missing(self):
+        card = overview.card_from_parts({"id": "local", "name": "local"}, [], None)
+        self.assertIsNone(card["claude_version"])
+
+    def test_claude_version_none_when_absent_from_stats(self):
+        card = overview.card_from_parts({"id": "local", "name": "local"}, [], {})
+        self.assertIsNone(card["claude_version"])
+
+
 if __name__ == "__main__":
     unittest.main()
