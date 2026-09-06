@@ -70,6 +70,21 @@ class RepairSchedulesTest(unittest.TestCase):
         mode = stat.S_IMODE(os.stat(self.path).st_mode)
         self.assertEqual(mode, 0o600)
 
+    def test_backup_file_is_mode_0600(self):
+        self._write('[{"id": "a"}]]')
+        repair_schedules.repair(self.path)
+        backups = [f for f in os.listdir(self.tmpdir) if f.startswith("schedules.json.corrupt-")]
+        self.assertEqual(len(backups), 1)
+        mode = stat.S_IMODE(os.stat(os.path.join(self.tmpdir, backups[0])).st_mode)
+        self.assertEqual(mode, 0o600)
+
+    def test_recovers_array_when_file_starts_with_leading_whitespace(self):
+        self._write('\n  [{"id": "a", "name": "A"}]]')
+        ok = repair_schedules.repair(self.path)
+        self.assertTrue(ok)
+        with open(self.path) as f:
+            self.assertEqual(json.load(f), [{"id": "a", "name": "A"}])
+
 
 if __name__ == "__main__":
     unittest.main()

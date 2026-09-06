@@ -26,11 +26,12 @@ def recover_longest_prefix(text):
     """Return (value, trailing_text) for the longest valid JSON value
     parseable from the start of `text`, or (None, None) if nothing parses."""
     decoder = json.JSONDecoder()
+    stripped = text.lstrip()
     try:
-        value, end = decoder.raw_decode(text)
+        value, end = decoder.raw_decode(stripped)
     except json.JSONDecodeError:
         return None, None
-    return value, text[end:]
+    return value, stripped[end:]
 
 
 def repair(path):
@@ -54,6 +55,7 @@ def repair(path):
 
     backup_path = f"{path}.corrupt-{time.strftime('%Y%m%dT%H%M%S')}"
     shutil.copyfile(path, backup_path)
+    os.chmod(backup_path, 0o600)
     print(f"Backed up original to {backup_path}")
     if trailing.strip():
         print(f"Discarded trailing data: {trailing.strip()[:200]!r}")
