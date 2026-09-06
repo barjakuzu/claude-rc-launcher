@@ -5,6 +5,7 @@ import re
 import subprocess
 import threading
 import time
+import uuid
 from datetime import datetime, timedelta
 
 import stats
@@ -197,7 +198,7 @@ def _due_to_fire(schedule, now):
 
 # --- Session lifecycle tracking ---
 
-_active_scheduled_sessions = {}  # session_name -> {schedule_id, started_at, schedule_safe_name}
+_active_scheduled_sessions = {}  # schedule_id -> {session_name, started_at, schedule_safe_name}
 
 
 def _monitor_scheduled_sessions():
@@ -206,7 +207,8 @@ def _monitor_scheduled_sessions():
         return
 
     ended = []
-    for session_name, info in _active_scheduled_sessions.items():
+    for schedule_id, info in _active_scheduled_sessions.items():
+        session_name = info["session_name"]
         # Check if tmux session still exists
         result = subprocess.run(
             ["tmux", "has-session", "-t", session_name],
@@ -214,7 +216,7 @@ def _monitor_scheduled_sessions():
         )
         if result.returncode != 0:
             # Session ended
-            ended.append(session_name)
+            ended.append(schedule_id)
             duration = (datetime.now() - info["started_at"]).total_seconds() / 60
 
             # Try to read the run report if it exists
@@ -235,14 +237,14 @@ def _monitor_scheduled_sessions():
                         pass
 
             add_history_entry(
-                info["schedule_id"],
+                schedule_id,
                 "completed",
                 summary,
                 duration_minutes=round(duration, 1)
             )
 
-    for name in ended:
-        del _active_scheduled_sessions[name]
+    for schedule_id in ended:
+        del _active_scheduled_sessions[schedule_id]
 
 
 # --- Fire mechanism ---
@@ -250,23 +252,25 @@ def _monitor_scheduled_sessions():
 def _fire_schedule(schedule):
     """Spawn a new Claude session for a scheduled task."""
     name = schedule.get("name", "task")
-    # Generate unique session name (include date to prevent collisions across days)
-    safe_name = re.sub(r'[^a-zA-Z0-9_-]', '', name.replace(" ", "-"))
-    ts = time.strftime("%m%d-%H%M%S")
-    session_name = f"{SESSION_PREFIX}sched-{safe_name}-{ts}"
+    schedule_id = schedule["id"]
+    concurrency = schedule.get("concurrency", "skip")
 
-    # Kill stale sessions from previous runs of this schedule
-    stale_prefix = f"{SESSION_PREFIX}sched-{safe_name}-"
-    result = subprocess.run(
-        ["tmux", "list-sessions", "-F", "#{session_name}"],
-        capture_output=True, text=True,
-    )
-    if result.returncode == 0:
-        for line in result.stdout.strip().splitlines():
-            sname = line.strip()
-            if sname.startswith(stale_prefix) and sname != session_name:
-                subprocess.run(["tmux", "kill-session", "-t", sname], capture_output=True)
-                print(f"  Scheduler: killed stale session {sname}")
+    existing = _active_scheduled_sessions.get(schedule_id)
+    if existing and session_exists(existing["session_name"]):
+        if concurrency == "kill":
+            subprocess.run(["tmux", "kill-session", "-t", existing["session_name"]],
+                            capture_output=True)
+            print(f"  Scheduler: killed running session {existing['session_name']} "
+                  f"for '{name}' (concurrency=kill)")
+            del _active_scheduled_sessions[schedule_id]
+        else:
+            add_history_entry(schedule_id, "skipped",
+                               f"Still running as {existing['session_name']} (concurrency=skip)")
+            print(f"  Scheduler: skipped '{name}', already running as {existing['session_name']}")
+            return
+
+    safe_name = re.sub(r'[^a-zA-Z0-9_-]', '', name.replace(" ", "-"))
+    session_name = f"{SESSION_PREFIX}run-{uuid.uuid4().hex[:12]}"
 
     workdir = schedule.get("workdir", "/tmp")
     mode = schedule.get("mode", "c")
@@ -370,9 +374,9 @@ def _fire_schedule(schedule):
             capture_output=True,
         )
 
-        # Register session for lifecycle monitoring
-        _active_scheduled_sessions[session_name] = {
-            "schedule_id": schedule["id"],
+        # Register session for lifecycle monitoring and concurrency control
+        _active_scheduled_sessions[schedule_id] = {
+            "session_name": session_name,
             "started_at": datetime.now(),
             "schedule_safe_name": safe_name,
         }

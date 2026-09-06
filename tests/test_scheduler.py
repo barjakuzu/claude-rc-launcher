@@ -182,5 +182,67 @@ class ManualTaskFiresTest(unittest.TestCase):
         self.assertIn(("manual-1", "ok"), [(h[0], h[1]) for h in self.history])
 
 
+class FireScheduleNamingTest(unittest.TestCase):
+    def setUp(self):
+        self.fake = FakeRun()
+        self._saved = _patch_scheduler(self.fake)
+        self.history = []
+        scheduler.add_history_entry = lambda sid, status, msg, **kw: self.history.append((sid, status, msg))
+
+    def tearDown(self):
+        _restore_scheduler(self._saved)
+
+    def test_session_name_matches_rc_run_hex_pattern(self):
+        scheduler._fire_schedule({"id": "s1", "name": "My Task", "cron": "0 9 * * *",
+                                   "workdir": "/tmp", "prompt": "hi"})
+        names = self.fake.new_session_names()
+        self.assertEqual(len(names), 1)
+        self.assertRegex(names[0], r'^rc-run-[0-9a-f]{12}$')
+
+
+class ConcurrencyTest(unittest.TestCase):
+    def setUp(self):
+        self.fake = FakeRun()
+        self._saved = _patch_scheduler(self.fake)
+        self.history = []
+        scheduler.add_history_entry = lambda sid, status, msg, **kw: self.history.append((sid, status, msg))
+
+    def tearDown(self):
+        _restore_scheduler(self._saved)
+
+    def _schedule(self, **overrides):
+        s = {"id": "s1", "name": "task", "cron": "0 9 * * *", "workdir": "/tmp", "prompt": "hi"}
+        s.update(overrides)
+        return s
+
+    def test_default_skip_does_not_fire_a_second_time_while_running(self):
+        schedule = self._schedule()
+        scheduler._fire_schedule(schedule)
+        first_names = self.fake.new_session_names()
+        self.assertEqual(len(first_names), 1)
+
+        scheduler._fire_schedule(schedule)
+        self.assertEqual(self.fake.new_session_names(), first_names)  # no new session
+        self.assertIn(("s1", "skipped"), [(h[0], h[1]) for h in self.history])
+
+    def test_kill_stops_the_old_session_and_starts_a_new_one(self):
+        schedule = self._schedule(concurrency="kill")
+        scheduler._fire_schedule(schedule)
+        first_names = self.fake.new_session_names()
+        self.assertEqual(len(first_names), 1)
+        self.assertIn(first_names[0], self.fake.alive)
+
+        scheduler._fire_schedule(schedule)
+        second_names = self.fake.new_session_names()
+        self.assertEqual(len(second_names), 2)
+        self.assertNotIn(first_names[0], self.fake.alive)  # old one killed
+        self.assertIn(second_names[1], self.fake.alive)
+
+    def test_fires_normally_when_nothing_is_tracked_yet(self):
+        scheduler._fire_schedule(self._schedule())
+        self.assertEqual(len(self.fake.new_session_names()), 1)
+        self.assertIn(("s1", "ok"), [(h[0], h[1]) for h in self.history])
+
+
 if __name__ == "__main__":
     unittest.main()
