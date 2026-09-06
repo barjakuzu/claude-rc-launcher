@@ -3,6 +3,7 @@
 import base64
 import hmac
 import http.server
+import ipaddress
 import json
 import os
 import re
@@ -184,14 +185,26 @@ def _is_rate_limited(ip):
     return len(recent) >= _LOGIN_MAX_ATTEMPTS
 
 
+_LOG_SAFE_RE = re.compile(r"[^A-Za-z0-9._@:-]")
+
+
+def _log_safe(value, max_len=64):
+    """Sanitize a value for inclusion in a single log line: strip anything
+    that isn't alphanumeric or one of `._@:-` (in particular newlines, so a
+    caller can't inject extra log lines or forge fields), then truncate."""
+    return _LOG_SAFE_RE.sub("_", value)[:max_len]
+
+
 def _record_failed_login(ip, user=""):
     """Record a failed login attempt and log a stable line fail2ban can
-    match (see docs/fail2ban/claude-rc.conf)."""
+    match (see docs/fail2ban/claude-rc.conf). Both fields are attacker
+    controlled (user comes straight from the login form; ip may come from a
+    trusted-but-misconfigured proxy) so both are sanitized before logging."""
     now = time.time()
     if ip not in _login_attempts:
         _login_attempts[ip] = []
     _login_attempts[ip].append(now)
-    print(f"AUTH FAIL ip={ip} user={user}")
+    print(f"AUTH FAIL ip={_log_safe(ip)} user={_log_safe(user)}")
 
 
 def _check_auth(handler):
@@ -431,18 +444,28 @@ def _cookie_secure_flag(behind_tls, forwarded_proto):
     return bool(behind_tls) or forwarded_proto == "https"
 
 
+def _is_valid_ip(value):
+    try:
+        ipaddress.ip_address(value)
+        return True
+    except ValueError:
+        return False
+
+
 def _resolve_client_ip(peer_ip, real_ip_header, forwarded_for_header, trusted_proxies):
     """Return the IP to use for login rate limiting.
 
     X-Real-IP / X-Forwarded-For are attacker-controlled unless the request
     actually came through a proxy we trust (nginx on the same box, by
-    default) - otherwise anyone can spoof them to dodge the lockout."""
+    default) - otherwise anyone can spoof them to dodge the lockout. Even
+    from a trusted proxy the header value must parse as a real IP address,
+    or a misconfigured/compromised proxy could forward garbage straight
+    into the rate limiter and the AUTH FAIL log."""
     if peer_ip not in trusted_proxies:
         return peer_ip
-    if real_ip_header:
-        return real_ip_header
-    if forwarded_for_header:
-        return forwarded_for_header.split(",")[0].strip()
+    candidate = real_ip_header or (forwarded_for_header.split(",")[0].strip() if forwarded_for_header else "")
+    if candidate and _is_valid_ip(candidate):
+        return candidate
     return peer_ip
 
 

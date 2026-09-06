@@ -1,6 +1,8 @@
 """Pure-helper unit tests for server.py. The request handler itself needs a
 live socket to construct, so logic worth covering gets extracted into small
 functions and tested directly here instead."""
+import contextlib
+import io
 import os
 import sys
 import unittest
@@ -71,6 +73,10 @@ class ResolveClientIpTest(unittest.TestCase):
         self.assertIn("127.0.0.1", config.RC_TRUSTED_PROXIES)
         self.assertIn("::1", config.RC_TRUSTED_PROXIES)
 
+    def test_trusted_peer_with_garbage_x_real_ip_falls_back_to_peer(self):
+        ip = server._resolve_client_ip("127.0.0.1", "not-an-ip\n", "", {"127.0.0.1"})
+        self.assertEqual(ip, "127.0.0.1")
+
 
 class CookieSecureFlagTest(unittest.TestCase):
     def test_true_when_behind_tls_env_set(self):
@@ -82,6 +88,37 @@ class CookieSecureFlagTest(unittest.TestCase):
     def test_false_over_plain_http_with_no_tls_env(self):
         self.assertFalse(server._cookie_secure_flag(False, None))
         self.assertFalse(server._cookie_secure_flag(False, "http"))
+
+
+class LogSafeTest(unittest.TestCase):
+    def test_strips_disallowed_characters(self):
+        self.assertEqual(server._log_safe("admin bob!"), "admin_bob_")
+
+    def test_truncates_to_max_len(self):
+        self.assertEqual(server._log_safe("a" * 100, max_len=10), "a" * 10)
+
+    def test_allows_common_safe_characters(self):
+        self.assertEqual(server._log_safe("a.b_c@d:e-9"), "a.b_c@d:e-9")
+
+
+class RecordFailedLoginLogTest(unittest.TestCase):
+    def test_logs_single_sanitized_line_for_crlf_and_unicode_user(self):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            server._record_failed_login("203.0.113.9", "admin\r\nX-Injected: 1\nüser name")
+        lines = buf.getvalue().splitlines()
+        self.assertEqual(len(lines), 1)
+        self.assertTrue(lines[0].startswith("AUTH FAIL ip=203.0.113.9 user="))
+        self.assertNotIn("\n", lines[0])
+        self.assertNotIn("\r", lines[0])
+
+    def test_logs_truncated_user(self):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            server._record_failed_login("203.0.113.9", "u" * 200)
+        line = buf.getvalue().strip()
+        user_part = line.split("user=", 1)[1]
+        self.assertEqual(len(user_part), 64)
 
 
 if __name__ == "__main__":
