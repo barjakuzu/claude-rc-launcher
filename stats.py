@@ -1,5 +1,7 @@
 """Cheap per-device metrics: system load/OS + a token-history ring buffer."""
 
+from __future__ import annotations
+
 import os
 import platform
 import pwd
