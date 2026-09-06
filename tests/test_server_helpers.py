@@ -7,6 +7,7 @@ import os
 import sys
 import time
 import unittest
+import unittest.mock as mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -620,6 +621,124 @@ class GetCachedConfigReportTest(unittest.TestCase):
             self.assertNotEqual(r1, r3)
         finally:
             server.configreport.collect_config_report = orig
+
+
+class SessionNameAllowedTest(unittest.TestCase):
+    def test_rc_prefixed_name_allowed_without_consulting_adoption(self):
+        # Passing an empty adopted set proves the rc-* branch never needs it.
+        self.assertTrue(server._session_name_allowed("rc-portugal", adopted=set()))
+
+    def test_adopted_non_rc_name_allowed(self):
+        self.assertTrue(server._session_name_allowed("mysession", adopted={"mysession"}))
+
+    def test_non_adopted_arbitrary_name_rejected(self):
+        self.assertFalse(server._session_name_allowed("mysession", adopted=set()))
+
+    def test_path_traversal_rejected_even_if_somehow_in_adopted(self):
+        self.assertFalse(server._session_name_allowed("../etc/passwd", adopted={"../etc/passwd"}))
+
+    def test_lazily_computes_adoption_set_when_not_passed(self):
+        fake_rows = [{"external": True, "tmux": {"session_name": "mysession", "pane_id": "%7"}},
+                     {"external": True, "tmux": None},
+                     {"external": False, "tmux": None}]
+        orig = server.list_rc_sessions
+        server.list_rc_sessions = lambda: fake_rows
+        try:
+            self.assertTrue(server._session_name_allowed("mysession"))
+            self.assertFalse(server._session_name_allowed("not-adopted"))
+        finally:
+            server.list_rc_sessions = orig
+
+
+class AdoptedTmuxNamesTest(unittest.TestCase):
+    def test_collects_only_external_adopted_rows(self):
+        rows = [
+            {"external": True, "tmux": {"session_name": "a", "pane_id": "%1"}},
+            {"external": True, "tmux": None},
+            {"external": False, "tmux": {"session_name": "rc-x", "pane_id": "%2"}},
+        ]
+        self.assertEqual(server._adopted_tmux_names(rows), {"a"})
+
+
+class RouteAdoptionGuardTest(unittest.TestCase):
+    """Each of /preview, /ws, /keys, /resize must guard on
+    _session_name_allowed, not the old rc-*-only _valid_session_name, so an
+    adopted external session's tmux name can pass."""
+    def test_ws_route_uses_session_name_allowed(self):
+        import inspect
+        src = inspect.getsource(server.Handler.do_GET)
+        block = src.split("endswith(\"/ws\"):", 1)[1][:400]
+        self.assertIn("_session_name_allowed(name)", block)
+
+    def test_preview_route_uses_session_name_allowed(self):
+        import inspect
+        src = inspect.getsource(server.Handler.do_GET)
+        block = src.split("endswith(\"/preview\"):", 1)[1][:400]
+        self.assertIn("_session_name_allowed(name)", block)
+
+    def test_resize_route_uses_session_name_allowed(self):
+        import inspect
+        src = inspect.getsource(server.Handler.do_POST)
+        block = src.split('endswith("/resize"):', 1)[1][:400]
+        self.assertIn("_session_name_allowed(name)", block)
+
+    def test_keys_route_uses_session_name_allowed(self):
+        import inspect
+        src = inspect.getsource(server.Handler.do_POST)
+        block = src.split('endswith("/keys"):', 1)[1][:400]
+        self.assertIn("_session_name_allowed(name)", block)
+
+
+class EnableRcTest(unittest.TestCase):
+    def test_sends_remote_control_then_enter(self):
+        calls = []
+
+        def fake_run(cmd, **kw):
+            calls.append(cmd)
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        with mock.patch("server.get_url_with_source", return_value=("https://claude.ai/code/session_x", "osc8")):
+            result = server._enable_rc_for_adopted("mysession", run=fake_run, sleep=lambda s: None)
+        self.assertEqual(result, {"ok": True, "url": "https://claude.ai/code/session_x"})
+        self.assertEqual(calls[0], ["tmux", "send-keys", "-t", "mysession", "-l", "/remote-control"])
+        self.assertEqual(calls[1], ["tmux", "send-keys", "-t", "mysession", "Enter"])
+
+    def test_send_keys_failure_reports_message_without_polling(self):
+        fake_run = lambda cmd, **kw: mock.Mock(returncode=1, stdout="", stderr="no such session")
+        with mock.patch("server.get_url_with_source") as guws:
+            result = server._enable_rc_for_adopted("mysession", run=fake_run, sleep=lambda s: None)
+        self.assertFalse(result["ok"])
+        self.assertIn("message", result)
+        guws.assert_not_called()
+
+    def test_polls_until_osc8_url_appears(self):
+        fake_run = lambda cmd, **kw: mock.Mock(returncode=0, stdout="", stderr="")
+        responses = [(None, None), (None, "text"), ("https://claude.ai/code/session_y", "osc8")]
+        with mock.patch("server.get_url_with_source", side_effect=responses):
+            result = server._enable_rc_for_adopted("mysession", run=fake_run, sleep=lambda s: None)
+        self.assertEqual(result, {"ok": True, "url": "https://claude.ai/code/session_y"})
+
+    def test_times_out_after_20_seconds_of_polling(self):
+        fake_run = lambda cmd, **kw: mock.Mock(returncode=0, stdout="", stderr="")
+        clock = {"t": 0.0}
+
+        def now_fn():
+            return clock["t"]
+
+        def sleep(s):
+            clock["t"] += s
+
+        with mock.patch("server.get_url_with_source", return_value=(None, None)):
+            result = server._enable_rc_for_adopted("mysession", run=fake_run, sleep=sleep, now_fn=now_fn)
+        self.assertFalse(result["ok"])
+        self.assertIn("20", result["message"])
+
+    def test_route_rejects_non_adopted_name(self):
+        import inspect
+        src = inspect.getsource(server.Handler.do_POST)
+        self.assertIn('endswith("/enable-rc")', src)
+        block = src.split('endswith("/enable-rc")', 1)[1][:600]
+        self.assertIn("_adopted_tmux_names()", block)
 
 
 if __name__ == "__main__":

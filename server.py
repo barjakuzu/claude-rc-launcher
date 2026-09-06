@@ -442,6 +442,32 @@ def _valid_session_name(name):
     return bool(name) and ".." not in name and "/" not in name and name.startswith(SESSION_PREFIX)
 
 
+def _adopted_tmux_names(rows=None):
+    """Tmux session names of every currently-adopted external session —
+    an external row from list_rc_sessions() whose "tmux" mapping is not
+    None. This is the ONLY set of non-rc-* names /preview, /ws, /keys,
+    and /resize may ever address; it is recomputed per request (never
+    cached) so a session that stops being adopted (process exits, pane
+    closes) can't be reached a moment later on a stale allowlist."""
+    if rows is None:
+        rows = list_rc_sessions()
+    return {s["tmux"]["session_name"] for s in rows if s.get("external") and s.get("tmux")}
+
+
+def _session_name_allowed(name, adopted=None):
+    """True if `name` is safe to address for /preview, /ws, /keys, /resize:
+    either an rc-* launcher session (_valid_session_name, unchanged), or a
+    tmux session name currently in the adoption allowlist. `adopted` is
+    injectable for tests; production callers leave it unset and it is
+    computed lazily (only when the rc-* check fails) via
+    _adopted_tmux_names()."""
+    if _valid_session_name(name):
+        return True
+    if adopted is None:
+        adopted = _adopted_tmux_names()
+    return bool(name) and ".." not in name and "/" not in name and name in adopted
+
+
 def _new_session_id():
     """One session id per /start call, passed to build_tmux_command so a
     session that supports --session-id gets a known UUID from birth
@@ -907,7 +933,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             # Live terminal WebSocket (see ws.py). Takes over the socket.
             clean = path.split('?')[0]
             name = clean[len("/sessions/"):-len("/ws")]
-            if not _valid_session_name(name):
+            if not _session_name_allowed(name):
                 self._json({"ok": False, "message": "Invalid session name"}, 400)
                 return
             if not session_exists(name):
@@ -936,7 +962,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif path.split('?')[0].startswith("/sessions/") and path.split('?')[0].endswith("/preview"):
             clean = path.split('?')[0]
             name = clean[len("/sessions/"):-len("/preview")]
-            if not _valid_session_name(name):
+            if not _session_name_allowed(name):
                 self._json({"ok": False, "message": "Invalid session name"}, 400)
                 return
             # Viewer size negotiation: each poll reports its terminal size;
@@ -1360,7 +1386,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             # Resize the tmux window to match the browser terminal so the
             # TUI renders at the viewer's real cols/rows (no wrap artifacts).
             name = path[len("/sessions/"):-len("/resize")]
-            if not _valid_session_name(name):
+            if not _session_name_allowed(name):
                 self._json({"ok": False, "message": "Invalid session name"}, 400)
                 return
             body = self._read_body()
@@ -1382,7 +1408,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         elif path.startswith("/sessions/") and path.endswith("/keys"):
             name = path[len("/sessions/"):-len("/keys")]
-            if not _valid_session_name(name):
+            if not _session_name_allowed(name):
                 self._json({"ok": False, "message": "Invalid session name"}, 400)
                 return
             body = self._read_body()
