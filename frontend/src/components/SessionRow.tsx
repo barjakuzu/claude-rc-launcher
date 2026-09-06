@@ -1,7 +1,7 @@
 // SessionRow.tsx — V5 full-width 3-col grid with 34×34 V5IconButton actions.
 import { useState, useEffect, useRef } from 'react';
 import { RT, FONT_MONO, tintFor, Z } from '../tokens';
-import { Icons, CapBar, Dot } from './primitives';
+import { Icons, CapBar, Dot, ExternalBadge } from './primitives';
 import { V5IconButton } from './V5IconButton';
 import { fixedMenuPos } from './menuPos';
 import type { Session } from '../types';
@@ -29,10 +29,11 @@ function V5StatusPill({ status }: { status: string }) {
     stopped:  { label: 'stopped',  color: RT.red,     pulse: false },
     busy:            { label: 'busy',            color: RT.amber,   pulse: true  },
     starting:        { label: 'starting',        color: RT.textLow, pulse: false },
-    needs_attention: { label: 'needs attention', color: RT.amber,   pulse: true  },
+    needs_attention: { label: 'needs attention', color: RT.red,     pulse: true  },
     ended:           { label: 'ended',           color: RT.red,     pulse: false },
   };
   const m = map[status] || { label: status, color: RT.textLow, pulse: false };
+  const italic = status === 'starting';
   return (
     <span style={{
       display: 'inline-flex', alignItems: 'center', gap: 5,
@@ -40,6 +41,7 @@ function V5StatusPill({ status }: { status: string }) {
       fontFamily: FONT_MONO, padding: '2px 7px', borderRadius: 4,
       border: `1px solid ${m.color === RT.textLow ? RT.border : m.color}`,
       color: m.color, opacity: m.color === RT.textLow ? 0.7 : 1,
+      fontStyle: italic ? 'italic' : 'normal',
       flex: 'none',
     }}>
       <Dot color={m.color} size={5} pulse={m.pulse} />
@@ -105,9 +107,13 @@ export function SessionRow({ s, hue, deviceId, mobile = false, onChanged, onPrev
     finally { setPending(false); onChanged(); }
   };
 
+  const isExternal = s.kind === 'external';
+
   const handleStop = async () => {
     setPending(true);
-    try { await api.stop(deviceId, s.name); } catch {/* ignore */}
+    try {
+      await api.stop(deviceId, s.name, isExternal ? { external: true, pid: s.pid } : undefined);
+    } catch {/* ignore */}
     finally { setPending(false); onChanged(); }
   };
 
@@ -132,17 +138,17 @@ export function SessionRow({ s, hue, deviceId, mobile = false, onChanged, onPrev
 
   return (
     <div
-      onClick={() => onPreview(s.name)}
+      onClick={isExternal ? undefined : () => onPreview(s.name)}
       onMouseEnter={(e) => { e.currentTarget.style.borderColor = RT.borderHi; }}
       onMouseLeave={(e) => { e.currentTarget.style.borderColor = RT.border; }}
-      title="Open terminal"
+      title={isExternal ? undefined : 'Open terminal'}
       style={{
         background: RT.card, border: `1px solid ${RT.border}`,
         borderRadius: 10, padding: mobile ? 14 : '14px 18px',
         display: 'grid',
         gridTemplateColumns: mobile ? '1fr' : 'minmax(220px, 1.4fr) minmax(180px, 1fr) auto',
         gap: mobile ? 12 : 18, alignItems: 'center',
-        cursor: 'pointer', transition: 'border-color .12s',
+        cursor: isExternal ? 'default' : 'pointer', transition: 'border-color .12s',
       }}>
       {/* Col 1: Name + dir + sessionId */}
       <div style={{ minWidth: 0 }}>
@@ -153,13 +159,7 @@ export function SessionRow({ s, hue, deviceId, mobile = false, onChanged, onPrev
           }}>
             {s.name}
           </div>
-          {s.kind === 'external' && (
-            <span style={{
-              fontSize: 9, letterSpacing: '.06em', textTransform: 'uppercase',
-              fontFamily: FONT_MONO, padding: '1px 6px', borderRadius: 4,
-              border: `1px solid ${RT.border}`, color: RT.textLow, flex: 'none',
-            }}>external</span>
-          )}
+          {isExternal && <ExternalBadge />}
           <V5StatusPill status={s.state ?? (s.status || 'idle')} />
         </div>
         <div style={{
@@ -201,7 +201,7 @@ export function SessionRow({ s, hue, deviceId, mobile = false, onChanged, onPrev
         onClick={(e) => e.stopPropagation()}
         style={{ display: 'flex', gap: 6, justifyContent: mobile ? 'flex-end' : 'flex-end' }}
       >
-        {s.kind !== 'external' && (
+        {!isExternal && (
           <V5IconButton
             label="Restart session"
             accent={RT.green}
@@ -223,7 +223,7 @@ export function SessionRow({ s, hue, deviceId, mobile = false, onChanged, onPrev
         </V5IconButton>
 
         {/* ⋯ more menu — secondary actions (preview/keys/terminal access; not available for external sessions) */}
-        {s.kind !== 'external' && (
+        {!isExternal && (
         <div ref={menuRef} style={{ position: 'relative' }}>
           <V5IconButton
             label="More options"

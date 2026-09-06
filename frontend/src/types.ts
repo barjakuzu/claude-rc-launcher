@@ -15,6 +15,7 @@ export interface Session {
   kind?: 'external';
   external?: boolean;
   session_id?: string;
+  pid?: number;
   waiting_for?: string | null;
 }
 export interface ScheduleHistoryEntry {

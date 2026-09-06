@@ -1,7 +1,7 @@
 // AllSessions.tsx — cross-device flattened sessions list (V5AllSessions port).
 import { useEffect, useRef, useState } from 'react';
 import { RT, FONT_MONO, tintFor, hueForId, Z } from '../tokens';
-import { Icons, Dot, StatusPill } from './primitives';
+import { Icons, Dot, StatusPill, ExternalBadge } from './primitives';
 import { MobileHeader } from './MobileHeader';
 import { mobileActionBtn } from './mobileActionBtn';
 import { useAllSessions } from '../useCrossDevice';
@@ -52,28 +52,23 @@ export function AllSessions({ cards, onOpenDevice }: AllSessionsProps) {
         {items.map(({ device: d, session: s }) => {
           const hue = hueForId(d.id);
           const chipColor = tintFor(hue, 0.70, 0.10);
-          const key = d.id + (s.sessionId ?? s.name);
+          const isExternal = s.kind === 'external';
+          const key = d.id + ':' + (isExternal ? 'ext:' + (s.session_id ?? s.sessionId ?? s.name) : (s.sessionId ?? s.name));
           return (
             <div
               key={key}
-              onClick={() => setPreview({ deviceId: d.id, name: s.name, mode: s.mode })}
-              title="Open terminal"
+              onClick={isExternal ? undefined : () => setPreview({ deviceId: d.id, name: s.name, mode: s.mode })}
+              title={isExternal ? undefined : 'Open terminal'}
               style={{
                 background: RT.card, border: `1px solid ${RT.border}`,
                 borderRadius: 10, padding: 12,
                 display: 'flex', flexDirection: 'column', gap: 8,
-                cursor: 'pointer',
+                cursor: isExternal ? 'default' : 'pointer',
               }}>
               {/* Name + status */}
               <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                 <div style={{ flex: 1, fontSize: 14, fontWeight: 600, letterSpacing: '-.005em', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{s.name}</div>
-                {s.kind === 'external' && (
-                  <span style={{
-                    fontSize: 9, letterSpacing: '.06em', textTransform: 'uppercase',
-                    fontFamily: FONT_MONO, padding: '1px 6px', borderRadius: 4,
-                    border: `1px solid ${RT.border}`, color: RT.textLow, flex: 'none',
-                  }}>external</span>
-                )}
+                {isExternal && <ExternalBadge />}
                 <StatusPill status={s.state ?? (s.status ?? 'idle')} />
               </div>
               {/* Device chip */}
@@ -101,7 +96,7 @@ export function AllSessions({ cards, onOpenDevice }: AllSessionsProps) {
               {/* Actions: Preview (terminal) | Restart | More (⋯) | Stop.
                   stopPropagation so buttons don't also open the terminal. */}
               <div onClick={(e) => e.stopPropagation()} style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-                {s.kind !== 'external' && (
+                {!isExternal && (
                   <>
                     <button
                       style={mobileActionBtn()}
@@ -131,7 +126,7 @@ export function AllSessions({ cards, onOpenDevice }: AllSessionsProps) {
                 <button
                   style={{ background: RT.panel, border: `1px solid ${RT.border}`, borderRadius: 7, width: 36, height: 36, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', marginLeft: 'auto' }}
                   disabled={!!pending[`stop-${key}`]}
-                  onClick={() => guard(`stop-${key}`, () => api.stop(d.id, s.name))}
+                  onClick={() => guard(`stop-${key}`, () => api.stop(d.id, s.name, isExternal ? { external: true, pid: s.pid } : undefined))}
                   title="Stop this session"
                 >
                   <Icons.stop size={12} stroke={RT.red} />

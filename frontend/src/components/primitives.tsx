@@ -172,14 +172,30 @@ export function StatusPill({ status }: StatusPillProps) {
     stopped: { label: 'stopped', color: RT.red, pulse: false },
     busy: { label: 'busy', color: RT.amber, pulse: true },
     starting: { label: 'starting', color: RT.textLow, pulse: false },
-    needs_attention: { label: 'needs attention', color: RT.amber, pulse: true },
+    needs_attention: { label: 'needs attention', color: RT.red, pulse: true },
     ended: { label: 'ended', color: RT.red, pulse: false },
   };
   const m: PillMeta = map[status] || { label: status, color: RT.textLow, pulse: false };
+  const italic = status === 'starting';
   return (
-    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 10, color: m.color, letterSpacing: '.06em', textTransform: 'uppercase', fontFamily: FONT_MONO }}>
+    <span style={{
+      display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 10, color: m.color,
+      letterSpacing: '.06em', textTransform: 'uppercase', fontFamily: FONT_MONO,
+      fontStyle: italic ? 'italic' : 'normal', opacity: italic ? 0.7 : 1,
+    }}>
       <Dot color={m.color} size={5} pulse={m.pulse} />
       {m.label}
     </span>
+  );
+}
+
+/** Small text pill flagging a session the launcher didn't start (no rc-* tmux session backing it). */
+export function ExternalBadge() {
+  return (
+    <span style={{
+      fontSize: 9, letterSpacing: '.06em', textTransform: 'uppercase',
+      fontFamily: FONT_MONO, padding: '1px 6px', borderRadius: 4,
+      border: `1px solid ${RT.border}`, color: RT.textLow, flex: 'none',
+    }}>external</span>
   );
 }
