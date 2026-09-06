@@ -552,6 +552,15 @@ class StatsSessionsCountTest(unittest.TestCase):
         self.assertIn("count_launcher_sessions(sess)", stats_block)
         self.assertNotIn("len(sess)", stats_block)
 
+    def test_stats_endpoint_includes_launcher_version(self):
+        """/stats must report this device's own launcher VERSION so the hub
+        can build overview.card_from_parts()'s "version" field and flag a
+        per-device mismatch against itself."""
+        import inspect
+        src = inspect.getsource(server.Handler.do_GET)
+        stats_block = src.split('elif path == "/stats":', 1)[1].split('elif path ==', 1)[0]
+        self.assertIn('s["version"] = VERSION', stats_block)
+
 
 class GetCachedConfigReportTest(unittest.TestCase):
     def test_caches_for_60_seconds(self):

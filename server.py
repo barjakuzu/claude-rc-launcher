@@ -1051,6 +1051,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             s["tokens_now"] = sum(x.get("tokens", 0) for x in sess)
             s["sessions"] = count_launcher_sessions(sess)
             s["max_sessions"] = RC_MAX_SESSIONS
+            s["version"] = VERSION
             caps = compat.get_caps()
             s["claude_version"] = caps.get("version")
             s["caps"] = caps

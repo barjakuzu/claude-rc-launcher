@@ -72,6 +72,24 @@ class CardFromPartsClaudeVersionTest(unittest.TestCase):
         self.assertIsNone(card["claude_version"])
 
 
+class CardFromPartsLauncherVersionTest(unittest.TestCase):
+    """The device's own launcher version (from /rc/stats' "version" field),
+    surfaced on the card so the UI can flag a mismatch against the hub."""
+
+    def test_version_read_from_stats(self):
+        card = overview.card_from_parts(
+            {"id": "local", "name": "local"}, [], {"version": "2.1.4"})
+        self.assertEqual(card["version"], "2.1.4")
+
+    def test_version_none_when_stats_missing(self):
+        card = overview.card_from_parts({"id": "local", "name": "local"}, [], None)
+        self.assertIsNone(card["version"])
+
+    def test_version_none_when_absent_from_stats(self):
+        card = overview.card_from_parts({"id": "local", "name": "local"}, [], {})
+        self.assertIsNone(card["version"])
+
+
 class BuildConfigMatrixTest(unittest.TestCase):
     def _report(self, head="abc123", dirty=False, dirty_files=None, deps_missing=None,
                 missing=None, hooks=True, version="2.1.263"):
