@@ -109,6 +109,34 @@ export function SessionRow({ s, hue, deviceId, mobile = false, onChanged, onPrev
 
   const isExternal = s.kind === 'external';
 
+  // An external row can only open a terminal (Preview/keys/resize) when
+  // sessions.list_rc_sessions() found a tmux pane for it — Terminal.app,
+  // VS Code's integrated terminal, etc. have no such pane and stay
+  // read-only. previewTarget is what api.preview/ws/keys/resize must
+  // address: the launcher's own name for a launcher row, or the adopted
+  // tmux session's real name for an external row (never s.name, which is
+  // just claude agents --json's display name and may differ).
+  const isAdopted = isExternal && !!s.tmux;
+  const canOpenTerminal = !isExternal || isAdopted;
+  const previewTarget = isAdopted ? s.tmux!.session_name : s.name;
+
+  const [enablingRc, setEnablingRc] = useState(false);
+  const [rcUrl, setRcUrl] = useState<string | null | undefined>(s.rc_url);
+
+  const handleEnableRc = async () => {
+    if (!isAdopted) return;
+    setEnablingRc(true);
+    try {
+      const result = await api.enableRc(deviceId, s.tmux!.session_name);
+      if (result.ok && result.url) setRcUrl(result.url);
+    } catch { /* ignore */ }
+    finally { setEnablingRc(false); }
+  };
+
+  const handleOpenRcUrl = () => {
+    if (rcUrl) window.open(rcUrl, '_blank');
+  };
+
   const handleStop = async () => {
     setPending(true);
     try {
@@ -126,7 +154,7 @@ export function SessionRow({ s, hue, deviceId, mobile = false, onChanged, onPrev
 
   const handlePreviewClick = () => {
     setMenuOpen(false);
-    onPreview(s.name);
+    onPreview(previewTarget);
   };
 
   const menuItemStyle: React.CSSProperties = {
@@ -138,17 +166,17 @@ export function SessionRow({ s, hue, deviceId, mobile = false, onChanged, onPrev
 
   return (
     <div
-      onClick={isExternal ? undefined : () => onPreview(s.name)}
+      onClick={canOpenTerminal ? () => onPreview(previewTarget) : undefined}
       onMouseEnter={(e) => { e.currentTarget.style.borderColor = RT.borderHi; }}
       onMouseLeave={(e) => { e.currentTarget.style.borderColor = RT.border; }}
-      title={isExternal ? undefined : 'Open terminal'}
+      title={canOpenTerminal ? 'Open terminal' : undefined}
       style={{
         background: RT.card, border: `1px solid ${RT.border}`,
         borderRadius: 10, padding: mobile ? 14 : '14px 18px',
         display: 'grid',
         gridTemplateColumns: mobile ? '1fr' : 'minmax(220px, 1.4fr) minmax(180px, 1fr) auto',
         gap: mobile ? 12 : 18, alignItems: 'center',
-        cursor: isExternal ? 'default' : 'pointer', transition: 'border-color .12s',
+        cursor: canOpenTerminal ? 'pointer' : 'default', transition: 'border-color .12s',
       }}>
       {/* Col 1: Name + dir + sessionId */}
       <div style={{ minWidth: 0 }}>
@@ -160,6 +188,11 @@ export function SessionRow({ s, hue, deviceId, mobile = false, onChanged, onPrev
             {s.name}
           </div>
           {isExternal && <ExternalBadge />}
+          {isExternal && !isAdopted && (
+            <span style={{ fontFamily: FONT_MONO, fontSize: 10.5, color: RT.textLow, fontStyle: 'italic' }}>
+              not in tmux
+            </span>
+          )}
           <V5StatusPill status={s.state ?? (s.status || 'idle')} />
         </div>
         <div style={{
@@ -222,8 +255,35 @@ export function SessionRow({ s, hue, deviceId, mobile = false, onChanged, onPrev
           <Icons.stop size={12} />
         </V5IconButton>
 
-        {/* ⋯ more menu — secondary actions (preview/keys/terminal access; not available for external sessions) */}
-        {!isExternal && (
+        {isAdopted && (
+          rcUrl ? (
+            <V5IconButton
+              label="Open on claude.ai"
+              mobile={mobile}
+              pending={false}
+              onClick={handleOpenRcUrl}
+            >
+              <Icons.link size={13} />
+            </V5IconButton>
+          ) : (
+            <V5IconButton
+              label="Enable Remote Control"
+              accent={RT.amber}
+              mobile={mobile}
+              pending={enablingRc}
+              onClick={handleEnableRc}
+            >
+              <Icons.refresh size={13} />
+            </V5IconButton>
+          )
+        )}
+
+        {/* ⋯ more menu — secondary actions (preview/keys/terminal access).
+            A launcher row gets the full menu; an adopted external row gets
+            just Preview (no session ID/URL/unstick — those are launcher
+            concepts). A non-adopted external row (no tmux pane found) gets
+            no menu at all — nothing in it would work. */}
+        {(!isExternal || isAdopted) && (
         <div ref={menuRef} style={{ position: 'relative' }}>
           <V5IconButton
             label="More options"
@@ -244,21 +304,25 @@ export function SessionRow({ s, hue, deviceId, mobile = false, onChanged, onPrev
               borderRadius: 8, padding: 4, zIndex: Z.menu,
               boxShadow: '0 8px 24px rgba(0,0,0,.4)', minWidth: 160,
             }}>
-              <button
-                style={menuItemStyle} onClick={() => { setMenuOpen(false); handleCopy(); }}
-                onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = RT.bgRaised; }}
-                onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = 'transparent'; }}
-              >
-                <Icons.copy size={11} stroke={RT.textDim} /> Copy session ID
-              </button>
-              <button
-                style={{ ...menuItemStyle, opacity: s.url ? 1 : 0.45, cursor: s.url ? 'pointer' : 'default' }}
-                onClick={() => { if (s.url) { setMenuOpen(false); handleLink(); } }}
-                onMouseEnter={(e) => { if (s.url) (e.currentTarget as HTMLButtonElement).style.background = RT.bgRaised; }}
-                onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = 'transparent'; }}
-              >
-                <Icons.link size={11} stroke={RT.textDim} /> Open URL
-              </button>
+              {!isExternal && (
+                <>
+                  <button
+                    style={menuItemStyle} onClick={() => { setMenuOpen(false); handleCopy(); }}
+                    onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = RT.bgRaised; }}
+                    onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = 'transparent'; }}
+                  >
+                    <Icons.copy size={11} stroke={RT.textDim} /> Copy session ID
+                  </button>
+                  <button
+                    style={{ ...menuItemStyle, opacity: s.url ? 1 : 0.45, cursor: s.url ? 'pointer' : 'default' }}
+                    onClick={() => { if (s.url) { setMenuOpen(false); handleLink(); } }}
+                    onMouseEnter={(e) => { if (s.url) (e.currentTarget as HTMLButtonElement).style.background = RT.bgRaised; }}
+                    onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = 'transparent'; }}
+                  >
+                    <Icons.link size={11} stroke={RT.textDim} /> Open URL
+                  </button>
+                </>
+              )}
               <button
                 style={menuItemStyle} onClick={handlePreviewClick}
                 onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = RT.bgRaised; }}
@@ -266,13 +330,15 @@ export function SessionRow({ s, hue, deviceId, mobile = false, onChanged, onPrev
               >
                 <Icons.search size={11} stroke={RT.textDim} /> Preview
               </button>
-              <button
-                style={menuItemStyle} onClick={handleUnstick}
-                onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = RT.bgRaised; }}
-                onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = 'transparent'; }}
-              >
-                <Icons.refresh size={11} stroke={RT.amber} /> Unstick
-              </button>
+              {!isExternal && (
+                <button
+                  style={menuItemStyle} onClick={handleUnstick}
+                  onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = RT.bgRaised; }}
+                  onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = 'transparent'; }}
+                >
+                  <Icons.refresh size={11} stroke={RT.amber} /> Unstick
+                </button>
+              )}
             </div>
           )}
         </div>
