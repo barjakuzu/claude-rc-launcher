@@ -235,8 +235,19 @@ def get_active_rc_session():
 
 _OSC8_OPEN_RE = re.compile(r'\x1b\]8;[^;]*;([^\x1b\s]*)\x1b\\')
 _OSC8_OPEN_BEL_RE = re.compile(r'\x1b\]8;[^;]*;([^\x1b\s]*)\x07')
+_OSC8_OPEN_ANY_RE = re.compile(r'\x1b\]8;[^;]*;([^\x1b\s]*)(?:\x1b\\|\x07)')
 _OSC8_CLOSE_RE = re.compile(r'\x1b\]8;;\x1b\\')
 _OSC8_CLOSE_BEL_RE = re.compile(r'\x1b\]8;;\x07')
+_SESSION_URL_RE = re.compile(r'https://claude\.ai/code/session_[^\s\x1b]+')
+
+
+def _osc8_targets(text):
+    """Return every OSC 8 hyperlink target in text, in document order
+    (including empty-string targets from close sequences, which callers
+    filter out via the session-URL pattern). Used so get_url can prefer a
+    URL that is the *target* of a link over one that merely appears as
+    plain/pasted text in the pane (e.g. a git log attribution line)."""
+    return [m.group(1) for m in _OSC8_OPEN_ANY_RE.finditer(text)]
 
 
 def _strip_osc8(text):
@@ -257,10 +268,20 @@ def _strip_osc8(text):
 
 def get_url(session_name):
     """Extract the claude.ai URL from a tmux session's pane output.
-    Shell sessions have no URL. A URL is only returned when one can
-    actually be found in the current pane (via its OSC 8 hyperlink target
-    or as plain text) or in the RC_URL env var this function has
-    previously cached — a session that has never shown the URL yet, or
+    Shell sessions have no URL.
+
+    An OSC 8 hyperlink *target* is the authoritative source: the status
+    bar's RC indicator is the only thing that renders the session URL as a
+    link target, so a matching target is trustworthy evidence Remote
+    Control produced it, and it is persisted into the RC_URL env var. A
+    claude.ai/code/session_... URL appearing only as plain/pasted text
+    (e.g. a git log attribution line, a copy-pasted message) is NOT
+    trustworthy in the same way — it is returned transiently (so a caller
+    can still use it) but never written to RC_URL, and only considered at
+    all when the pane has no OSC 8 targets whatsoever.
+
+    Falls back to a previously cached RC_URL when nothing can be found in
+    the current pane — a session that has never shown the URL yet, or
     whose Remote Control never activated, correctly returns None."""
     if is_shell_session(session_name):
         return None
@@ -270,10 +291,11 @@ def get_url(session_name):
                 ["tmux", "capture-pane", "-t", session_name, "-p", "-S", history_lines, "-J"],
                 capture_output=True, text=True, timeout=5,
             )
-            text = _strip_osc8(r.stdout).replace("\n", " ")
-            matches = re.findall(r'(https://claude\.ai/code/session_[^\s\x1b]+)', text)
-            if matches:
-                url = matches[-1]
+            raw = r.stdout
+            targets = _osc8_targets(raw)
+            session_targets = [t for t in targets if _SESSION_URL_RE.match(t)]
+            if session_targets:
+                url = session_targets[-1]
                 stored = get_session_env(session_name, "RC_URL")
                 if stored != url:
                     subprocess.run(
@@ -281,6 +303,15 @@ def get_url(session_name):
                         capture_output=True,
                     )
                 return url
+            if not targets:
+                # No OSC 8 links in this pane at all — fall back to a plain-
+                # text scan, but never persist it: an unlinked URL is just
+                # displayed text (could be pasted, quoted, or attribution),
+                # not evidence Remote Control is actually pointed at it.
+                text = _strip_osc8(raw).replace("\n", " ")
+                matches = _SESSION_URL_RE.findall(text)
+                if matches:
+                    return matches[-1]
         except Exception:
             pass
     stored = get_session_env(session_name, "RC_URL")
@@ -709,6 +740,17 @@ def stop_session(name):
     subprocess.run(["tmux", "kill-session", "-t", name], capture_output=True)
 
 
+_SESSION_ID_RE = re.compile(r'^[0-9A-Za-z_-]{1,64}$')
+
+
+def _encode_project_dir(workdir):
+    """Claude Code's ~/.claude/projects/<encoded> directory name for a
+    project cwd — both '/' and '.' become '-' (verified against this
+    box's real ~/.claude/projects listing). Shared by transcript_path and
+    _find_session_uuid so the two stay in sync."""
+    return (workdir or "").replace("/", "-").replace(".", "-")
+
+
 def transcript_path(workdir, session_id):
     """The JSONL transcript path Claude Code writes for (workdir, session_id).
 
@@ -717,8 +759,18 @@ def transcript_path(workdir, session_id):
     replacing both '/' and '.' with '-' (verified directly against this
     box's ~/.claude/projects listing, not from documentation — the
     transcript path format is explicitly undocumented and unstable).
+
+    session_id must look like a real Claude session id (uuid-shaped:
+    letters/digits/underscore/hyphen, 1-64 chars) — raises ValueError
+    otherwise. session_id can come from RC_SESSION_ID, a tmux env var an
+    attacker with shell access to the box could set; without this check a
+    value like "../../etc/passwd" would let transcript_path build a path
+    outside ~/.claude/projects. Callers that consume RC_SESSION_ID treat
+    ValueError the same as "no native id" and fall back to the title scan.
     """
-    encoded = workdir.replace("/", "-").replace(".", "-")
+    if not _SESSION_ID_RE.match(session_id):
+        raise ValueError(f"invalid session_id: {session_id!r}")
+    encoded = _encode_project_dir(workdir)
     return os.path.expanduser(os.path.join("~/.claude/projects", encoded, session_id + ".jsonl"))
 
 
@@ -742,8 +794,9 @@ def _find_session_uuid(tmux_name, workdir):
     # Build ordered list of project dirs — prefer ones matching the workdir
     all_proj_dirs = sorted(glob.glob(os.path.join(claude_projects, "*")),
                            key=os.path.getmtime, reverse=True)
-    # Claude encodes workdir as project dir name (e.g. /root → -root)
-    workdir_encoded = workdir.replace("/", "-") if workdir else ""
+    # Claude encodes workdir as project dir name (e.g. /root → -root,
+    # ~/.claude-rc → -root--claude-rc); shared with transcript_path.
+    workdir_encoded = _encode_project_dir(workdir)
     matching = [d for d in all_proj_dirs if os.path.basename(d) == workdir_encoded]
     other = [d for d in all_proj_dirs if os.path.basename(d) != workdir_encoded]
     proj_dirs = matching + other
@@ -812,8 +865,11 @@ def get_transcript(tmux_name, limit=300):
     path = None
     rc_session_id = get_session_env(tmux_name, "RC_SESSION_ID")
     if rc_session_id:
-        candidate = transcript_path(workdir, rc_session_id)
-        if os.path.isfile(candidate):
+        try:
+            candidate = transcript_path(workdir, rc_session_id)
+        except ValueError:
+            candidate = None
+        if candidate and os.path.isfile(candidate):
             uuid = rc_session_id
             path = candidate
     if not uuid:

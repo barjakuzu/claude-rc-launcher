@@ -87,5 +87,54 @@ class GetTranscriptUsesSessionIdFirstTest(unittest.TestCase):
             self.assertEqual(self.find_uuid_calls, [])  # title scan never invoked
 
 
+class TranscriptPathValidatesSessionIdTest(unittest.TestCase):
+    """session_id must be uuid-shaped; anything else (path traversal,
+    absolute paths, etc.) raises ValueError rather than building a path
+    outside ~/.claude/projects."""
+
+    def test_rejects_path_traversal(self):
+        with self.assertRaises(ValueError):
+            sessions.transcript_path("/home/user/project", "../../x")
+
+    def test_rejects_absolute_path(self):
+        with self.assertRaises(ValueError):
+            sessions.transcript_path("/home/user/project", "/etc/passwd")
+
+    def test_accepts_uuid_shaped_id(self):
+        # Should not raise.
+        sessions.transcript_path("/home/user/project", "0d3b8b1a-1111-4a2b-9c3d-abcdef012345")
+
+
+class GetTranscriptFallsBackWhenRcSessionIdIsInvalidTest(unittest.TestCase):
+    """A malformed RC_SESSION_ID (stale/corrupt tmux env) must not raise —
+    get_transcript treats transcript_path's ValueError exactly like a
+    missing file and falls back to the title scan."""
+
+    def setUp(self):
+        self._patched_env = sessions.get_session_env
+        self._patched_shell = sessions.is_shell_session
+        self._patched_find_uuid = sessions._find_session_uuid
+        sessions.is_shell_session = lambda name: False
+        sessions.get_session_env = lambda name, var: {
+            "RC_SESSION_ID": "../../etc/passwd", "RC_WORKDIR": "/home/user/project",
+        }.get(var)
+        self.find_uuid_calls = []
+
+        def fake_find_uuid(*a, **kw):
+            self.find_uuid_calls.append((a, kw))
+            return None
+        sessions._find_session_uuid = fake_find_uuid
+
+    def tearDown(self):
+        sessions.get_session_env = self._patched_env
+        sessions.is_shell_session = self._patched_shell
+        sessions._find_session_uuid = self._patched_find_uuid
+
+    def test_invalid_rc_session_id_falls_back_to_title_scan(self):
+        result = sessions.get_transcript("rc-portugal")
+        self.assertIsNone(result)  # fallback found nothing either, but no crash
+        self.assertEqual(len(self.find_uuid_calls), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

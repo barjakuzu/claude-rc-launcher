@@ -350,9 +350,10 @@ class RestartSessionPassesSessionIdTest(unittest.TestCase):
 
 
 class RestartSessionPrefersRcSessionIdTest(unittest.TestCase):
-    """restart_session must reuse RC_SESSION_ID as both the resume target
-    and the new session's --session-id, without ever calling
-    _find_session_uuid, when the env var is present."""
+    """restart_session must reuse RC_SESSION_ID as the resume target
+    (passed through to build_tmux_command as both resume_id and
+    session_id, so the new session's env still carries RC_SESSION_ID),
+    without ever calling _find_session_uuid, when the env var is present."""
 
     def setUp(self):
         self.fake = FakeRun()
@@ -395,9 +396,11 @@ class RestartSessionPrefersRcSessionIdTest(unittest.TestCase):
                               if isinstance(c, list) and "new-session" in c]
         self.assertEqual(len(new_session_calls), 1)
         cmd = new_session_calls[0]
-        # The UUID lands both as a standalone -e RC_SESSION_ID=<uuid> argv
-        # item and embedded in the bash -c claude invocation (--resume
-        # <uuid> and --session-id <uuid>), so check the joined command
+        # resume defaults to True here, so --session-id is never combined
+        # with --resume (they're mutually exclusive - see build_tmux_command);
+        # the reused UUID instead lands as the standalone -e
+        # RC_SESSION_ID=<uuid> argv item and embedded in the bash -c
+        # claude invocation's --resume <uuid>, so check the joined command
         # line rather than list membership.
         self.assertIn("0d3b8b1a-1111-4a2b-9c3d-abcdef012345", " ".join(cmd))
 
@@ -417,7 +420,7 @@ class ListResumableSessionsIsTmuxIndependentTest(unittest.TestCase):
 class StripOsc8Test(unittest.TestCase):
     def test_strips_close_sequence(self):
         raw = "hello\x1b]8;;\x1b\\world"
-        self.assertEqual(sessions._strip_osc8(raw), "hello world" if False else "helloworld")
+        self.assertEqual(sessions._strip_osc8(raw), "helloworld")
 
     def test_open_sequence_becomes_its_url_target(self):
         raw = "status: \x1b]8;id=1dcslmk;https://claude.ai/code/session_01HuRGXzwUppFqzPmUXZQZ6J?from=cli\x1b\\/rc\x1b]8;;\x1b\\"
@@ -456,6 +459,49 @@ class GetUrlOsc8Test(unittest.TestCase):
     def test_extracts_url_from_hyperlink_target_only(self):
         url = sessions.get_url("rc-portugal")
         self.assertEqual(url, "https://claude.ai/code/session_01FxTHitxTgkXbpbQEDJaR4R?from=cli")
+
+
+class GetUrlPrefersHyperlinkTargetOverPlainTextTest(unittest.TestCase):
+    """A claude.ai session URL appearing only as plain/pasted text (e.g. a
+    git log attribution line quoted into the pane) must never be picked
+    over — or mistaken for — the real status-bar OSC 8 hyperlink target."""
+
+    PASTED_URL = "https://claude.ai/code/session_01AAAAAAAAAAAAAAAAAAAAAAAA?from=cli"
+    STATUS_BAR_URL = "https://claude.ai/code/session_01FxTHitxTgkXbpbQEDJaR4R?from=cli"
+
+    def setUp(self):
+        self._patched_run = sessions.subprocess.run
+        self._patched_env = sessions.get_session_env
+        self._patched_shell = sessions.is_shell_session
+        sessions.get_session_env = lambda name, var: None
+        sessions.is_shell_session = lambda name: False
+
+    def tearDown(self):
+        sessions.subprocess.run = self._patched_run
+        sessions.get_session_env = self._patched_env
+        sessions.is_shell_session = self._patched_shell
+
+    def test_status_bar_target_wins_over_pasted_plain_text(self):
+        pane = (
+            f"Co-Authored-By: someone <noreply> {self.PASTED_URL}\n"
+            "  ~/career-ops | Opus 5 | Tokens: 0/1.0M (0%)          " + OSC_LINK + "\n"
+        )
+        self.fake = FakeRun(pane=pane)
+        sessions.subprocess.run = self.fake
+        url = sessions.get_url("rc-portugal")
+        self.assertEqual(url, self.STATUS_BAR_URL)
+
+    def test_pasted_only_url_is_returned_but_not_persisted(self):
+        pane = f"Co-Authored-By: someone <noreply> {self.PASTED_URL}\n"
+        self.fake = FakeRun(pane=pane)
+        sessions.subprocess.run = self.fake
+        url = sessions.get_url("rc-portugal")
+        self.assertEqual(url, self.PASTED_URL)
+        set_env_calls = [
+            c for c in self.fake.calls
+            if isinstance(c, list) and "set-environment" in c and "RC_URL" in c
+        ]
+        self.assertEqual(set_env_calls, [])
 
 
 if __name__ == "__main__":
