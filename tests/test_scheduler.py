@@ -2,6 +2,7 @@
 import os
 import sys
 import unittest
+from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -50,6 +51,135 @@ class NullSafeCronTest(unittest.TestCase):
 
     def test_validate_cron_still_accepts_good_strings(self):
         self.assertIsNone(scheduler.validate_cron("0 9 * * *"))
+
+
+class FakeRun:
+    """Records every subprocess.run call scheduler.py makes and answers
+    'tmux has-session' / 'tmux list-sessions' according to a settable set
+    of "alive" session names. Same approach as tests/test_setup_session.py's
+    FakeRun, extended for the session-lifecycle calls scheduler.py makes."""
+
+    def __init__(self):
+        self.calls = []
+        self.alive = set()
+
+    def __call__(self, cmd, *a, **kw):
+        self.calls.append(cmd)
+
+        class R:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        if isinstance(cmd, list) and cmd[:2] == ["tmux", "has-session"]:
+            name = cmd[cmd.index("-t") + 1]
+            R.returncode = 0 if name in self.alive else 1
+        elif isinstance(cmd, list) and cmd[:2] == ["tmux", "new-session"]:
+            name = cmd[cmd.index("-s") + 1]
+            self.alive.add(name)
+        elif isinstance(cmd, list) and cmd[:2] == ["tmux", "kill-session"]:
+            name = cmd[cmd.index("-t") + 1]
+            self.alive.discard(name)
+        elif isinstance(cmd, list) and cmd[:2] == ["tmux", "list-sessions"]:
+            R.stdout = "\n".join(self.alive)
+        return R
+
+    def new_session_names(self):
+        return [c[c.index("-s") + 1] for c in self.calls
+                if isinstance(c, list) and c[:2] == ["tmux", "new-session"]]
+
+
+class ImmediateThread:
+    """Runs its target synchronously instead of in a background thread, so
+    scheduler tests don't race _fire_schedule's async setup-and-send step."""
+
+    def __init__(self, target=None, args=(), kwargs=None, daemon=None):
+        self._target = target
+        self._args = args
+        self._kwargs = kwargs or {}
+
+    def start(self):
+        self._target(*self._args, **self._kwargs)
+
+
+def _patch_scheduler(fake):
+    """Patch scheduler.py's IO surface with `fake`, returning the original
+    values so a test's tearDown can restore them via _restore_scheduler."""
+    saved = {
+        "run": scheduler.subprocess.run,
+        "sleep": scheduler.time.sleep,
+        "exists": scheduler.session_exists,
+        "setup": scheduler.setup_session,
+        "thread": scheduler.threading.Thread,
+        "list_sessions": scheduler.list_rc_sessions,
+        "add_history": scheduler.add_history_entry,
+    }
+    scheduler.subprocess.run = fake
+    scheduler.time.sleep = lambda *_: None
+    scheduler.session_exists = lambda n: n in fake.alive
+    scheduler.setup_session = lambda *a, **kw: None
+    scheduler.threading.Thread = ImmediateThread
+    scheduler.list_rc_sessions = lambda: [{"name": n} for n in fake.alive]
+    scheduler._active_scheduled_sessions.clear()
+    return saved
+
+
+def _restore_scheduler(saved):
+    scheduler.subprocess.run = saved["run"]
+    scheduler.time.sleep = saved["sleep"]
+    scheduler.session_exists = saved["exists"]
+    scheduler.setup_session = saved["setup"]
+    scheduler.threading.Thread = saved["thread"]
+    scheduler.list_rc_sessions = saved["list_sessions"]
+    scheduler.add_history_entry = saved["add_history"]
+    scheduler._active_scheduled_sessions.clear()
+
+
+class DueToFireTest(unittest.TestCase):
+    def test_manual_task_is_never_due(self):
+        now = datetime(2026, 9, 6, 9, 0)
+        self.assertFalse(scheduler._due_to_fire({"cron": None, "enabled": True}, now))
+
+    def test_empty_string_cron_is_never_due(self):
+        now = datetime(2026, 9, 6, 9, 0)
+        self.assertFalse(scheduler._due_to_fire({"cron": "", "enabled": True}, now))
+
+    def test_matching_cron_with_no_last_run_is_due(self):
+        now = datetime(2026, 9, 6, 9, 0)
+        self.assertTrue(scheduler._due_to_fire({"cron": "0 9 * * *", "enabled": True}, now))
+
+    def test_matching_cron_already_run_this_minute_is_not_due(self):
+        now = datetime(2026, 9, 6, 9, 0)
+        schedule = {"cron": "0 9 * * *", "enabled": True, "last_run": now.isoformat()}
+        self.assertFalse(scheduler._due_to_fire(schedule, now))
+
+    def test_non_matching_cron_is_not_due(self):
+        now = datetime(2026, 9, 6, 9, 1)
+        self.assertFalse(scheduler._due_to_fire({"cron": "0 9 * * *", "enabled": True}, now))
+
+    def test_invalid_cron_string_is_not_due(self):
+        now = datetime(2026, 9, 6, 9, 0)
+        self.assertFalse(scheduler._due_to_fire({"cron": "garbage", "enabled": True}, now))
+
+
+class ManualTaskFiresTest(unittest.TestCase):
+    """POST /schedules/fire (which calls _fire_schedule directly) must work
+    for a manual task even though _due_to_fire would never call it."""
+
+    def setUp(self):
+        self.fake = FakeRun()
+        self._saved = _patch_scheduler(self.fake)
+        self.history = []
+        scheduler.add_history_entry = lambda sid, status, msg, **kw: self.history.append((sid, status, msg))
+
+    def tearDown(self):
+        _restore_scheduler(self._saved)
+
+    def test_fire_schedule_works_with_no_cron(self):
+        scheduler._fire_schedule({"id": "manual-1", "name": "ad hoc", "cron": None,
+                                   "workdir": "/tmp", "prompt": "do the thing"})
+        self.assertEqual(len(self.fake.new_session_names()), 1)
+        self.assertIn(("manual-1", "ok"), [(h[0], h[1]) for h in self.history])
 
 
 if __name__ == "__main__":

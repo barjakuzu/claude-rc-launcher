@@ -171,6 +171,30 @@ def next_cron_run(expr, after_dt=None):
     return None
 
 
+def _due_to_fire(schedule, now):
+    """True if `schedule` should fire at `now`. Manual tasks (cron: null or
+    empty) never fire on a timer - only via POST /schedules/fire."""
+    cron_expr = schedule.get("cron")
+    if not cron_expr:
+        return False
+    try:
+        if not cron_matches(cron_expr, now):
+            return False
+    except ValueError:
+        return False
+    last_run = schedule.get("last_run")
+    if last_run:
+        try:
+            last_dt = datetime.fromisoformat(last_run)
+            if (last_dt.year == now.year and last_dt.month == now.month and
+                    last_dt.day == now.day and last_dt.hour == now.hour and
+                    last_dt.minute == now.minute):
+                return False
+        except (ValueError, TypeError):
+            pass
+    return True
+
+
 # --- Session lifecycle tracking ---
 
 _active_scheduled_sessions = {}  # session_name -> {schedule_id, started_at, schedule_safe_name}
@@ -385,26 +409,8 @@ def _scheduler_loop():
         for schedule in schedules:
             if not schedule.get("enabled", False):
                 continue
-
-            cron_expr = schedule.get("cron", "")
-            try:
-                if not cron_matches(cron_expr, now):
-                    continue
-            except ValueError:
+            if not _due_to_fire(schedule, now):
                 continue
-
-            # Check last_run to prevent double-fire
-            last_run = schedule.get("last_run")
-            if last_run:
-                try:
-                    last_dt = datetime.fromisoformat(last_run)
-                    if (last_dt.year == now.year and last_dt.month == now.month and
-                            last_dt.day == now.day and last_dt.hour == now.hour and
-                            last_dt.minute == now.minute):
-                        continue
-                except (ValueError, TypeError):
-                    pass
-
             print(f"  Scheduler: cron match for '{schedule.get('name')}'")
             _fire_schedule(schedule)
 
