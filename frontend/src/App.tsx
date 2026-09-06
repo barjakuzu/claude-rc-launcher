@@ -33,6 +33,7 @@ export function App() {
   );
   const [moreOpen, setMoreOpen] = useState(false);
   const [shareOpen, setShareOpen] = useState(false);
+  const [desktopView, setDesktopView] = useState<'devices' | 'tasks' | 'sessions'>('devices');
 
   const pickMTab = (t: MTab) => {
     setMTab(t);
@@ -126,13 +127,44 @@ export function App() {
               onClose={() => handleOpen(null)}
               layout={layout}
             />
-          ) : (
+          ) : layout.mobile ? (
             // Overview grid — big cards
             <OverviewGrid
               cards={cards}
               layout={layout}
               onOpen={handleOpen}
             />
+          ) : (
+            // Desktop "All devices" overview: Devices / Tasks / Sessions.
+            <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minWidth: 0 }}>
+              <div style={{
+                flex: 'none', display: 'flex', gap: 4, padding: '10px 24px 0',
+                borderBottom: `1px solid ${RT.border}`,
+              }}>
+                {(['devices', 'tasks', 'sessions'] as const).map((v) => (
+                  <button
+                    key={v}
+                    onClick={() => setDesktopView(v)}
+                    style={{
+                      background: 'transparent', border: 'none', cursor: 'pointer',
+                      padding: '8px 12px', fontFamily: FONT_SANS, fontSize: 13,
+                      color: desktopView === v ? RT.text : RT.textLow,
+                      borderBottom: `2px solid ${desktopView === v ? RT.text : 'transparent'}`,
+                      textTransform: 'capitalize',
+                    }}
+                  >{v === 'devices' ? 'Devices' : v === 'tasks' ? 'Tasks' : 'Sessions'}</button>
+                ))}
+              </div>
+              <div style={{ flex: 1, overflow: 'hidden', display: 'flex', minHeight: 0 }}>
+                {desktopView === 'devices' && (
+                  <OverviewGrid cards={cards} layout={layout} onOpen={handleOpen} />
+                )}
+                {desktopView === 'tasks' && <AllScheduled cards={cards} />}
+                {desktopView === 'sessions' && (
+                  <AllSessions cards={cards} onOpenDevice={handleOpenDevice} />
+                )}
+              </div>
+            </div>
           )}
         </div>
       </div>
