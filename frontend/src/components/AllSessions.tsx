@@ -67,7 +67,14 @@ export function AllSessions({ cards, onOpenDevice }: AllSessionsProps) {
               {/* Name + status */}
               <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                 <div style={{ flex: 1, fontSize: 14, fontWeight: 600, letterSpacing: '-.005em', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{s.name}</div>
-                <StatusPill status={s.status ?? 'idle'} />
+                {s.kind === 'external' && (
+                  <span style={{
+                    fontSize: 9, letterSpacing: '.06em', textTransform: 'uppercase',
+                    fontFamily: FONT_MONO, padding: '1px 6px', borderRadius: 4,
+                    border: `1px solid ${RT.border}`, color: RT.textLow, flex: 'none',
+                  }}>external</span>
+                )}
+                <StatusPill status={s.state ?? (s.status ?? 'idle')} />
               </div>
               {/* Device chip */}
               <button onClick={(e) => { e.stopPropagation(); onOpenDevice(d.id); }} style={{
@@ -94,29 +101,33 @@ export function AllSessions({ cards, onOpenDevice }: AllSessionsProps) {
               {/* Actions: Preview (terminal) | Restart | More (⋯) | Stop.
                   stopPropagation so buttons don't also open the terminal. */}
               <div onClick={(e) => e.stopPropagation()} style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-                <button
-                  style={mobileActionBtn()}
-                  onClick={() => setPreview({ deviceId: d.id, name: s.name, mode: s.mode })}
-                  title="Show terminal output"
-                >
-                  <Icons.search size={13} stroke={RT.textDim} /> Preview
-                </button>
-                <button
-                  style={mobileActionBtn()}
-                  disabled={!!pending[`restart-${key}`]}
-                  onClick={() => guard(`restart-${key}`, () => api.restart(d.id, s.name))}
-                  title="Restart this session"
-                >
-                  <Icons.refresh size={13} stroke={RT.green} /> Restart
-                </button>
-                <MoreMenu
-                  deviceId={d.id}
-                  sessionName={s.name}
-                  sessionId={s.sessionId}
-                  url={s.url}
-                  pending={!!pending[`unstick-${key}`]}
-                  onUnstick={() => guard(`unstick-${key}`, () => api.unstick(d.id, s.name))}
-                />
+                {s.kind !== 'external' && (
+                  <>
+                    <button
+                      style={mobileActionBtn()}
+                      onClick={() => setPreview({ deviceId: d.id, name: s.name, mode: s.mode })}
+                      title="Show terminal output"
+                    >
+                      <Icons.search size={13} stroke={RT.textDim} /> Preview
+                    </button>
+                    <button
+                      style={mobileActionBtn()}
+                      disabled={!!pending[`restart-${key}`]}
+                      onClick={() => guard(`restart-${key}`, () => api.restart(d.id, s.name))}
+                      title="Restart this session"
+                    >
+                      <Icons.refresh size={13} stroke={RT.green} /> Restart
+                    </button>
+                    <MoreMenu
+                      deviceId={d.id}
+                      sessionName={s.name}
+                      sessionId={s.sessionId}
+                      url={s.url}
+                      pending={!!pending[`unstick-${key}`]}
+                      onUnstick={() => guard(`unstick-${key}`, () => api.unstick(d.id, s.name))}
+                    />
+                  </>
+                )}
                 <button
                   style={{ background: RT.panel, border: `1px solid ${RT.border}`, borderRadius: 7, width: 36, height: 36, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', marginLeft: 'auto' }}
                   disabled={!!pending[`stop-${key}`]}

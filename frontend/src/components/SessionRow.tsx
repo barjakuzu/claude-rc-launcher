@@ -27,6 +27,10 @@ function V5StatusPill({ status }: { status: string }) {
     thinking: { label: 'thinking', color: RT.amber,   pulse: true  },
     idle:     { label: 'idle',     color: RT.textLow, pulse: false },
     stopped:  { label: 'stopped',  color: RT.red,     pulse: false },
+    busy:            { label: 'busy',            color: RT.amber,   pulse: true  },
+    starting:        { label: 'starting',        color: RT.textLow, pulse: false },
+    needs_attention: { label: 'needs attention', color: RT.amber,   pulse: true  },
+    ended:           { label: 'ended',           color: RT.red,     pulse: false },
   };
   const m = map[status] || { label: status, color: RT.textLow, pulse: false };
   return (
@@ -149,7 +153,14 @@ export function SessionRow({ s, hue, deviceId, mobile = false, onChanged, onPrev
           }}>
             {s.name}
           </div>
-          <V5StatusPill status={s.status || 'idle'} />
+          {s.kind === 'external' && (
+            <span style={{
+              fontSize: 9, letterSpacing: '.06em', textTransform: 'uppercase',
+              fontFamily: FONT_MONO, padding: '1px 6px', borderRadius: 4,
+              border: `1px solid ${RT.border}`, color: RT.textLow, flex: 'none',
+            }}>external</span>
+          )}
+          <V5StatusPill status={s.state ?? (s.status || 'idle')} />
         </div>
         <div style={{
           display: 'flex', alignItems: 'center', gap: 8,
@@ -190,15 +201,17 @@ export function SessionRow({ s, hue, deviceId, mobile = false, onChanged, onPrev
         onClick={(e) => e.stopPropagation()}
         style={{ display: 'flex', gap: 6, justifyContent: mobile ? 'flex-end' : 'flex-end' }}
       >
-        <V5IconButton
-          label="Restart session"
-          accent={RT.green}
-          mobile={mobile}
-          pending={pending}
-          onClick={handleRefresh}
-        >
-          <Icons.refresh size={14} />
-        </V5IconButton>
+        {s.kind !== 'external' && (
+          <V5IconButton
+            label="Restart session"
+            accent={RT.green}
+            mobile={mobile}
+            pending={pending}
+            onClick={handleRefresh}
+          >
+            <Icons.refresh size={14} />
+          </V5IconButton>
+        )}
         <V5IconButton
           label="Stop session"
           accent={RT.red}
@@ -209,7 +222,8 @@ export function SessionRow({ s, hue, deviceId, mobile = false, onChanged, onPrev
           <Icons.stop size={12} />
         </V5IconButton>
 
-        {/* ⋯ more menu — secondary actions */}
+        {/* ⋯ more menu — secondary actions (preview/keys/terminal access; not available for external sessions) */}
+        {s.kind !== 'external' && (
         <div ref={menuRef} style={{ position: 'relative' }}>
           <V5IconButton
             label="More options"
@@ -262,6 +276,7 @@ export function SessionRow({ s, hue, deviceId, mobile = false, onChanged, onPrev
             </div>
           )}
         </div>
+        )}
       </div>
     </div>
   );

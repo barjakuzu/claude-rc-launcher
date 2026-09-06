@@ -170,6 +170,10 @@ export function StatusPill({ status }: StatusPillProps) {
     thinking: { label: 'thinking', color: RT.amber, pulse: true },
     idle: { label: 'idle', color: RT.textLow, pulse: false },
     stopped: { label: 'stopped', color: RT.red, pulse: false },
+    busy: { label: 'busy', color: RT.amber, pulse: true },
+    starting: { label: 'starting', color: RT.textLow, pulse: false },
+    needs_attention: { label: 'needs attention', color: RT.amber, pulse: true },
+    ended: { label: 'ended', color: RT.red, pulse: false },
   };
   const m: PillMeta = map[status] || { label: status, color: RT.textLow, pulse: false };
   return (
