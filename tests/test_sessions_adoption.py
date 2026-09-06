@@ -207,7 +207,8 @@ class PaneMatchedRcRowMergeTest(unittest.TestCase):
         self.assertEqual(row["name"], "rc-jobs-lin")
         self.assertNotEqual(row.get("kind"), "external")
         self.assertEqual(row["claude"], {
-            "status": "idle", "waiting_for": None, "session_id": "new-uuid-1",
+            "status": "idle", "state": None, "waitingFor": None,
+            "sessionId": "new-uuid-1", "pid": 2567453,
         })
         pfp.assert_called_once_with(2567453)
         set_env_calls = [c for c in calls if "set-environment" in c]
@@ -270,3 +271,39 @@ class PaneMatchedRcRowMergeTest(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0].get("kind"), "external")
         self.assertFalse(any("set-environment" in c for c in calls))
+
+    def test_id_match_and_pane_match_yield_identical_claude_shape(self):
+        """Both list_rc_sessions match paths funnel through
+        sessions._attach_claude_row, so an id-matched row and a
+        pane-matched row must end up with byte-identical "claude"
+        sub-objects and top-level mirrors for equivalent claude rows."""
+        claude_row = {
+            "session_id": "shared-uuid", "name": "jobs-lin", "cwd": "/home/user/proj",
+            "kind": "interactive", "status": "busy", "started_at": 1,
+            "pid": 555, "waiting_for": "permission_prompt", "state": "waiting",
+        }
+
+        # id-match path: RC_SESSION_ID already in the tmux env.
+        calls_id = []
+        with mock.patch("sessions.subprocess.run",
+                         side_effect=self._fake_run(calls_id, "rc-jobs-lin\t1700000000\n")), \
+             mock.patch("sessions.get_session_env",
+                         side_effect=lambda name, var: "shared-uuid" if var == "RC_SESSION_ID" else None), \
+             mock.patch("sessions.agents.list_claude_sessions", return_value=[claude_row]), \
+             mock.patch("sessions.panes.pane_for_pid", return_value=None):
+            id_rows = sessions.list_rc_sessions()
+
+        # pane-match path: no RC_SESSION_ID yet, resolved via the pane.
+        pane = {"session_name": "rc-jobs-lin", "pane_id": "%5", "pane_pid": 111, "window_index": "0"}
+        calls_pane = []
+        with mock.patch("sessions.subprocess.run",
+                         side_effect=self._fake_run(calls_pane, "rc-jobs-lin\t1700000000\n")), \
+             mock.patch("sessions.agents.list_claude_sessions", return_value=[claude_row]), \
+             mock.patch("sessions.panes.pane_for_pid", return_value=pane):
+            pane_rows = sessions.list_rc_sessions()
+
+        self.assertEqual(len(id_rows), 1)
+        self.assertEqual(len(pane_rows), 1)
+        self.assertEqual(id_rows[0]["claude"], pane_rows[0]["claude"])
+        self.assertEqual(id_rows[0]["waiting_for"], pane_rows[0]["waiting_for"])
+        self.assertEqual(id_rows[0]["status"], pane_rows[0]["status"])

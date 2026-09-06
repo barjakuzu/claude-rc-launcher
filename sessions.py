@@ -243,6 +243,33 @@ def _store_session_error(name, error):
         _session_errors[name] = (error, time.time())
 
 
+def _attach_claude_row(launcher_row, claude_row):
+    """Attach `claude_row` (a `claude agents --json` row) onto a launcher
+    row as its "claude" sub-object, and mirror waiting_for/status up to
+    the launcher row's top level. Shared by list_rc_sessions' two match
+    paths — the RC_SESSION_ID id match and the pane-resolved match for
+    pre-v3 sessions that never got RC_SESSION_ID written into their tmux
+    env — so both produce byte-identical shapes.
+
+    _derive_session_state (server.py) reads top-level "waiting_for" and
+    "status" (busy), not the nested "claude" sub-object (aside from
+    claude.state == "blocked"), so mirror those two fields up so a
+    launcher row can actually derive busy/needs_attention. Skip the
+    status mirror once tmux already reports the session dead - "dead"
+    must win over a stale "busy"."""
+    launcher_row["claude"] = {
+        "status": claude_row.get("status"),
+        "state": claude_row.get("state"),
+        "waitingFor": claude_row.get("waiting_for"),
+        "sessionId": claude_row.get("session_id"),
+        "pid": claude_row.get("pid"),
+    }
+    if claude_row.get("waiting_for"):
+        launcher_row["waiting_for"] = claude_row.get("waiting_for")
+    if claude_row.get("status") == "busy" and launcher_row.get("status") != "dead":
+        launcher_row["status"] = "busy"
+
+
 def list_rc_sessions():
     """Return rc-* tmux sessions (name, mode, URL, workdir, status) plus
     any Claude Code session `claude agents --json` knows about that this
@@ -285,24 +312,7 @@ def list_rc_sessions():
                 s["project"] = os.path.basename(workdir.rstrip("/"))
             claude_row = claude_rows_by_id.get(rc_session_id) if rc_session_id else None
             if claude_row:
-                s["claude"] = {
-                    "status": claude_row.get("status"),
-                    "state": claude_row.get("state"),
-                    "waitingFor": claude_row.get("waiting_for"),
-                    "sessionId": claude_row.get("session_id"),
-                    "pid": claude_row.get("pid"),
-                }
-                # _derive_session_state (server.py) reads top-level
-                # "waiting_for" and "status" (busy), not the nested
-                # "claude" sub-object (aside from claude.state ==
-                # "blocked"), so mirror those two fields up so a
-                # launcher row can actually derive busy/needs_attention.
-                # Skip the status mirror once tmux already reports the
-                # session dead — "dead" must win over a stale "busy".
-                if claude_row.get("waiting_for"):
-                    s["waiting_for"] = claude_row.get("waiting_for")
-                if claude_row.get("status") == "busy" and s.get("status") != "dead":
-                    s["status"] = "busy"
+                _attach_claude_row(s, claude_row)
             sessions.append(s)
             launcher_rows_by_name[name] = s
 
@@ -318,18 +328,11 @@ def list_rc_sessions():
                 # tmux env, so the id match above never fires for them and
                 # their claude row would otherwise be listed a second time
                 # as external. Attach it to the launcher row instead (same
-                # busy/waiting_for mirroring as the id-match branch above)
-                # and back-fill RC_SESSION_ID so the next poll matches by
-                # id directly and get_transcript/restart_session work.
-                launcher_row["claude"] = {
-                    "status": row.get("status"),
-                    "waiting_for": row.get("waiting_for"),
-                    "session_id": row.get("session_id"),
-                }
-                if row.get("waiting_for"):
-                    launcher_row["waiting_for"] = row.get("waiting_for")
-                if row.get("status") == "busy" and launcher_row.get("status") != "dead":
-                    launcher_row["status"] = "busy"
+                # shape/mirroring as the id-match branch, via
+                # _attach_claude_row) and back-fill RC_SESSION_ID so the
+                # next poll matches by id directly and get_transcript/
+                # restart_session work.
+                _attach_claude_row(launcher_row, row)
                 subprocess.run(
                     ["tmux", "set-environment", "-t", pane["session_name"],
                      "RC_SESSION_ID", row["session_id"]],
