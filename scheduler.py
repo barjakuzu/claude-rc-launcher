@@ -32,38 +32,6 @@ def _schedule_error_to_log(err):
     return f"Scheduler: schedules.json failed to load: {err}"
 
 
-WIZARD_PROMPT = """I want to create a scheduled task for the Claude RC Launcher.
-
-Here's what I have so far:
-- **Task:** {description}
-- **Schedule:** {schedule_label} ({cron})
-- **Working directory:** {workdir}
-- **Mode:** {mode}
-
-Help me refine this into a great task prompt. The prompt will be sent to a fresh Claude Code session each time the schedule fires. That session will:
-- Start in the working directory above
-- Have the prompt as its first message
-- Run autonomously (no human interaction)
-
-Things to consider when writing the prompt:
-1. Be specific about what to do, not vague
-2. Include success criteria — how does Claude know it's done?
-3. Mention any files, tools, or resources Claude should use
-4. Add error handling — what should Claude do if something goes wrong?
-5. Keep it focused — one clear objective per scheduled task
-
-Once we've refined the prompt together, save the schedule by running this curl command (fill in the final prompt):
-
-```bash
-curl -s -X POST {api_url}/schedules \\
-  {auth_header} \\
-  -H 'Content-Type: application/json' \\
-  -d '{{"name": "{schedule_name}", "cron": "{cron}", "prompt": "<FINAL PROMPT HERE>", "workdir": "{workdir}", "mode": "{mode_code}", "enabled": true}}'
-```
-
-Let's start — what do you think of the task description? Any questions before we refine it?"""
-
-
 # --- Cron expression parser ---
 
 def _parse_cron_field(field, min_val, max_val):

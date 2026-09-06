@@ -101,7 +101,6 @@ def list_rc_sessions():
             continue
         mode = get_session_env(name, "RC_MODE") or "c"
         workdir = get_session_env(name, "RC_WORKDIR")
-        wizard = get_session_env(name, "RC_WIZARD")
         is_sh = mode == SHELL_MODE
         url = None if is_sh else get_url(name)
         status = get_session_status(name)
@@ -109,8 +108,6 @@ def list_rc_sessions():
         s = {"name": name, "mode": mode, "url": url, "status": status}
         if tokens is not None:
             s["tokens"] = tokens
-        if wizard:
-            s["wizard"] = True
         if workdir:
             s["workdir"] = workdir
             s["project"] = os.path.basename(workdir.rstrip("/"))

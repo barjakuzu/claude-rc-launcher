@@ -35,7 +35,7 @@ import schedules
 from schedules import (
     load_schedules, create_schedule, update_schedule, delete_schedule,
 )
-from scheduler import validate_cron, next_cron_run, _fire_schedule, WIZARD_PROMPT
+from scheduler import validate_cron, next_cron_run, _fire_schedule
 from devices import (
     get_device, list_devices_public, load_devices, get_local_name, rename_device,
 )
@@ -1181,103 +1181,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return
             _fire_schedule(schedule)
             self._json({"ok": True, "message": f"Firing schedule '{schedule.get('name')}'"})
-
-        elif path == "/schedules/wizard":
-            body = self._read_body()
-            description = body.get("description", "").strip()
-            schedule_label = body.get("schedule_label", "")
-            cron = body.get("cron", "")
-            workdir = body.get("workdir", "").strip()
-            mode = body.get("mode", "c")
-            name = body.get("name", "").strip()
-
-            if not description:
-                self._json({"ok": False, "message": "Missing task description"}, 400)
-                return
-
-            # The wizard drives a Claude session to author the schedule.
-            mode = resolve_claude_mode(mode)
-
-            if not name:
-                name = SESSION_PREFIX + "wizard-" + time.strftime("%H%M%S")
-            elif not name.startswith(SESSION_PREFIX):
-                name = SESSION_PREFIX + name
-            name = re.sub(r'[^a-zA-Z0-9_-]', '', name)
-
-            if workdir and os.path.isdir(workdir):
-                session_dir = os.path.abspath(workdir)
-            else:
-                session_dir = WORKING_DIR
-
-            if session_exists(name):
-                self._json({"ok": True, "message": "Already running", "name": name})
-                return
-
-            mode_labels = {"c": "Standard RC", "ci": "Teammate",
-                           "safe": "Safe mode", SHELL_MODE: "Shell"}
-            api_url = f"http://localhost:{PORT}/rc"
-            # Use a one-time token file for wizard auth instead of embedding credentials
-            wizard_token = os.urandom(16).hex()
-            token_file = os.path.join(os.path.expanduser("~/.claude-rc"), f".wizard-token-{wizard_token}")
-            try:
-                with open(token_file, "w") as tf:
-                    if AUTH_USER and AUTH_PASS:
-                        tf.write(f"{AUTH_USER}:{AUTH_PASS}")
-                os.chmod(token_file, 0o600)
-                auth_header = f"-u \"$(cat {token_file})\""
-            except Exception:
-                auth_header = ""
-            prompt = WIZARD_PROMPT.format(
-                description=description,
-                schedule_label=schedule_label,
-                cron=cron,
-                workdir=session_dir,
-                mode=mode_labels.get(mode, mode),
-                mode_code=mode,
-                api_url=api_url,
-                auth_header=auth_header,
-                schedule_name=name.replace(SESSION_PREFIX, ""),
-            )
-
-            claude_flags = RC_FLAGS[mode]
-            cmd = [
-                "tmux", "new-session", "-d", "-s", name,
-                "-c", session_dir,
-                "-e", f"RC_MODE={mode}",
-                "-e", f"RC_WORKDIR={session_dir}",
-                "-e", "RC_WIZARD=1",
-                "-e", "DISPLAY=:1",
-                "-e", "IS_SANDBOX=1",
-            ]
-            wiz_claude_cmd = " ".join(
-                [f"CLAUDECODE= {CLAUDE_BIN}"] + claude_flags.split()
-            )
-            wiz_wrapper = f'{wiz_claude_cmd} 2>&1 || {{ echo ""; sleep 30; }}'
-            cmd.extend(["bash", "-c", wiz_wrapper])
-            print(f"  Wizard: starting session {name} (mode={mode}, dir={session_dir})")
-            result = subprocess.run(cmd, capture_output=True, text=True)
-            if result.returncode != 0:
-                self._json({"ok": False, "message": f"tmux failed: {result.stderr.strip()}"}, 500)
-                return
-
-            def _setup_and_send():
-                setup_session(name, name, mode)
-                if not session_exists(name):
-                    return
-                time.sleep(2)
-                subprocess.run(
-                    ["tmux", "send-keys", "-t", name, "-l", prompt],
-                    capture_output=True,
-                )
-                time.sleep(0.5)
-                subprocess.run(
-                    ["tmux", "send-keys", "-t", name, "Enter"],
-                    capture_output=True,
-                )
-                print(f"  Wizard: prompt sent to {name}")
-
-            threading.Thread(target=_setup_and_send, daemon=True).start()
-            self._json({"ok": True, "message": "Wizard session started", "name": name})
 
         else:
             self.send_error(404)
