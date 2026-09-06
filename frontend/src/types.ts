@@ -5,10 +5,17 @@ export interface DeviceCard {
   user?: string;
   /** Home directory on the device, e.g. "/home/alice" or "/root". May be empty. */
   home_dir?: string;
+  /** Claude Code version running on this device, from compat.claude_version(). May be absent on an older backend or when claude isn't installed. */
+  claude_version?: string;
 }
 export interface Session {
   name: string; mode: string; url?: string; status?: string;
   tokens?: number; workdir?: string; sessionId?: string; pct?: number;
+  state?: 'starting' | 'busy' | 'idle' | 'needs_attention' | 'ended';
+  kind?: 'external';
+  external?: boolean;
+  session_id?: string;
+  waiting_for?: string | null;
 }
 export interface ScheduleHistoryEntry {
   timestamp: string;

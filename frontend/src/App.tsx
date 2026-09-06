@@ -280,7 +280,7 @@ function OverviewGrid({ cards, layout, onOpen }: OverviewGridProps) {
           maxWidth: cols === 2 ? 1200 : 'none',
         }}>
           {cards.map((c) => (
-            <BigCard key={c.id} card={c} mobile={layout.mobile} onClick={() => onOpen(c.id)} />
+            <BigCard key={c.id} card={c} cards={cards} mobile={layout.mobile} onClick={() => onOpen(c.id)} />
           ))}
         </div>
       )}

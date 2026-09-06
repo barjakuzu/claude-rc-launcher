@@ -45,6 +45,7 @@ export function DeviceDetail({ device, cards, tab, setTab, onClose, layout }: De
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minHeight: 0 }}>
       <DeviceHero
         device={device}
+        cards={cards}
         mobile={mobile}
         onClose={onClose}
         onStopAllDone={reloadSessions}
