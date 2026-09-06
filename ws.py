@@ -24,6 +24,8 @@ import subprocess
 import threading
 import time
 
+import sessions
+
 _WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 
@@ -182,6 +184,12 @@ def serve_terminal(handler, name):
     if not key:
         handler.send_error(400)
         return
+    # First touch of an adopted (foreign, non-rc-*) session's window:
+    # remember its size before this client's resize/refresh-client traffic
+    # ever changes it, so the disconnect handler below restores THAT
+    # instead of the launcher's 200x50 default. No-op for rc-* sessions
+    # and a no-op re-read on a second attach to the same adopted session.
+    sessions.capture_adopted_window_size(name)
     sock = handler.connection
     resp = (
         "HTTP/1.1 101 Switching Protocols\r\n"
@@ -335,8 +343,9 @@ def serve_terminal(handler, name):
                 capture_output=True, text=True, timeout=5,
             ).stdout.strip()
             if not clients:
+                cols, rows = sessions.restore_window_size(name)
                 subprocess.run(
-                    ["tmux", "resize-window", "-t", name, "-x", "200", "-y", "50"],
+                    ["tmux", "resize-window", "-t", name, "-x", str(cols), "-y", str(rows)],
                     capture_output=True, timeout=5,
                 )
         except (OSError, subprocess.SubprocessError):

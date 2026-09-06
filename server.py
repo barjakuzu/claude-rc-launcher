@@ -32,7 +32,8 @@ from sessions import (
     restart_session, list_resumable_sessions, resume_session,
     get_all_session_errors, unstick_session, get_transcript,
     build_tmux_command, count_launcher_sessions, get_url_with_source,
-    invalidate_adopted_url_cache,
+    invalidate_adopted_url_cache, capture_adopted_window_size,
+    restore_window_size,
 )
 from tunnel import (
     cloudflared_available, start_tunnel, stop_tunnel, get_tunnel_status,
@@ -139,6 +140,11 @@ _preview_lock = threading.Lock()
 
 def _apply_preview_size(name):
     """Recompute and apply the effective window size for a session."""
+    if not name.startswith(SESSION_PREFIX):
+        # First touch of an adopted (foreign) session's window: remember
+        # its size before we ever resize it, so the "no live viewers"
+        # branch below restores THAT instead of our 200x50 default.
+        capture_adopted_window_size(name)
     with _preview_lock:
         now = time.time()
         live = {v: s for v, s in _preview_viewers.get(name, {}).items()
@@ -148,7 +154,7 @@ def _apply_preview_size(name):
             cols, rows, _, _ = max(live.values(), key=lambda s: s[3])
         else:
             _preview_viewers.pop(name, None)
-            cols, rows = 200, 50
+            cols, rows = restore_window_size(name)
         if _preview_applied.get(name) == (cols, rows):
             return
         _preview_applied[name] = (cols, rows)
@@ -455,6 +461,20 @@ def _adopted_tmux_names(rows=None):
     return {s["tmux"]["session_name"] for s in rows if s.get("external") and s.get("tmux")}
 
 
+def _adopted_pane_id(name, rows=None):
+    """pane_id (e.g. "%7") of the adopted external row whose tmux session
+    name is `name`, or None if `name` isn't currently adopted. enable-rc
+    must target this pane_id, never the raw session name from the URL and
+    never anything from the request body — the pane_id comes only from
+    our own freshly-recomputed adoption set."""
+    if rows is None:
+        rows = list_rc_sessions()
+    for s in rows:
+        if s.get("external") and s.get("tmux") and s["tmux"].get("session_name") == name:
+            return s["tmux"].get("pane_id")
+    return None
+
+
 def _session_name_allowed(name, adopted=None):
     """True if `name` is safe to address for /preview, /ws, /keys, /resize:
     either an rc-* launcher session (_valid_session_name, unchanged), or a
@@ -679,20 +699,31 @@ def _validate_stop_pid(raw_pid):
 ENABLE_RC_POLL_SECONDS = 20
 ENABLE_RC_POLL_INTERVAL = 0.5
 
+# Guards against two overlapping POST /sessions/<name>/enable-rc calls for
+# the same session (e.g. a double click, or two browser tabs) racing to
+# type "/remote-control" into the same pane twice. {name: started_ts}.
+_enable_rc_in_flight = {}
+_enable_rc_in_flight_lock = threading.Lock()
 
-def _enable_rc_for_adopted(name, run=subprocess.run, sleep=time.sleep, now_fn=time.time):
+
+def _enable_rc_for_adopted(name, pane_id, run=subprocess.run, sleep=time.sleep, now_fn=time.time):
     """POST /sessions/<name>/enable-rc backing logic for an already-adopted
     external tmux session (`name` is the tmux session name, validated by
     the caller against _adopted_tmux_names() before this is ever reached):
     type '/remote-control' into the pane, press Enter, then poll
     get_url_with_source(name) for up to ENABLE_RC_POLL_SECONDS for an
     'osc8' URL (the only trustworthy signal RC actually activated).
-    Never sends anything but that literal command string."""
-    r = run(["tmux", "send-keys", "-t", name, "-l", "/remote-control"],
+    Never sends anything but that literal command string.
+
+    Both send-keys calls target `pane_id` (e.g. "%7"), not `name` — the
+    caller resolves pane_id from our own freshly-recomputed adoption
+    record (_adopted_pane_id), never from the request body, so this can
+    never be pointed at an arbitrary pane."""
+    r = run(["tmux", "send-keys", "-t", pane_id, "-l", "/remote-control"],
             capture_output=True, text=True, timeout=5)
     if r.returncode != 0:
         return {"ok": False, "message": "Could not send /remote-control to the pane"}
-    r2 = run(["tmux", "send-keys", "-t", name, "Enter"],
+    r2 = run(["tmux", "send-keys", "-t", pane_id, "Enter"],
              capture_output=True, text=True, timeout=5)
     if r2.returncode != 0:
         return {"ok": False, "message": "Could not send Enter to the pane"}
@@ -705,9 +736,11 @@ def _enable_rc_for_adopted(name, run=subprocess.run, sleep=time.sleep, now_fn=ti
     while now_fn() < deadline:
         url, source = get_url_with_source(name)
         if source == "osc8" and url:
+            invalidate_adopted_url_cache(name)
             return {"ok": True, "url": url}
         sleep(ENABLE_RC_POLL_INTERVAL)
-    return {"ok": False, "message": "Remote Control did not activate within 20s"}
+    return {"ok": False,
+            "message": f"Remote Control did not activate within {ENABLE_RC_POLL_SECONDS}s"}
 
 
 def _stop_external_pid(pid, run=subprocess.run):
@@ -1406,9 +1439,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         elif path.startswith("/sessions/") and path.endswith("/preview-bye"):
             # A viewer closed its preview: drop it from the registry and
-            # re-apply the effective size (restores 200×50 when none remain).
+            # re-apply the effective size (restores the launcher default,
+            # or an adopted row's own captured size, once none remain).
             name = path[len("/sessions/"):-len("/preview-bye")]
-            if not _valid_session_name(name):
+            if not _session_name_allowed(name):
                 self._json({"ok": False, "message": "Invalid session name"}, 400)
                 return
             body = self._read_body()
@@ -1465,10 +1499,21 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         elif path.startswith("/sessions/") and path.endswith("/enable-rc"):
             name = path[len("/sessions/"):-len("/enable-rc")]
-            if name not in _adopted_tmux_names():
+            rows = list_rc_sessions()
+            if name not in _adopted_tmux_names(rows):
                 self._json({"ok": False, "message": "Not an adopted external session"}, 400)
                 return
-            result = _enable_rc_for_adopted(name)
+            pane_id = _adopted_pane_id(name, rows)
+            with _enable_rc_in_flight_lock:
+                if name in _enable_rc_in_flight:
+                    self._json({"ok": False, "message": "enable-rc already in progress"}, 409)
+                    return
+                _enable_rc_in_flight[name] = time.time()
+            try:
+                result = _enable_rc_for_adopted(name, pane_id)
+            finally:
+                with _enable_rc_in_flight_lock:
+                    _enable_rc_in_flight.pop(name, None)
             self._json(result, 200 if result.get("ok") else 502)
 
         elif path == "/resume/start":

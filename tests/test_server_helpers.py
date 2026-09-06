@@ -690,7 +690,7 @@ class RouteAdoptionGuardTest(unittest.TestCase):
 
 
 class EnableRcTest(unittest.TestCase):
-    def test_sends_remote_control_then_enter(self):
+    def test_sends_remote_control_then_enter_targeting_pane_id(self):
         calls = []
 
         def fake_run(cmd, **kw):
@@ -698,15 +698,16 @@ class EnableRcTest(unittest.TestCase):
             return mock.Mock(returncode=0, stdout="", stderr="")
 
         with mock.patch("server.get_url_with_source", return_value=("https://claude.ai/code/session_x", "osc8")):
-            result = server._enable_rc_for_adopted("mysession", run=fake_run, sleep=lambda s: None)
+            result = server._enable_rc_for_adopted("mysession", "%7", run=fake_run, sleep=lambda s: None)
         self.assertEqual(result, {"ok": True, "url": "https://claude.ai/code/session_x"})
-        self.assertEqual(calls[0], ["tmux", "send-keys", "-t", "mysession", "-l", "/remote-control"])
-        self.assertEqual(calls[1], ["tmux", "send-keys", "-t", "mysession", "Enter"])
+        # Both send-keys calls target the pane_id, never the session name.
+        self.assertEqual(calls[0], ["tmux", "send-keys", "-t", "%7", "-l", "/remote-control"])
+        self.assertEqual(calls[1], ["tmux", "send-keys", "-t", "%7", "Enter"])
 
     def test_send_keys_failure_reports_message_without_polling(self):
         fake_run = lambda cmd, **kw: mock.Mock(returncode=1, stdout="", stderr="no such session")
         with mock.patch("server.get_url_with_source") as guws:
-            result = server._enable_rc_for_adopted("mysession", run=fake_run, sleep=lambda s: None)
+            result = server._enable_rc_for_adopted("mysession", "%7", run=fake_run, sleep=lambda s: None)
         self.assertFalse(result["ok"])
         self.assertIn("message", result)
         guws.assert_not_called()
@@ -715,7 +716,7 @@ class EnableRcTest(unittest.TestCase):
         fake_run = lambda cmd, **kw: mock.Mock(returncode=0, stdout="", stderr="")
         responses = [(None, None), (None, "text"), ("https://claude.ai/code/session_y", "osc8")]
         with mock.patch("server.get_url_with_source", side_effect=responses):
-            result = server._enable_rc_for_adopted("mysession", run=fake_run, sleep=lambda s: None)
+            result = server._enable_rc_for_adopted("mysession", "%7", run=fake_run, sleep=lambda s: None)
         self.assertEqual(result, {"ok": True, "url": "https://claude.ai/code/session_y"})
 
     def test_times_out_after_20_seconds_of_polling(self):
@@ -729,16 +730,168 @@ class EnableRcTest(unittest.TestCase):
             clock["t"] += s
 
         with mock.patch("server.get_url_with_source", return_value=(None, None)):
-            result = server._enable_rc_for_adopted("mysession", run=fake_run, sleep=sleep, now_fn=now_fn)
+            result = server._enable_rc_for_adopted("mysession", "%7", run=fake_run, sleep=sleep, now_fn=now_fn)
         self.assertFalse(result["ok"])
-        self.assertIn("20", result["message"])
+        self.assertIn(str(server.ENABLE_RC_POLL_SECONDS), result["message"])
+
+    def test_success_invalidates_the_adoption_url_cache(self):
+        fake_run = lambda cmd, **kw: mock.Mock(returncode=0, stdout="", stderr="")
+        with mock.patch("server.get_url_with_source", return_value=("https://claude.ai/code/session_x", "osc8")), \
+             mock.patch("server.invalidate_adopted_url_cache") as inv:
+            server._enable_rc_for_adopted("mysession", "%7", run=fake_run, sleep=lambda s: None)
+        # Once right after typing /remote-control, once again on success —
+        # so a poller reading list_rc_sessions right after this returns
+        # never serves a stale cached miss.
+        self.assertEqual(inv.call_count, 2)
+        inv.assert_called_with("mysession")
 
     def test_route_rejects_non_adopted_name(self):
         import inspect
         src = inspect.getsource(server.Handler.do_POST)
         self.assertIn('endswith("/enable-rc")', src)
         block = src.split('endswith("/enable-rc")', 1)[1][:600]
-        self.assertIn("_adopted_tmux_names()", block)
+        self.assertIn("_adopted_tmux_names(rows)", block)
+
+    def test_route_resolves_pane_id_from_adoption_record_not_body(self):
+        import inspect
+        src = inspect.getsource(server.Handler.do_POST)
+        block = src.split('endswith("/enable-rc")', 1)[1][:800]
+        self.assertIn("_adopted_pane_id(name, rows)", block)
+        self.assertNotIn("body", block)
+
+
+class AdoptedPaneIdTest(unittest.TestCase):
+    def test_returns_pane_id_for_adopted_row(self):
+        rows = [{"external": True, "tmux": {"session_name": "mysession", "pane_id": "%7"}}]
+        self.assertEqual(server._adopted_pane_id("mysession", rows), "%7")
+
+    def test_returns_none_when_not_adopted(self):
+        rows = [{"external": True, "tmux": {"session_name": "other", "pane_id": "%3"}}]
+        self.assertIsNone(server._adopted_pane_id("mysession", rows))
+
+
+class EnableRcInFlightGuardTest(unittest.TestCase):
+    def setUp(self):
+        server._enable_rc_in_flight.clear()
+
+    def tearDown(self):
+        server._enable_rc_in_flight.clear()
+
+    def test_second_concurrent_call_is_rejected_with_409(self):
+        import threading as th
+
+        release = th.Event()
+        started = th.Event()
+        results = []
+
+        def slow_run(cmd, **kw):
+            if cmd[:2] == ["tmux", "send-keys"] and "-l" in cmd:
+                started.set()
+                release.wait(timeout=5)
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        def worker():
+            with server._enable_rc_in_flight_lock:
+                if "mysession" in server._enable_rc_in_flight:
+                    results.append(("rejected", 409))
+                    return
+                server._enable_rc_in_flight["mysession"] = time.time()
+            try:
+                with mock.patch("server.get_url_with_source", return_value=("https://claude.ai/code/session_x", "osc8")):
+                    r = server._enable_rc_for_adopted("mysession", "%7", run=slow_run, sleep=lambda s: None)
+                results.append(("done", r))
+            finally:
+                with server._enable_rc_in_flight_lock:
+                    server._enable_rc_in_flight.pop("mysession", None)
+
+        t1 = th.Thread(target=worker)
+        t1.start()
+        started.wait(timeout=5)
+        # A second call while the first is mid-flight must see the
+        # in-flight marker and be rejected before doing any tmux work.
+        with server._enable_rc_in_flight_lock:
+            in_flight = "mysession" in server._enable_rc_in_flight
+        self.assertTrue(in_flight)
+        release.set()
+        t1.join(timeout=5)
+        self.assertNotIn("mysession", server._enable_rc_in_flight)
+
+
+class PreviewByeGuardTest(unittest.TestCase):
+    def test_preview_bye_route_uses_session_name_allowed(self):
+        import inspect
+        src = inspect.getsource(server.Handler.do_POST)
+        block = src.split('endswith("/preview-bye")', 1)[1][:400]
+        self.assertIn("_session_name_allowed(name)", block)
+
+
+class SessionNameAllowedBehavioralTest(unittest.TestCase):
+    """A behavioural (not getsource-based) check that the wiring actually
+    rejects a non-adopted, non-rc-* name end to end, not just that the
+    right identifier appears in the route source."""
+
+    def test_non_adopted_non_rc_name_is_actually_rejected(self):
+        orig = server.list_rc_sessions
+        server.list_rc_sessions = lambda: []
+        try:
+            self.assertFalse(server._session_name_allowed("some-random-name"))
+        finally:
+            server.list_rc_sessions = orig
+
+
+class AdoptedWindowSizeTest(unittest.TestCase):
+    def setUp(self):
+        import sessions
+        sessions._adopted_window_size_cache.clear()
+
+    def test_capture_reads_current_window_size_once(self):
+        import sessions
+        calls = []
+
+        def fake_run(cmd, **kw):
+            calls.append(cmd)
+            return mock.Mock(returncode=0, stdout="132x44\n", stderr="")
+
+        size1 = sessions.capture_adopted_window_size("mysession", run=fake_run)
+        size2 = sessions.capture_adopted_window_size("mysession", run=fake_run)
+        self.assertEqual(size1, (132, 44))
+        self.assertEqual(size2, (132, 44))
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0], ["tmux", "display", "-p", "-t", "mysession",
+                                     "#{window_width}x#{window_height}"])
+
+    def test_restore_returns_launcher_default_for_rc_session(self):
+        import sessions
+        self.assertEqual(sessions.restore_window_size("rc-portugal"), (200, 50))
+
+    def test_restore_returns_captured_size_for_adopted_session(self):
+        import sessions
+        sessions.capture_adopted_window_size(
+            "mysession", run=lambda cmd, **kw: mock.Mock(returncode=0, stdout="90x30", stderr=""))
+        self.assertEqual(sessions.restore_window_size("mysession"), (90, 30))
+
+    def test_restore_falls_back_to_default_when_capture_failed(self):
+        import sessions
+        sessions.capture_adopted_window_size(
+            "mysession", run=lambda cmd, **kw: mock.Mock(returncode=1, stdout="", stderr="error"))
+        self.assertEqual(sessions.restore_window_size("mysession"), (200, 50))
+
+    def test_apply_preview_size_captures_before_first_resize_for_adopted_session(self):
+        with mock.patch("server.capture_adopted_window_size") as cap, \
+             mock.patch("server.restore_window_size", return_value=(90, 30)), \
+             mock.patch("server.subprocess.run", return_value=mock.Mock(returncode=0)):
+            server._preview_viewers.pop("mysession", None)
+            server._preview_applied.pop("mysession", None)
+            server._apply_preview_size("mysession")
+        cap.assert_called_once_with("mysession")
+
+    def test_apply_preview_size_never_captures_for_rc_session(self):
+        with mock.patch("server.capture_adopted_window_size") as cap, \
+             mock.patch("server.subprocess.run", return_value=mock.Mock(returncode=0)):
+            server._preview_viewers.pop("rc-portugal", None)
+            server._preview_applied.pop("rc-portugal", None)
+            server._apply_preview_size("rc-portugal")
+        cap.assert_not_called()
 
 
 if __name__ == "__main__":

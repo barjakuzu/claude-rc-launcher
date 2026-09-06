@@ -67,6 +67,57 @@ def invalidate_adopted_url_cache(session_name):
         _adoption_url_cache.pop(session_name, None)
 
 
+# Foreign (adopted, non-rc-*) sessions were sized by whoever opened them
+# by hand before we ever touched them — restoring our own 200x50 launcher
+# default when the last preview/ws viewer disconnects would leave their
+# terminal at the wrong size. Capture each adopted session's window size
+# exactly once, the first time we're about to resize it, and restore that
+# instead. Key: tmux session name, value: (cols, rows) or None (capture
+# failed — callers fall back to the launcher default in that case).
+_adopted_window_size_cache = {}
+_adopted_window_size_lock = threading.Lock()
+
+
+def capture_adopted_window_size(session_name, run=subprocess.run):
+    """Capture and cache `session_name`'s current tmux window size, but
+    only the first time this is called for a given name — later calls are
+    a no-op read of the cached value. Call this before ever resizing an
+    adopted session's window (server._apply_preview_size, ws.serve_terminal)
+    so restore_window_size() below has the pre-adoption size to hand back."""
+    with _adopted_window_size_lock:
+        if session_name in _adopted_window_size_cache:
+            return _adopted_window_size_cache[session_name]
+    size = None
+    try:
+        r = run(["tmux", "display", "-p", "-t", session_name,
+                  "#{window_width}x#{window_height}"],
+                capture_output=True, text=True, timeout=5)
+        out = r.stdout.strip()
+        if r.returncode == 0 and "x" in out:
+            w, h = out.split("x", 1)
+            if w.isdigit() and h.isdigit():
+                size = (int(w), int(h))
+    except Exception:
+        size = None
+    with _adopted_window_size_lock:
+        _adopted_window_size_cache.setdefault(session_name, size)
+        return _adopted_window_size_cache[session_name]
+
+
+def restore_window_size(session_name):
+    """(cols, rows) to resize `session_name`'s tmux window back to once
+    its last live preview/ws viewer disconnects: the launcher's own
+    200x50 default for an rc-* session (unchanged behavior), or — for an
+    adopted external session — whatever capture_adopted_window_size
+    captured before we first touched it, falling back to 200x50 only if
+    that capture never happened or failed."""
+    if session_name.startswith(SESSION_PREFIX):
+        return 200, 50
+    with _adopted_window_size_lock:
+        size = _adopted_window_size_cache.get(session_name)
+    return size if size else (200, 50)
+
+
 def is_shell_session(session_name):
     """True if the session runs a plain shell rather than Claude Code."""
     return (get_session_env(session_name, "RC_MODE") or "") == SHELL_MODE
