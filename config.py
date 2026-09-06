@@ -41,6 +41,23 @@ RC_FLAGS = {
     SHELL_MODE: "",
 }
 
+# Permission mode per launch, replacing the RC_FLAGS strings as the source
+# of truth for what sessions.build_tmux_command actually passes. RC_FLAGS
+# itself stays defined above, unchanged, for any external caller still
+# reading it as a flag string during a rolling upgrade.
+PERMISSION_MODE = {
+    "c": "bypassPermissions",
+    "ci": "bypassPermissions",
+    "safe": "acceptEdits",
+}
+
+# Extra argv tokens per mode beyond --permission-mode, in the same style
+# tmux command lists use everywhere else in this codebase (no shell
+# quoting needed - these become individual argv entries).
+EXTRA_FLAGS = {
+    "ci": ["--teammate-mode", "in-process"],
+}
+
 def resolve_claude_mode(mode):
     """Coerce a mode to one that actually runs Claude Code.
 
