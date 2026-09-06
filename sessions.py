@@ -257,6 +257,7 @@ def list_rc_sessions():
     )
     sessions = []
     known_session_ids = set()
+    launcher_rows_by_name = {}
     claude_rows_by_id = {row["session_id"]: row for row in agents.list_claude_sessions()}
     if r.returncode == 0:
         for line in r.stdout.strip().splitlines():
@@ -303,10 +304,38 @@ def list_rc_sessions():
                 if claude_row.get("status") == "busy" and s.get("status") != "dead":
                     s["status"] = "busy"
             sessions.append(s)
+            launcher_rows_by_name[name] = s
 
     for row in claude_rows_by_id.values():
         if row["session_id"] in known_session_ids:
             continue
+        pid = row.get("pid")
+        pane = panes.pane_for_pid(pid) if pid else None
+        if pane and pane["session_name"].startswith(SESSION_PREFIX):
+            launcher_row = launcher_rows_by_name.get(pane["session_name"])
+            if launcher_row is not None:
+                # Pre-v3 launcher sessions have no RC_SESSION_ID in their
+                # tmux env, so the id match above never fires for them and
+                # their claude row would otherwise be listed a second time
+                # as external. Attach it to the launcher row instead (same
+                # busy/waiting_for mirroring as the id-match branch above)
+                # and back-fill RC_SESSION_ID so the next poll matches by
+                # id directly and get_transcript/restart_session work.
+                launcher_row["claude"] = {
+                    "status": row.get("status"),
+                    "waiting_for": row.get("waiting_for"),
+                    "session_id": row.get("session_id"),
+                }
+                if row.get("waiting_for"):
+                    launcher_row["waiting_for"] = row.get("waiting_for")
+                if row.get("status") == "busy" and launcher_row.get("status") != "dead":
+                    launcher_row["status"] = "busy"
+                subprocess.run(
+                    ["tmux", "set-environment", "-t", pane["session_name"],
+                     "RC_SESSION_ID", row["session_id"]],
+                    capture_output=True, timeout=5,
+                )
+                continue
         entry = {
             "name": row["name"] or f"external-{row['session_id'][:8]}",
             "mode": None,
@@ -322,14 +351,11 @@ def list_rc_sessions():
             "tmux": None,
             "rc_url": None,
         }
-        pid = row.get("pid")
-        if pid:
-            pane = panes.pane_for_pid(pid)
-            if pane and not pane["session_name"].startswith(SESSION_PREFIX):
-                entry["tmux"] = {"session_name": pane["session_name"], "pane_id": pane["pane_id"]}
-                url, source = _cached_adopted_url(pane["session_name"])
-                if source == "osc8":
-                    entry["rc_url"] = url
+        if pane and not pane["session_name"].startswith(SESSION_PREFIX):
+            entry["tmux"] = {"session_name": pane["session_name"], "pane_id": pane["pane_id"]}
+            url, source = _cached_adopted_url(pane["session_name"])
+            if source == "osc8":
+                entry["rc_url"] = url
         sessions.append(entry)
 
     return sessions
