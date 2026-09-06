@@ -343,10 +343,12 @@ def serve_terminal(handler, name):
                 capture_output=True, text=True, timeout=5,
             ).stdout.strip()
             if not clients:
-                cols, rows = sessions.restore_window_size(name)
-                subprocess.run(
-                    ["tmux", "resize-window", "-t", name, "-x", str(cols), "-y", str(rows)],
-                    capture_output=True, timeout=5,
-                )
+                size = sessions.restore_window_size(name)
+                if size is not None:
+                    cols, rows = size
+                    subprocess.run(
+                        ["tmux", "resize-window", "-t", name, "-x", str(cols), "-y", str(rows)],
+                        capture_output=True, timeout=5,
+                    )
         except (OSError, subprocess.SubprocessError):
             pass

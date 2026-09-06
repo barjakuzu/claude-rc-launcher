@@ -109,13 +109,18 @@ def restore_window_size(session_name):
     its last live preview/ws viewer disconnects: the launcher's own
     200x50 default for an rc-* session (unchanged behavior), or — for an
     adopted external session — whatever capture_adopted_window_size
-    captured before we first touched it, falling back to 200x50 only if
-    that capture never happened or failed."""
+    captured before we first touched it.
+
+    Returns None for an adopted session when no captured size exists
+    (capture never happened or failed) — callers must treat None as "do
+    nothing, skip the resize" rather than falling back to the launcher's
+    200x50, since that would clobber a foreign session's own size with
+    a guess."""
     if session_name.startswith(SESSION_PREFIX):
         return 200, 50
     with _adopted_window_size_lock:
         size = _adopted_window_size_cache.get(session_name)
-    return size if size else (200, 50)
+    return size if size else None
 
 
 def is_shell_session(session_name):

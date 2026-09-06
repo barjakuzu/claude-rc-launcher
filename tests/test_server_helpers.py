@@ -760,6 +760,32 @@ class EnableRcTest(unittest.TestCase):
         self.assertNotIn("body", block)
 
 
+class ValidPaneIdTest(unittest.TestCase):
+    def test_accepts_well_formed_pane_id(self):
+        self.assertTrue(server._valid_pane_id("%7"))
+        self.assertTrue(server._valid_pane_id("%123"))
+
+    def test_rejects_none(self):
+        self.assertFalse(server._valid_pane_id(None))
+
+    def test_rejects_malformed_value(self):
+        self.assertFalse(server._valid_pane_id("7"))
+        self.assertFalse(server._valid_pane_id("%"))
+        self.assertFalse(server._valid_pane_id("%7; rm -rf /"))
+        self.assertFalse(server._valid_pane_id(""))
+        self.assertFalse(server._valid_pane_id("mysession"))
+
+    def test_route_validates_pane_id_before_use(self):
+        import inspect
+        src = inspect.getsource(server.Handler.do_POST)
+        block = src.split('endswith("/enable-rc")', 1)[1][:900]
+        self.assertIn("_valid_pane_id(pane_id)", block)
+        # The validation must happen before pane_id is handed to the
+        # enable-rc backing logic.
+        self.assertLess(block.index("_valid_pane_id(pane_id)"),
+                         block.index("_enable_rc_for_adopted(name, pane_id)"))
+
+
 class AdoptedPaneIdTest(unittest.TestCase):
     def test_returns_pane_id_for_adopted_row(self):
         rows = [{"external": True, "tmux": {"session_name": "mysession", "pane_id": "%7"}}]
@@ -870,11 +896,15 @@ class AdoptedWindowSizeTest(unittest.TestCase):
             "mysession", run=lambda cmd, **kw: mock.Mock(returncode=0, stdout="90x30", stderr=""))
         self.assertEqual(sessions.restore_window_size("mysession"), (90, 30))
 
-    def test_restore_falls_back_to_default_when_capture_failed(self):
+    def test_restore_returns_none_when_capture_failed(self):
         import sessions
         sessions.capture_adopted_window_size(
             "mysession", run=lambda cmd, **kw: mock.Mock(returncode=1, stdout="", stderr="error"))
-        self.assertEqual(sessions.restore_window_size("mysession"), (200, 50))
+        self.assertIsNone(sessions.restore_window_size("mysession"))
+
+    def test_restore_returns_none_when_never_captured(self):
+        import sessions
+        self.assertIsNone(sessions.restore_window_size("mysession"))
 
     def test_apply_preview_size_captures_before_first_resize_for_adopted_session(self):
         with mock.patch("server.capture_adopted_window_size") as cap, \
@@ -884,6 +914,24 @@ class AdoptedWindowSizeTest(unittest.TestCase):
             server._preview_applied.pop("mysession", None)
             server._apply_preview_size("mysession")
         cap.assert_called_once_with("mysession")
+
+    def test_apply_preview_size_skips_resize_when_no_captured_size(self):
+        with mock.patch("server.capture_adopted_window_size"), \
+             mock.patch("server.restore_window_size", return_value=None), \
+             mock.patch("server.subprocess.run") as run:
+            server._preview_viewers.pop("mysession", None)
+            server._preview_applied.pop("mysession", None)
+            server._apply_preview_size("mysession")
+        run.assert_not_called()
+
+    def test_apply_preview_size_still_resizes_rc_session_to_default(self):
+        with mock.patch("server.subprocess.run", return_value=mock.Mock(returncode=0)) as run:
+            server._preview_viewers.pop("rc-portugal", None)
+            server._preview_applied.pop("rc-portugal", None)
+            server._apply_preview_size("rc-portugal")
+        run.assert_called_once()
+        self.assertEqual(run.call_args[0][0],
+                          ["tmux", "resize-window", "-t", "rc-portugal", "-x", "200", "-y", "50"])
 
     def test_apply_preview_size_never_captures_for_rc_session(self):
         with mock.patch("server.capture_adopted_window_size") as cap, \

@@ -154,7 +154,12 @@ def _apply_preview_size(name):
             cols, rows, _, _ = max(live.values(), key=lambda s: s[3])
         else:
             _preview_viewers.pop(name, None)
-            cols, rows = restore_window_size(name)
+            size = restore_window_size(name)
+            if size is None:
+                # Adopted session with no captured size (capture failed):
+                # leave its window alone rather than guessing 200x50.
+                return
+            cols, rows = size
         if _preview_applied.get(name) == (cols, rows):
             return
         _preview_applied[name] = (cols, rows)
@@ -704,6 +709,18 @@ ENABLE_RC_POLL_INTERVAL = 0.5
 # type "/remote-control" into the same pane twice. {name: started_ts}.
 _enable_rc_in_flight = {}
 _enable_rc_in_flight_lock = threading.Lock()
+
+
+_PANE_ID_RE = re.compile(r"^%\d+$")
+
+
+def _valid_pane_id(pane_id):
+    """True only for a well-formed tmux pane_id like "%7". Guards the
+    enable-rc route: pane_id must be present and match this shape before
+    it is ever placed into a tmux send-keys argv, so a None (adoption
+    record vanished between lookup and use) or malformed pane_id can
+    never reach subprocess."""
+    return isinstance(pane_id, str) and bool(_PANE_ID_RE.match(pane_id))
 
 
 def _enable_rc_for_adopted(name, pane_id, run=subprocess.run, sleep=time.sleep, now_fn=time.time):
@@ -1504,6 +1521,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._json({"ok": False, "message": "Not an adopted external session"}, 400)
                 return
             pane_id = _adopted_pane_id(name, rows)
+            if not _valid_pane_id(pane_id):
+                self._json({"ok": False, "message": "adopted session has no pane id"}, 400)
+                return
             with _enable_rc_in_flight_lock:
                 if name in _enable_rc_in_flight:
                     self._json({"ok": False, "message": "enable-rc already in progress"}, 409)
