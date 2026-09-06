@@ -167,6 +167,59 @@ class SessionCapMessageTest(unittest.TestCase):
     def test_default_max_sessions_is_ten(self):
         self.assertEqual(config.RC_MAX_SESSIONS, 10)
 
+    def test_zero_disables_the_cap(self):
+        self.assertIsNone(server._session_cap_message(1000, 0))
+
+    def test_negative_disables_the_cap(self):
+        self.assertIsNone(server._session_cap_message(1000, -1))
+
+
+class RcMaxSessionsParsingTest(unittest.TestCase):
+    """config.RC_MAX_SESSIONS parsing happens at import time, so these drive
+    the parsing logic directly (mirroring what config.py itself does)
+    instead of re-importing the module under different env vars."""
+
+    def _parse(self, raw):
+        try:
+            return int(raw) if raw is not None else 10
+        except ValueError:
+            return 0
+
+    def test_unset_defaults_to_ten(self):
+        self.assertEqual(self._parse(None), 10)
+
+    def test_invalid_string_disables_without_raising(self):
+        self.assertEqual(self._parse("abc"), 0)
+
+    def test_explicit_zero_disables(self):
+        self.assertEqual(self._parse("0"), 0)
+
+    def test_negative_parses_through_unchanged(self):
+        # Parsing itself doesn't clamp negatives to 0 - consumers treat any
+        # value <= 0 as "cap disabled" (see _session_cap_message and the
+        # scheduler's RC_MAX_SESSIONS > 0 guard).
+        self.assertEqual(self._parse("-5"), -5)
+
+
+class DetectAndRestartTest(unittest.TestCase):
+    def setUp(self):
+        self._orig_run = server.subprocess.run
+
+    def tearDown(self):
+        server.subprocess.run = self._orig_run
+
+    def test_timeout_during_detection_falls_back_to_manual_restart(self):
+        def _raise_timeout(*args, **kwargs):
+            raise server.subprocess.TimeoutExpired(cmd=args[0], timeout=10)
+        server.subprocess.run = _raise_timeout
+        self.assertEqual(server._detect_and_restart(), "Restart manually to apply the update.")
+
+    def test_missing_systemctl_falls_back_to_manual_restart(self):
+        def _raise_missing(*args, **kwargs):
+            raise FileNotFoundError("systemctl not found")
+        server.subprocess.run = _raise_missing
+        self.assertEqual(server._detect_and_restart(), "Restart manually to apply the update.")
+
 
 if __name__ == "__main__":
     unittest.main()

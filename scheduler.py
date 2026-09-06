@@ -232,17 +232,20 @@ def _fire_schedule(schedule):
     safe_name = re.sub(r'[^a-zA-Z0-9_-]', '', name.replace(" ", "-"))
     session_name = f"{SESSION_PREFIX}run-{uuid.uuid4().hex[:12]}"
 
-    if len(list_rc_sessions()) >= RC_MAX_SESSIONS:
-        add_history_entry(schedule_id, "skipped", f"Session cap reached ({RC_MAX_SESSIONS})")
-        print(f"  Scheduler: skipped '{name}', session cap reached ({RC_MAX_SESSIONS})")
-        return
-
     # Check-and-claim must be atomic: the entry is registered here, under the
     # lock, before any tmux command runs, so a second _fire_schedule call for
     # the same schedule (e.g. a double-click on POST /schedules/fire) that
     # arrives while setup/send is still in flight sees the claim and is
     # skipped/killed instead of racing a duplicate session into existence.
+    # The session-cap check lives in this same critical section so the count
+    # and the claim are atomic too (the server's own /start, /resume/start
+    # cap check is advisory only - it can't hold this lock across a request).
     with _active_scheduled_sessions_lock:
+        if RC_MAX_SESSIONS > 0 and len(list_rc_sessions()) >= RC_MAX_SESSIONS:
+            add_history_entry(schedule_id, "skipped", f"Session cap reached ({RC_MAX_SESSIONS})")
+            print(f"  Scheduler: skipped '{name}', session cap reached ({RC_MAX_SESSIONS})")
+            return
+
         existing = _active_scheduled_sessions.get(schedule_id)
         if existing and session_exists(existing["session_name"]):
             if concurrency == "kill":

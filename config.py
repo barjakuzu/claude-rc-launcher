@@ -20,7 +20,11 @@ RC_TRUSTED_PROXIES = set(
     if p.strip()
 )
 RC_BEHIND_TLS = os.environ.get("RC_BEHIND_TLS", "") == "1"
-RC_MAX_SESSIONS = int(os.environ.get("RC_MAX_SESSIONS", "10"))
+try:
+    RC_MAX_SESSIONS = int(os.environ.get("RC_MAX_SESSIONS", "10"))
+except ValueError:
+    print(f"Warning: invalid RC_MAX_SESSIONS={os.environ.get('RC_MAX_SESSIONS')!r}, disabling the session cap")
+    RC_MAX_SESSIONS = 0
 
 # Resolve relative working dir to absolute
 WORKING_DIR = os.path.abspath(WORKING_DIR)

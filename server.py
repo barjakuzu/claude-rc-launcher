@@ -460,29 +460,41 @@ def _pick_restart_command(system_unit_active, user_unit_active, is_macos, uid):
 
 def _detect_and_restart():
     """Restart the launcher via whichever install mechanism is active, and
-    return a human-readable status message."""
-    system_active = subprocess.run(
-        ["systemctl", "is-active", "--quiet", "claude-rc-launcher"],
-        capture_output=True,
-    ).returncode == 0
-    user_active = subprocess.run(
-        ["systemctl", "--user", "is-active", "--quiet", "claude-rc"],
-        capture_output=True,
-    ).returncode == 0
+    return a human-readable status message. Falls back to a manual-restart
+    message if the detection commands hang or systemctl/launchctl aren't
+    installed, rather than raising out of the /update handler."""
+    try:
+        system_active = subprocess.run(
+            ["systemctl", "is-active", "--quiet", "claude-rc-launcher"],
+            capture_output=True, timeout=10,
+        ).returncode == 0
+        user_active = subprocess.run(
+            ["systemctl", "--user", "is-active", "--quiet", "claude-rc"],
+            capture_output=True, timeout=10,
+        ).returncode == 0
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return "Restart manually to apply the update."
+
     cmd = _pick_restart_command(system_active, user_active, sys.platform == "darwin", os.getuid())
     if cmd is None:
         return "Restart manually to apply the update."
 
     def _run_delayed():
         time.sleep(1)
-        subprocess.run(cmd, capture_output=True)
+        try:
+            subprocess.run(cmd, capture_output=True, timeout=10)
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass
 
     threading.Thread(target=_run_delayed, daemon=True).start()
     return f"Restarting ({' '.join(cmd)})..."
 
 
 def _session_cap_message(current_count, max_sessions):
-    """None if under the session cap, else the 429 message to return."""
+    """None if under the session cap or the cap is disabled (max_sessions
+    <= 0), else the 429 message to return."""
+    if max_sessions <= 0:
+        return None
     if current_count >= max_sessions:
         return f"Session cap reached ({max_sessions}). Stop a session first."
     return None

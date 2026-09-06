@@ -347,6 +347,22 @@ class SessionCapTest(unittest.TestCase):
         self.assertEqual(len(self.history), 1)
         self.assertEqual(self.history[0][1], "skipped")
 
+    def test_zero_disables_the_cap(self):
+        scheduler.RC_MAX_SESSIONS = 0
+        scheduler.list_rc_sessions = lambda: [{"name": "rc-a"}, {"name": "rc-b"}]
+        scheduler._fire_schedule({"id": "s1", "name": "task", "cron": "0 9 * * *",
+                                   "workdir": "/tmp", "prompt": "hi"})
+        self.assertEqual(len(self.fake.new_session_names()), 1)
+        self.assertFalse(any(h[1] == "skipped" for h in self.history))
+
+    def test_negative_disables_the_cap(self):
+        scheduler.RC_MAX_SESSIONS = -1
+        scheduler.list_rc_sessions = lambda: [{"name": "rc-a"}, {"name": "rc-b"}]
+        scheduler._fire_schedule({"id": "s1", "name": "task", "cron": "0 9 * * *",
+                                   "workdir": "/tmp", "prompt": "hi"})
+        self.assertEqual(len(self.fake.new_session_names()), 1)
+        self.assertFalse(any(h[1] == "skipped" for h in self.history))
+
 
 if __name__ == "__main__":
     unittest.main()

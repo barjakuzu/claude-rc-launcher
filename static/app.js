@@ -1206,7 +1206,20 @@ async function doUpdate() {
   var el = document.getElementById('update-status');
   if (el) el.innerHTML = '<span class="update-checking">updating\u2026</span>';
   try {
-    var d = await api('POST', '/update');
+    var d = await api('POST', '/update', {});
+    if (!d.ok && d.remote_sha) {
+      // Not yet confirmed: show the pending commits and ask before
+      // deploying the exact commit currently on origin/main.
+      var commits = (d.pending_commits || []).join('\n');
+      var confirmed = window.confirm(
+        'Update to ' + d.remote_sha + '?\n\nPending commits:\n' + (commits || '(none)')
+      );
+      if (!confirmed) {
+        if (el) el.innerHTML = '';
+        return;
+      }
+      d = await api('POST', '/update', { confirm: d.remote_sha });
+    }
     if (d.ok) {
       if (el) el.innerHTML = '<span class="update-current">' + escHtml(d.message) + '</span>';
       setTimeout(function() { window.location.reload(); }, 3000);
