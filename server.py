@@ -9,6 +9,7 @@ import json
 import os
 import re
 import secrets
+import signal
 import stats
 import subprocess
 import sys
@@ -575,6 +576,34 @@ def _derive_session_state(session_row):
     if status in ("unknown", None) and session_row.get("kind") != "external":
         return "starting"
     return "idle"
+
+
+def _stop_external_pid(pid, run=subprocess.run):
+    """Stop a non-launcher (external) session by signaling its process
+    directly, only after verifying /proc/<pid>/cmdline's first argv token
+    is literally 'claude' — this is the only guard between "stop any
+    session shown in the UI" and "kill an arbitrary pid a browser named",
+    since external rows have no rc-* tmux session to scope the request to.
+    `run` is accepted for interface symmetry with other server.py helpers
+    that inject subprocess.run for testability, but the actual check reads
+    /proc directly (Linux-only) rather than shelling out.
+    """
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            raw = f.read()
+    except (FileNotFoundError, OSError):
+        return False, "Process not found"
+    parts = raw.split(b"\x00")
+    argv0 = parts[0].decode(errors="replace") if parts else ""
+    if os.path.basename(argv0) != "claude":
+        return False, "Not a claude process"
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except PermissionError:
+        return False, "Permission denied"
+    except ProcessLookupError:
+        return False, "Process not found"
+    return True, "Stopped"
 
 
 def _cookie_secure_flag(behind_tls, forwarded_proto):
@@ -1177,6 +1206,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         elif path == "/stop":
             body = self._read_body()
+            if body.get("external") and body.get("pid"):
+                ok, reason = _stop_external_pid(int(body["pid"]))
+                self._json({"ok": ok, "message": reason}, 200 if ok else 400)
+                return
             name = body.get("name", "").strip()
             if not name:
                 self._json({"ok": False, "message": "Missing session name"}, 400)

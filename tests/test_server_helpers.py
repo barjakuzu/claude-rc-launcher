@@ -345,5 +345,32 @@ class DeriveSessionStateTest(unittest.TestCase):
         self.assertEqual(server._derive_session_state(row), "ended")
 
 
+class StopExternalPidTest(unittest.TestCase):
+    def test_refuses_non_claude_process(self):
+        import unittest.mock as mock
+        with mock.patch("builtins.open", mock.mock_open(read_data=b"/usr/bin/python3\x00script.py\x00")):
+            ok, reason = server._stop_external_pid(99999)
+        self.assertFalse(ok)
+        self.assertEqual(reason, "Not a claude process")
+
+    def test_refuses_when_cmdline_unreadable(self):
+        import unittest.mock as mock
+        with mock.patch("builtins.open", side_effect=FileNotFoundError):
+            ok, reason = server._stop_external_pid(99999)
+        self.assertFalse(ok)
+        self.assertEqual(reason, "Process not found")
+
+    def test_stops_a_verified_claude_process(self):
+        import unittest.mock as mock
+        with mock.patch("builtins.open", mock.mock_open(read_data=b"/usr/local/bin/claude\x00--resume\x00")), \
+             mock.patch("os.kill") as fake_kill:
+            ok, reason = server._stop_external_pid(12345)
+        self.assertTrue(ok)
+        self.assertEqual(reason, "Stopped")
+        fake_kill.assert_called_once()
+        import signal
+        self.assertEqual(fake_kill.call_args[0], (12345, signal.SIGTERM))
+
+
 if __name__ == "__main__":
     unittest.main()
