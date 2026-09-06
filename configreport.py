@@ -178,25 +178,37 @@ def _plugins_report(cfg_dir, run, errors):
         except OSError:
             errors.append("plugins.txt: read failed")
     installed = []
+    installed_status = {}
     plugin_entry_re = re.compile(r"^[\w.-]+@[\w.-]+$")
+    bullet_chars = "❯>-*•"
     ok, out = _run_ok(run, [config.CLAUDE_BIN, "plugin", "list"])
     if ok:
+        current = None  # entry name awaiting a possible Status: line
         for line in out.splitlines():
-            line = line.strip()
-            if not line:
+            stripped = line.strip().lstrip(bullet_chars).strip()
+            if not stripped:
                 continue
-            entry = line.split()[0]
+            if stripped.lower().startswith("status:"):
+                if current is not None:
+                    status_val = stripped.split(":", 1)[1].strip()
+                    installed_status[current] = "✔" in status_val or "enabled" in status_val.lower()
+                    current = None
+                continue
+            entry = stripped.split()[0]
             if not plugin_entry_re.match(entry):
                 continue
             marketplace = entry.split("@", 1)[1]
             if marketplace == "skills-dir":
+                current = None
                 continue  # synthetic marketplace for ~/.claude/skills entries; always undeclared by design
             installed.append(entry)
+            installed_status[entry] = True  # default until/unless a Status: line overrides it
+            current = entry
     else:
         errors.append("claude plugin list: failed")
     declared_set, installed_set = set(declared), set(installed)
     return {
-        "declared": declared, "installed": installed,
+        "declared": declared, "installed": installed, "installed_status": installed_status,
         "missing": sorted(declared_set - installed_set),
         "extra": sorted(installed_set - declared_set),
     }

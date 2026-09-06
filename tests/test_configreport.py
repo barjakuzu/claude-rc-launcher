@@ -162,6 +162,45 @@ class CollectConfigReportTest(unittest.TestCase):
         self.assertNotIn("google-workspace@skills-dir", report["plugins"]["installed"])
         self.assertNotIn("google-workspace@skills-dir", report["plugins"]["extra"])
 
+    def test_plugins_report_parses_real_cli_bullet_format(self):
+        # Real `claude plugin list` output uses a "❯ " bullet prefix and
+        # multi-line entries (Version/Scope/Status on their own lines), not
+        # the old flat "name@mk  vX" single-line format.
+        fake_run = self._fake_run_with_plugins([
+            "Installed plugins:",
+            "",
+            "  ❯ claude-md-management@claude-plugins-official",
+            "    Version: 1.0.0",
+            "    Scope: user",
+            "    Status: ✔ enabled",
+            "",
+            "  ❯ watch@official",
+            "    Version: 2.0.0",
+            "    Scope: user",
+            "    Status: ✖ disabled",
+            "",
+            "  ❯ google-workspace@skills-dir",
+            "    Version: 0.0.0",
+            "    Scope: user",
+            "    Status: ✔ enabled",
+        ])
+        report = configreport.collect_config_report(home=self.home, run=fake_run)
+        self.assertIn("claude-md-management@claude-plugins-official", report["plugins"]["installed"])
+        self.assertIn("watch@official", report["plugins"]["installed"])
+        self.assertNotIn("google-workspace@skills-dir", report["plugins"]["installed"])
+        self.assertTrue(report["plugins"]["installed_status"]["claude-md-management@claude-plugins-official"])
+        self.assertFalse(report["plugins"]["installed_status"]["watch@official"])
+        self.assertNotIn("google-workspace@skills-dir", report["plugins"]["installed_status"])
+
+    def test_plugins_report_stays_lenient_on_old_plain_line_format(self):
+        # Older/plain output was a single "name@mk" token per line with no
+        # bullet and no following Status: line; still counts as installed,
+        # defaulting to enabled=True when status is unknown.
+        fake_run = self._fake_run_with_plugins(["watch@official  v1.0"])
+        report = configreport.collect_config_report(home=self.home, run=fake_run)
+        self.assertIn("watch@official", report["plugins"]["installed"])
+        self.assertTrue(report["plugins"]["installed_status"]["watch@official"])
+
     def test_settings_hooks_symlink_and_sha256(self):
         report = configreport.collect_config_report(home=self.home, run=_stub_run)
         self.assertTrue(report["settings"]["hooks_present"])
