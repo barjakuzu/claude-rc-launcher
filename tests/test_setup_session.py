@@ -1,7 +1,7 @@
 """setup_session must rename the session even when remote control never
 activates — the two are independent, and a session that fails to activate
 still needs the name the user gave it."""
-import os, sys, unittest
+import os, re, sys, unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import sessions
@@ -347,6 +347,50 @@ class RestartSessionPassesSessionIdTest(unittest.TestCase):
         sessions.restart_session("rc-portugal", mode="c", workdir="/tmp", resume=True)
         self.assertEqual(self.captured_kwargs.get("session_id"), "resolved-uuid-1234")
         self.assertEqual(self.captured_kwargs.get("resume_id"), "resolved-uuid-1234")
+
+
+class StripOsc8Test(unittest.TestCase):
+    def test_strips_close_sequence(self):
+        raw = "hello\x1b]8;;\x1b\\world"
+        self.assertEqual(sessions._strip_osc8(raw), "hello world" if False else "helloworld")
+
+    def test_open_sequence_becomes_its_url_target(self):
+        raw = "status: \x1b]8;id=1dcslmk;https://claude.ai/code/session_01HuRGXzwUppFqzPmUXZQZ6J?from=cli\x1b\\/rc\x1b]8;;\x1b\\"
+        cleaned = sessions._strip_osc8(raw)
+        self.assertIn("https://claude.ai/code/session_01HuRGXzwUppFqzPmUXZQZ6J?from=cli", cleaned)
+        # The close sequence must not leave escape-code litter behind.
+        self.assertNotIn("\x1b", cleaned)
+
+    def test_never_captures_escape_junk_as_part_of_the_url(self):
+        # Regression test with the real status-bar bytes from a v2.1.263
+        # session: OSC_LINK is the visible-label-only form ("/rc" is the
+        # label; the URL lives in the hyperlink target, not the text).
+        cleaned = sessions._strip_osc8(OSC_LINK)
+        matches = re.findall(r'https://claude\.ai/code/session_[^\s\x1b]+', cleaned)
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(matches[0], "https://claude.ai/code/session_01FxTHitxTgkXbpbQEDJaR4R?from=cli")
+
+
+class GetUrlOsc8Test(unittest.TestCase):
+    def setUp(self):
+        self.fake = FakeRun(pane=(
+            "  ~/career-ops | Opus 5 | Tokens: 0/1.0M (0%)          " + OSC_LINK + "\n"
+        ))
+        self._patched_run = sessions.subprocess.run
+        self._patched_env = sessions.get_session_env
+        self._patched_shell = sessions.is_shell_session
+        sessions.subprocess.run = self.fake
+        sessions.get_session_env = lambda name, var: None
+        sessions.is_shell_session = lambda name: False
+
+    def tearDown(self):
+        sessions.subprocess.run = self._patched_run
+        sessions.get_session_env = self._patched_env
+        sessions.is_shell_session = self._patched_shell
+
+    def test_extracts_url_from_hyperlink_target_only(self):
+        url = sessions.get_url("rc-portugal")
+        self.assertEqual(url, "https://claude.ai/code/session_01FxTHitxTgkXbpbQEDJaR4R?from=cli")
 
 
 if __name__ == "__main__":

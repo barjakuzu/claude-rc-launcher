@@ -233,32 +233,47 @@ def get_active_rc_session():
     return None
 
 
+_OSC8_OPEN_RE = re.compile(r'\x1b\]8;[^;]*;([^\x1b\s]*)\x1b\\')
+_OSC8_OPEN_BEL_RE = re.compile(r'\x1b\]8;[^;]*;([^\x1b\s]*)\x07')
+_OSC8_CLOSE_RE = re.compile(r'\x1b\]8;;\x1b\\')
+_OSC8_CLOSE_BEL_RE = re.compile(r'\x1b\]8;;\x07')
+
+
+def _strip_osc8(text):
+    """Strip OSC 8 hyperlink escape sequences, replacing an *open* sequence
+    with the URL it targets (so a link whose visible label is just '/rc'
+    still yields the real claude.ai URL as plain matchable text) and
+    dropping *close* sequences entirely. Must run before both the ANSI
+    CSI-sequence strip and the claude.ai URL regex match — the status bar
+    since Claude Code ~2.1 renders the RC indicator as a hyperlink whose
+    label never contains the URL, only its target does.
+    """
+    text = _OSC8_CLOSE_RE.sub('', text)
+    text = _OSC8_CLOSE_BEL_RE.sub('', text)
+    text = _OSC8_OPEN_RE.sub(r'\1 ', text)
+    text = _OSC8_OPEN_BEL_RE.sub(r'\1 ', text)
+    return text
+
+
 def get_url(session_name):
     """Extract the claude.ai URL from a tmux session's pane output.
-    Only returns a URL if remote-control is actually active (not connecting/failed).
-    Shell sessions have no URL."""
+    Shell sessions have no URL. A URL is only returned when one can
+    actually be found in the current pane (via its OSC 8 hyperlink target
+    or as plain text) or in the RC_URL env var this function has
+    previously cached — a session that has never shown the URL yet, or
+    whose Remote Control never activated, correctly returns None."""
     if is_shell_session(session_name):
         return None
-    # First check if remote-control is in a healthy state
-    # If it's "connecting", "reconnecting", or "failed", URL is not usable
-    if not _is_rc_active(session_name):
-        # Still store/return URL for internal use (setup_session needs it)
-        # but mark it via env var so callers know it's not confirmed
-        return None
-
-    # Scan pane output for the most recent URL (check recent first, then deeper)
     for history_lines in ("-50", "-500"):
         try:
             r = subprocess.run(
                 ["tmux", "capture-pane", "-t", session_name, "-p", "-S", history_lines, "-J"],
                 capture_output=True, text=True, timeout=5,
             )
-            text = r.stdout.replace("\n", " ")
-            # Find ALL URLs and return the last (most recent) one
-            matches = re.findall(r'(https://claude\.ai/code/session_[^\s]+)', text)
+            text = _strip_osc8(r.stdout).replace("\n", " ")
+            matches = re.findall(r'(https://claude\.ai/code/session_[^\s\x1b]+)', text)
             if matches:
                 url = matches[-1]
-                # Update stored env var if it changed
                 stored = get_session_env(session_name, "RC_URL")
                 if stored != url:
                     subprocess.run(
@@ -268,7 +283,6 @@ def get_url(session_name):
                 return url
         except Exception:
             pass
-    # Fall back to stored env var (survives scrollback overflow)
     stored = get_session_env(session_name, "RC_URL")
     if stored and stored.startswith("https://claude.ai/code/session_"):
         return stored
@@ -276,23 +290,10 @@ def get_url(session_name):
 
 
 def _get_url_internal(session_name):
-    """Like get_url but skips the active check — for internal setup_session use."""
-    for history_lines in ("-50", "-500"):
-        try:
-            r = subprocess.run(
-                ["tmux", "capture-pane", "-t", session_name, "-p", "-S", history_lines, "-J"],
-                capture_output=True, text=True, timeout=5,
-            )
-            text = r.stdout.replace("\n", " ")
-            matches = re.findall(r'(https://claude\.ai/code/session_[^\s]+)', text)
-            if matches:
-                return matches[-1]
-        except Exception:
-            pass
-    stored = get_session_env(session_name, "RC_URL")
-    if stored and stored.startswith("https://claude.ai/code/session_"):
-        return stored
-    return None
+    """Alias kept for setup_session's pre-v3 fallback path — get_url no
+    longer gates on RC-active detection, so there is nothing left that
+    only _get_url_internal could do."""
+    return get_url(session_name)
 
 
 def get_tokens(session_name):
