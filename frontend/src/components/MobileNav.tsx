@@ -29,7 +29,7 @@ export function MobileNav({ active, onChange, onMore, moreOpen, counts }: Mobile
   const items: NavItem[] = [
     { id: 'devices',   label: 'Devices',   icon: Icons.server,   count: counts.devices },
     { id: 'sessions',  label: 'Sessions',  icon: Icons.terminal, count: counts.sessions, dot: true },
-    { id: 'scheduled', label: 'Scheduled', icon: Icons.clock,    count: counts.scheduled },
+    { id: 'scheduled', label: 'Tasks',     icon: Icons.clock,    count: counts.scheduled },
     { id: 'more',      label: 'More',      icon: Icons.more },
   ];
 

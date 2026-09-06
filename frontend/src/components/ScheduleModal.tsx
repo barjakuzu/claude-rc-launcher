@@ -7,8 +7,11 @@ import { DirBrowser } from './DirBrowser';
 import type { Schedule } from '../types';
 
 // ── Cron presets ──────────────────────────────────────────────────────────────
+const MANUAL_PRESET = '__manual__';
+
 const CRON_PRESETS: { label: string; value: string }[] = [
   { label: 'Choose a preset…', value: '' },
+  { label: 'Manual (run on demand)', value: MANUAL_PRESET },
   { label: 'Every hour',          value: '0 * * * *' },
   { label: 'Every 2 hours',       value: '0 */2 * * *' },
   { label: 'Every 6 hours',       value: '0 */6 * * *' },
@@ -75,8 +78,11 @@ export function ScheduleModal({ deviceId, initial, onClose, onSaved }: ScheduleM
     API_TO_MODEL[initial?.model ?? ''] ?? 'DEFAULT',
   );
   const [enabled, setEnabled] = useState(initial?.enabled ?? true);
+  const [concurrency, setConcurrency] = useState<'skip' | 'kill'>(
+    (initial?.concurrency as 'skip' | 'kill') ?? 'skip',
+  );
 
-  const [preset,       setPreset]       = useState('');
+  const [preset,       setPreset]       = useState(initial && !initial.cron ? MANUAL_PRESET : '');
   const [pending,      setPending]      = useState(false);
   const [error,        setError]        = useState<string | null>(null);
   const [showBrowser,  setShowBrowser]  = useState(false);
@@ -84,7 +90,11 @@ export function ScheduleModal({ deviceId, initial, onClose, onSaved }: ScheduleM
   // Preset → fill cron input
   function handlePreset(value: string) {
     setPreset(value);
-    if (value) setCron(value);
+    if (value === MANUAL_PRESET) {
+      setCron('');
+    } else if (value) {
+      setCron(value);
+    }
   }
 
   // Launch a live Claude session on this device using the schedule's
@@ -122,12 +132,13 @@ export function ScheduleModal({ deviceId, initial, onClose, onSaved }: ScheduleM
     try {
       const body = {
         name,
-        cron,
+        cron: preset === MANUAL_PRESET ? null : cron,
         prompt,
         instructions_file: instructionsFile || undefined,
         workdir,
         mode:    MODE_TO_API[mode],
         model:   MODEL_TO_API[model],
+        concurrency,
         enabled,
       };
 
@@ -221,19 +232,21 @@ export function ScheduleModal({ deviceId, initial, onClose, onSaved }: ScheduleM
           <div>
             <label style={labelStyle}>Cron expression</label>
             <div style={{ display: 'flex', gap: 6 }}>
-              <input
-                value={cron}
-                onChange={(e) => { setCron(e.target.value); setPreset(''); }}
-                placeholder="0 9 * * *"
-                style={{ ...fieldStyle, flex: 1 }}
-              />
+              {preset !== MANUAL_PRESET && (
+                <input
+                  value={cron}
+                  onChange={(e) => { setCron(e.target.value); setPreset(''); }}
+                  placeholder="0 9 * * *"
+                  style={{ ...fieldStyle, flex: 1 }}
+                />
+              )}
               <select
                 value={preset}
                 onChange={(e) => handlePreset(e.target.value)}
                 style={{
                   ...fieldStyle,
-                  width: 'auto',
-                  flex: 'none',
+                  width: preset === MANUAL_PRESET ? '100%' : 'auto',
+                  flex: preset === MANUAL_PRESET ? 1 : 'none',
                   cursor: 'pointer',
                   fontSize: 12,
                   paddingRight: 6,
@@ -244,6 +257,11 @@ export function ScheduleModal({ deviceId, initial, onClose, onSaved }: ScheduleM
                 ))}
               </select>
             </div>
+            {preset === MANUAL_PRESET && (
+              <div style={{ fontSize: 11, color: RT.textLow, marginTop: 5, fontFamily: FONT_MONO }}>
+                Manual task - runs only when triggered with "Run now".
+              </div>
+            )}
           </div>
 
           {/* Prompt / task */}
@@ -267,7 +285,7 @@ export function ScheduleModal({ deviceId, initial, onClose, onSaved }: ScheduleM
             <input
               value={instructionsFile}
               onChange={(e) => setInstructionsFile(e.target.value)}
-              placeholder="/root/.claude-rc/jobs/my-task/instructions.md"
+              placeholder="~/.claude-rc/jobs/my-task/instructions.md"
               style={fieldStyle}
             />
           </div>
@@ -319,6 +337,19 @@ export function ScheduleModal({ deviceId, initial, onClose, onSaved }: ScheduleM
                 <option value="FABLE">Fable 5</option>
               </select>
             </div>
+          </div>
+
+          {/* Concurrency */}
+          <div>
+            <label style={labelStyle}>If already running</label>
+            <select
+              value={concurrency}
+              onChange={(e) => setConcurrency(e.target.value as 'skip' | 'kill')}
+              style={{ ...fieldStyle, cursor: 'pointer' }}
+            >
+              <option value="skip">Skip this run</option>
+              <option value="kill">Kill the running one, then start</option>
+            </select>
           </div>
 
           {/* Enabled */}
