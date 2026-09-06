@@ -543,7 +543,8 @@ def _detect_and_restart(run=None):
     uid = os.getuid()
     system_active = _detect_active(run, ["systemctl", "is-active", "--quiet", "claude-rc-launcher"])
     user_active = _detect_active(run, ["systemctl", "--user", "is-active", "--quiet", "claude-rc"])
-    launchd_active = _detect_active(run, ["launchctl", "print", f"gui/{uid}/com.claude-rc.launcher"])
+    launchd_active = sys.platform == "darwin" and _detect_active(
+        run, ["launchctl", "print", f"gui/{uid}/com.claude-rc.launcher"])
 
     cmd = _pick_restart_command(system_active, user_active, launchd_active, uid)
     if cmd is None:

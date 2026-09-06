@@ -266,9 +266,11 @@ class RcMaxSessionsParsingTest(unittest.TestCase):
 class DetectAndRestartTest(unittest.TestCase):
     def setUp(self):
         self._orig_run = server.subprocess.run
+        self._orig_platform = server.sys.platform
 
     def tearDown(self):
         server.subprocess.run = self._orig_run
+        server.sys.platform = self._orig_platform
 
     def test_timeout_during_detection_falls_back_to_manual_restart(self):
         def _raise_timeout(*args, **kwargs):
@@ -286,6 +288,7 @@ class DetectAndRestartTest(unittest.TestCase):
         # macOS: no systemctl at all (FileNotFoundError), but a registered
         # launchd agent for com.claude-rc.launcher. Detection must not stop
         # at the first failing mechanism.
+        server.sys.platform = "darwin"
         uid = os.getuid()
         calls = []
 
@@ -304,14 +307,34 @@ class DetectAndRestartTest(unittest.TestCase):
         self.assertTrue(any(cmd[:2] == ["launchctl", "print"] for cmd in calls))
 
     def test_manual_restart_only_when_systemd_and_launchd_all_fail(self):
+        server.sys.platform = "darwin"
+
         def fake_run(cmd, **kw):
             return _FakeCompleted(1)  # every detection command runs but reports inactive
         self.assertEqual(server._detect_and_restart(run=fake_run),
                           "Restart manually to apply the update.")
 
+    def test_launchd_never_probed_on_linux(self):
+        # On Linux there is no launchd agent to find; the launchctl probe
+        # must not even be attempted (systemd is the only mechanism tried).
+        server.sys.platform = "linux"
+        calls = []
+
+        def fake_run(cmd, **kw):
+            calls.append(cmd)
+            if cmd[0] == "launchctl":
+                raise AssertionError("launchctl must not be invoked on Linux")
+            return _FakeCompleted(1)
+
+        self.assertEqual(server._detect_and_restart(run=fake_run),
+                          "Restart manually to apply the update.")
+        self.assertFalse(any(cmd[0] == "launchctl" for cmd in calls))
+
     def test_launchd_detection_timeout_falls_back_to_other_mechanisms(self):
         # A hanging `launchctl print` must not prevent detecting an active
         # user systemd unit checked before it, nor abort the whole function.
+        server.sys.platform = "darwin"
+
         def fake_run(cmd, **kw):
             if cmd[:2] == ["systemctl", "--user"]:
                 return _FakeCompleted(0)
