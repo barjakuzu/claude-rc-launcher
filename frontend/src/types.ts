@@ -1,9 +1,9 @@
 export interface DeviceCard {
   id: string; name: string; online: boolean; hostname: string;
   sessions: number; tokens: number; loadPct: number; os: string; spark: number[];
-  /** Process user on the device, e.g. "barjazz" or "root". May be empty if device on older code. */
+  /** Process user on the device, e.g. "alice" or "root". May be empty if device on older code. */
   user?: string;
-  /** Home directory on the device, e.g. "/home/barjazz" or "/root". May be empty. */
+  /** Home directory on the device, e.g. "/home/alice" or "/root". May be empty. */
   home_dir?: string;
 }
 export interface Session {

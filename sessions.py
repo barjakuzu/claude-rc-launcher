@@ -823,7 +823,7 @@ def restart_session(name, mode=None, workdir=None, model=None, sandbox=False,
 
 def _project_dir_to_path(dirname):
     """Convert Claude's project dir name back to a filesystem path.
-    e.g. '-root--claude-rc-app' → '/root/.claude-rc/app'"""
+    e.g. '-home-user--claude-rc-app' → '/home/user/.claude-rc/app'"""
     # Claude encodes paths by replacing / with - and . with nothing (roughly)
     # We'll try to resolve it, but it's a best-effort mapping.
     return dirname.replace("-", "/").replace("//", "/-")

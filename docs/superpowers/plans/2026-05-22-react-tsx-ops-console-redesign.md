@@ -364,7 +364,7 @@ git commit -m "feat: add /rc/overview hub aggregator with concurrent device fan-
 
 - [ ] **Step 7: Verify live on the running hub**
 
-Run: `curl -s -u "$(grep ^RC_AUTH_USER= /root/.claude-rc/env|cut -d= -f2-):$(grep ^RC_AUTH_PASS= /root/.claude-rc/env|cut -d= -f2-)" http://127.0.0.1:8200/rc/overview | python3 -m json.tool`
+Run: `curl -s -u "$(grep ^RC_AUTH_USER= ~/.claude-rc/env|cut -d= -f2-):$(grep ^RC_AUTH_PASS= ~/.claude-rc/env|cut -d= -f2-)" http://127.0.0.1:8200/rc/overview | python3 -m json.tool`
 Expected: a `devices` array — `local` plus `home`, each with `online`, `sessions`, `tokens`, `loadPct`, `os`, `spark`. (This requires the hub running this code; deploy happens after the frontend is built. For now, run against a local test instance with a devices.json as in Task 2 Step 3.)
 
 ---
@@ -768,7 +768,7 @@ Run: `cd frontend && npm run build` → zero TS errors, dist updated. Commit dis
 
 ```bash
 git push origin main
-cd /root/.claude-rc/app && git pull --ff-only
+cd ~/.claude-rc/app && git pull --ff-only
 sudo systemctl restart claude-rc-launcher && sleep 3 && systemctl is-active claude-rc-launcher
 ```
 Then bump `VERSION` in `config.py` (so the home box update restarts) and pull on `home-box` too:
