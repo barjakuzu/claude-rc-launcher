@@ -100,5 +100,34 @@ class LoadSchedulesValidationTest(unittest.TestCase):
         self.assertIsNotNone(schedules.LAST_LOAD_ERROR)
 
 
+class ManualTaskCronTest(unittest.TestCase):
+    """schedules.py stores whatever it is given, with no cron-specific
+    logic, so these already pass with zero production code changes - this
+    locks the behavior in against future refactors."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self._orig = schedules.SCHEDULES_FILE
+        schedules.SCHEDULES_FILE = os.path.join(self.tmpdir, "schedules.json")
+
+    def tearDown(self):
+        schedules.SCHEDULES_FILE = self._orig
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_create_schedule_preserves_null_cron(self):
+        s = schedules.create_schedule({"name": "ad hoc", "cron": None, "prompt": "hi"})
+        self.assertIsNone(s["cron"])
+
+    def test_update_schedule_can_set_cron_to_null(self):
+        s = schedules.create_schedule({"name": "was cron'd", "cron": "0 9 * * *"})
+        updated = schedules.update_schedule(s["id"], {"cron": None})
+        self.assertIsNone(updated["cron"])
+
+    def test_update_schedule_can_set_cron_back_to_a_string(self):
+        s = schedules.create_schedule({"name": "manual", "cron": None})
+        updated = schedules.update_schedule(s["id"], {"cron": "0 9 * * *"})
+        self.assertEqual(updated["cron"], "0 9 * * *")
+
+
 if __name__ == "__main__":
     unittest.main()
