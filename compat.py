@@ -13,6 +13,11 @@ first call to get_caps() runs the probe and caches the result in CAPS;
 later calls reuse it. CAPS is a module-level dict that is mutated in
 place (never rebound) so `from compat import CAPS` stays valid across a
 refresh_caps() call.
+
+Readers should prefer calling get_caps() over reading module-level CAPS
+directly: get_caps() is what actually triggers detection on a cold start
+(nothing else does), so a caller that reads CAPS before anything else has
+called get_caps() sees the all-False/None defaults, not real detection.
 """
 import config
 import json
@@ -129,3 +134,21 @@ def refresh_caps(claude_bin=None):
 
 def claude_version():
     return get_caps().get("version")
+
+
+def native_launch(caps):
+    """True when `caps` supports the full v3 session-identity flag set
+    needed to skip the keystroke-based setup dance entirely.
+
+    All three flags are required together: a claude that has --session-id
+    but not --remote-control (or vice versa) can't fully establish identity
+    and RC activation at launch, so it must still take the legacy
+    keystroke fallback in setup_session. --permission-mode is intentionally
+    not part of this check - it's independent of session identity and is
+    applied on its own in build_tmux_command.
+    """
+    return bool(
+        caps.get("session_id_flag")
+        and caps.get("name_flag")
+        and caps.get("remote_control_flag")
+    )

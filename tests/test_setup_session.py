@@ -93,13 +93,27 @@ class SetupSessionRenameTest(unittest.TestCase):
         self.assertFalse(sessions.is_shell_session("rc-portugal"))
 
 
+NATIVE_CAPS = {
+    "session_id_flag": True, "name_flag": True,
+    "remote_control_flag": True, "permission_mode_flag": True,
+    "agents_json": True, "version": "2.1.263",
+}
+LEGACY_CAPS = {
+    "session_id_flag": False, "name_flag": False,
+    "remote_control_flag": False, "permission_mode_flag": False,
+    "agents_json": False, "version": "1.9.0",
+}
+
+
 class SetupSessionNativeIdentitySkipsRcDanceTest(unittest.TestCase):
-    """When build_tmux_command already used --session-id/-n/--remote-control
-    (signalled by RC_SESSION_ID being set on the session), setup_session
+    """When build_tmux_command already used --session-id/--name/
+    --remote-control (signalled by RC_SESSION_ID being set on the session
+    AND compat.native_launch(compat.get_caps()) being true), setup_session
     must return immediately after the prompt/init wait: no /remote-control
     keystrokes, no /rename keystrokes, no polling loop."""
 
     def setUp(self):
+        import compat
         self.fake = FakeRun()
         self._patched = {
             "subprocess": sessions.subprocess.run,
@@ -107,6 +121,7 @@ class SetupSessionNativeIdentitySkipsRcDanceTest(unittest.TestCase):
             "exists": sessions.session_exists,
             "status": sessions.get_session_status,
             "env": sessions.get_session_env,
+            "get_caps": compat.get_caps,
         }
         sessions.subprocess.run = self.fake
         sessions.time.sleep = lambda *_: None
@@ -115,13 +130,16 @@ class SetupSessionNativeIdentitySkipsRcDanceTest(unittest.TestCase):
         sessions.get_session_env = lambda name, var: (
             "0d3b8b1a-1111-4a2b-9c3d-abcdef012345" if var == "RC_SESSION_ID" else None
         )
+        compat.get_caps = lambda: dict(NATIVE_CAPS)
 
     def tearDown(self):
+        import compat
         sessions.subprocess.run = self._patched["subprocess"]
         sessions.time.sleep = self._patched["sleep"]
         sessions.session_exists = self._patched["exists"]
         sessions.get_session_status = self._patched["status"]
         sessions.get_session_env = self._patched["env"]
+        compat.get_caps = self._patched["get_caps"]
 
     def test_no_remote_control_or_rename_keystrokes_sent(self):
         sessions.setup_session("rc-portugal", "portugal", "c")
@@ -129,27 +147,38 @@ class SetupSessionNativeIdentitySkipsRcDanceTest(unittest.TestCase):
         self.assertNotIn("/remote-control", sent)
         self.assertFalse(any(s.startswith("/rename") for s in sent))
 
+    def test_mixed_caps_missing_remote_control_falls_back_to_keystrokes(self):
+        # session_id + name but NOT remote_control -> not native_launch,
+        # so RC_SESSION_ID being set is not enough on its own; setup_session
+        # must still take the legacy keystroke path.
+        import compat
+        compat.get_caps = lambda: {**NATIVE_CAPS, "remote_control_flag": False}
+        sessions.setup_session("rc-portugal", "portugal", "c")
+        sent = self.fake.sent_text()
+        self.assertIn("/remote-control", sent)
+        self.assertTrue(any(s.startswith("/rename") for s in sent))
+
 
 class BuildTmuxCommandNativeFlagsTest(unittest.TestCase):
-    """build_tmux_command adds --session-id/-n/--remote-control/
-    --permission-mode only when compat.CAPS says the installed claude
-    supports them, and always falls back to config.RC_FLAGS otherwise."""
+    """build_tmux_command adds --session-id/--name/--remote-control/
+    --permission-mode only when compat.get_caps() says the installed
+    claude supports the full native set, and always falls back to
+    config.RC_FLAGS otherwise."""
 
     def setUp(self):
         import compat
-        self._orig_caps = dict(compat.CAPS)
+        self._orig_get_caps = compat.get_caps
 
     def tearDown(self):
         import compat
-        compat.CAPS = self._orig_caps
+        compat.get_caps = self._orig_get_caps
+
+    def _set_caps(self, caps):
+        import compat
+        compat.get_caps = lambda: dict(caps)
 
     def test_new_claude_gets_native_flags(self):
-        import compat
-        compat.CAPS = {
-            "session_id_flag": True, "name_flag": True,
-            "remote_control_flag": True, "permission_mode_flag": True,
-            "agents_json": True, "version": "2.1.263",
-        }
+        self._set_caps(NATIVE_CAPS)
         cmd = sessions.build_tmux_command(
             "rc-portugal", "/home/user/project", "c",
             session_id="0d3b8b1a-1111-4a2b-9c3d-abcdef012345")
@@ -160,21 +189,17 @@ class BuildTmuxCommandNativeFlagsTest(unittest.TestCase):
         # items — check the joined command line instead of raw membership.
         joined = " ".join(cmd)
         self.assertIn("--session-id 0d3b8b1a-1111-4a2b-9c3d-abcdef012345", joined)
-        self.assertIn("-n portugal", joined)
+        self.assertIn("--name portugal", joined)
         self.assertIn("--remote-control portugal", joined)
         self.assertIn("--permission-mode bypassPermissions", joined)
+        self.assertIn("--verbose", joined)
         # env vars set at creation (these ARE standalone argv items)
         self.assertIn("-e", cmd)
         self.assertIn("RC_SESSION_ID=0d3b8b1a-1111-4a2b-9c3d-abcdef012345", cmd)
         self.assertIn("RC_TITLE=portugal", cmd)
 
     def test_old_claude_falls_back_to_rc_flags_and_no_env(self):
-        import compat
-        compat.CAPS = {
-            "session_id_flag": False, "name_flag": False,
-            "remote_control_flag": False, "permission_mode_flag": False,
-            "agents_json": False, "version": "1.9.0",
-        }
+        self._set_caps(LEGACY_CAPS)
         cmd = sessions.build_tmux_command(
             "rc-portugal", "/home/user/project", "c",
             session_id="0d3b8b1a-1111-4a2b-9c3d-abcdef012345")
@@ -185,13 +210,22 @@ class BuildTmuxCommandNativeFlagsTest(unittest.TestCase):
         # The RC_FLAGS string still ends up in the joined claude_cmd (bash -c argv)
         self.assertIn("--dangerously-skip-permissions", joined)
 
+    def test_mixed_caps_missing_session_id_flag_disables_all_native_flags(self):
+        # remote_control + name present but session_id_flag missing ->
+        # native_launch is false, so NONE of --session-id/--name/
+        # --remote-control should appear, even though session_id was given.
+        self._set_caps({**NATIVE_CAPS, "session_id_flag": False})
+        cmd = sessions.build_tmux_command(
+            "rc-portugal", "/home/user/project", "c",
+            session_id="0d3b8b1a-1111-4a2b-9c3d-abcdef012345")
+        joined = " ".join(cmd)
+        self.assertNotIn("--session-id", joined)
+        self.assertNotIn("--name portugal", joined)
+        self.assertNotIn("--remote-control", joined)
+        self.assertNotIn("RC_SESSION_ID=", " ".join(cmd))
+
     def test_ci_mode_native_flags_carry_teammate_mode(self):
-        import compat
-        compat.CAPS = {
-            "session_id_flag": True, "name_flag": True,
-            "remote_control_flag": True, "permission_mode_flag": True,
-            "agents_json": True, "version": "2.1.263",
-        }
+        self._set_caps(NATIVE_CAPS)
         cmd = sessions.build_tmux_command(
             "rc-ci-job", "/home/user/project", "ci",
             session_id="0d3b8b1a-1111-4a2b-9c3d-abcdef012345")
@@ -200,30 +234,104 @@ class BuildTmuxCommandNativeFlagsTest(unittest.TestCase):
         self.assertIn("--teammate-mode in-process", joined)
 
     def test_shell_mode_never_gets_native_flags_even_with_full_caps(self):
-        import compat
-        compat.CAPS = {
-            "session_id_flag": True, "name_flag": True,
-            "remote_control_flag": True, "permission_mode_flag": True,
-            "agents_json": True, "version": "2.1.263",
-        }
+        self._set_caps(NATIVE_CAPS)
         cmd = sessions.build_tmux_command(
             "rc-portugal", "/home/user/project", "sh",
             session_id="0d3b8b1a-1111-4a2b-9c3d-abcdef012345")
         joined = " ".join(cmd)
         self.assertNotIn("--session-id", joined)
         self.assertNotIn("--remote-control", joined)
-        self.assertNotIn("-n portugal", joined)
+        self.assertNotIn("--name portugal", joined)
 
     def test_no_session_id_means_no_rc_env_vars(self):
-        import compat
-        compat.CAPS = {
-            "session_id_flag": True, "name_flag": True,
-            "remote_control_flag": True, "permission_mode_flag": True,
-            "agents_json": True, "version": "2.1.263",
-        }
+        self._set_caps(NATIVE_CAPS)
         cmd = sessions.build_tmux_command(
             "rc-portugal", "/home/user/project", "c")  # no session_id passed
         self.assertFalse(any(str(x).startswith("RC_SESSION_ID=") for x in cmd))
+
+    def test_resume_never_combines_session_id_with_resume_flag(self):
+        # RULING: --session-id and --resume are mutually exclusive; on a
+        # resume launch only --resume <uuid> is passed, but RC_SESSION_ID/
+        # RC_TITLE env and --name/--remote-control (when native) still are.
+        self._set_caps(NATIVE_CAPS)
+        cmd = sessions.build_tmux_command(
+            "rc-portugal", "/home/user/project", "c",
+            resume=True, resume_id="0d3b8b1a-1111-4a2b-9c3d-abcdef012345",
+            session_id="0d3b8b1a-1111-4a2b-9c3d-abcdef012345")
+        joined = " ".join(cmd)
+        self.assertNotIn("--session-id", joined)
+        self.assertIn("--resume 0d3b8b1a-1111-4a2b-9c3d-abcdef012345", joined)
+        self.assertIn("--name portugal", joined)
+        self.assertIn("--remote-control portugal", joined)
+        self.assertIn("RC_SESSION_ID=0d3b8b1a-1111-4a2b-9c3d-abcdef012345", cmd)
+        self.assertIn("RC_TITLE=portugal", cmd)
+
+    def test_title_overrides_display_name(self):
+        self._set_caps(NATIVE_CAPS)
+        cmd = sessions.build_tmux_command(
+            "rc-run-abc123", "/home/user/project", "c",
+            session_id="0d3b8b1a-1111-4a2b-9c3d-abcdef012345",
+            title="nightly-report")
+        joined = " ".join(cmd)
+        self.assertIn("--name nightly-report", joined)
+        self.assertIn("--remote-control nightly-report", joined)
+        self.assertIn("RC_TITLE=nightly-report", cmd)
+
+    def test_extra_env_is_appended(self):
+        self._set_caps(LEGACY_CAPS)
+        cmd = sessions.build_tmux_command(
+            "rc-run-abc123", "/home/user/project", "c",
+            extra_env=["-e", "RC_SCHEDULE_ID=sched-1"])
+        self.assertIn("RC_SCHEDULE_ID=sched-1", cmd)
+
+
+class RestartSessionPassesSessionIdTest(unittest.TestCase):
+    """restart_session must pass the resolved conversation UUID through to
+    build_tmux_command as session_id, so a restart keeps the same identity
+    (RC_SESSION_ID/RC_TITLE, and --name/--remote-control when native)."""
+
+    def setUp(self):
+        self._patched = {
+            "build_tmux_command": sessions.build_tmux_command,
+            "find_uuid": sessions._find_session_uuid,
+            "exists": sessions.session_exists,
+            "subprocess": sessions.subprocess.run,
+            "sleep": sessions.time.sleep,
+            "thread": sessions.threading.Thread,
+        }
+        self.captured_kwargs = {}
+
+        def fake_build_tmux_command(name, session_dir, mode, **kwargs):
+            self.captured_kwargs.update(kwargs)
+            return ["tmux", "new-session", "-d", "-s", name]
+
+        sessions.build_tmux_command = fake_build_tmux_command
+        sessions._find_session_uuid = lambda tmux_name, workdir: "resolved-uuid-1234"
+        sessions.session_exists = lambda n: False  # nothing to kill first
+        sessions.subprocess.run = lambda *a, **kw: type(
+            "R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+        sessions.time.sleep = lambda *_: None
+
+        class ImmediateThread:
+            def __init__(self, target=None, args=(), kwargs=None, daemon=None):
+                self._target, self._args = target, args
+            def start(self):
+                self._target(*self._args)
+
+        sessions.threading.Thread = ImmediateThread
+
+    def tearDown(self):
+        sessions.build_tmux_command = self._patched["build_tmux_command"]
+        sessions._find_session_uuid = self._patched["find_uuid"]
+        sessions.session_exists = self._patched["exists"]
+        sessions.subprocess.run = self._patched["subprocess"]
+        sessions.time.sleep = self._patched["sleep"]
+        sessions.threading.Thread = self._patched["thread"]
+
+    def test_restart_passes_resolved_uuid_as_session_id(self):
+        sessions.restart_session("rc-portugal", mode="c", workdir="/tmp", resume=True)
+        self.assertEqual(self.captured_kwargs.get("session_id"), "resolved-uuid-1234")
+        self.assertEqual(self.captured_kwargs.get("resume_id"), "resolved-uuid-1234")
 
 
 if __name__ == "__main__":

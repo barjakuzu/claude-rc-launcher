@@ -5,6 +5,7 @@ import glob
 import json
 import os
 import re
+import shlex
 import subprocess
 import time
 import threading
@@ -28,24 +29,43 @@ def is_shell_session(session_name):
 
 def build_tmux_command(name, session_dir, mode, model=None, sandbox=False,
                        resume=False, resume_id=None, resume_search=None,
-                       session_id=None):
+                       session_id=None, title=None, extra_env=None):
     """Build the `tmux new-session` argv for a session.
 
-    Shared by /start and restart_session so both paths stay identical.
-    In SHELL_MODE the pane runs a login shell directly; every other mode
-    wraps Claude Code in bash so a startup failure leaves its message on
-    screen long enough for setup_session to read it.
+    Shared by /start, restart_session, resume_session and the scheduler so
+    every launch path stays identical. In SHELL_MODE the pane runs a login
+    shell directly; every other mode wraps Claude Code in bash so a startup
+    failure leaves its message on screen long enough for setup_session to
+    read it.
 
-    When session_id is given and the installed claude supports it
-    (compat.CAPS), the session's identity and Remote Control activation
-    are established natively at launch: --session-id, -n <name>, and
-    --remote-control <name> replace the /rename and /remote-control
-    keystroke dance that setup_session otherwise has to do. RC_SESSION_ID
-    and RC_TITLE are written into the tmux environment at creation time so
-    later lookups (get_transcript, restart_session, resume_session) never
-    have to scan JSONL titles for a session launched this way.
+    When session_id is given and the installed claude supports the full v3
+    identity flag set (compat.native_launch), the session's identity and
+    Remote Control activation are established natively at launch:
+    --name <name> and --remote-control <name> replace the /rename and
+    /remote-control keystroke dance that setup_session otherwise has to do,
+    and --session-id <session_id> pins the conversation UUID (skipped on a
+    resume launch - see below). RC_SESSION_ID and RC_TITLE are written into
+    the tmux environment at creation time whenever native_launch is true, so
+    later lookups (get_transcript, restart_session, resume_session, and
+    setup_session's own early-return check) never have to scan JSONL titles
+    for a session launched this way.
+
+    A resume launch (resume=True) never combines --session-id with
+    --resume - the two are mutually exclusive as claude flags, and
+    --resume <uuid> alone already pins the conversation. RC_SESSION_ID/
+    RC_TITLE are still written (identity tracking doesn't depend on which
+    flag established it), and --name/--remote-control are still used when
+    native_launch is true.
+
+    title, when given, overrides the display name derived from `name`
+    (stripping SESSION_PREFIX) - used by callers whose tmux session name
+    isn't the human-friendly title (e.g. the scheduler's `rc-run-<hex>`
+    sessions, which want the schedule's own name as the title).
     """
-    display_name = name[len(SESSION_PREFIX):] if name.startswith(SESSION_PREFIX) else name
+    caps = compat.get_caps()
+    native = compat.native_launch(caps)
+    display_name = title if title else (
+        name[len(SESSION_PREFIX):] if name.startswith(SESSION_PREFIX) else name)
 
     env_flags = [
         "-e", f"RC_MODE={mode}",
@@ -58,24 +78,31 @@ def build_tmux_command(name, session_dir, mode, model=None, sandbox=False,
         env_flags[4:4] = ["-e", f"RC_RESUME_SEARCH={resume_search}"]
     if sandbox or os.geteuid() == 0:
         env_flags.extend(["-e", "IS_SANDBOX=1"])
-    if session_id and mode != SHELL_MODE and compat.CAPS.get("session_id_flag"):
+    if session_id and mode != SHELL_MODE and native:
         env_flags.extend(["-e", f"RC_SESSION_ID={session_id}"])
         env_flags.extend(["-e", f"RC_TITLE={display_name}"])
+    if extra_env:
+        env_flags.extend(extra_env)
 
     if mode == SHELL_MODE:
         # A shell takes no Claude flags: model and resume do not apply.
         payload = [SHELL_BIN, "-l"]
     else:
-        if compat.CAPS.get("permission_mode_flag"):
+        if caps.get("permission_mode_flag"):
             claude_args = ["--permission-mode", PERMISSION_MODE.get(mode, "bypassPermissions")]
             claude_args.extend(EXTRA_FLAGS.get(mode, []))
+            # RC_FLAGS always carried --verbose; pane parsing (setup_session's
+            # prompt/status-bar detection) may depend on its output shape.
+            claude_args.append("--verbose")
         else:
             claude_args = RC_FLAGS.get(mode, RC_FLAGS["c"]).split()
-        if session_id and compat.CAPS.get("session_id_flag"):
+        # --session-id and --resume are mutually exclusive: on a resume
+        # launch, --resume <uuid> alone pins the conversation.
+        if session_id and not resume and caps.get("session_id_flag"):
             claude_args.extend(["--session-id", session_id])
-        if compat.CAPS.get("name_flag"):
-            claude_args.extend(["-n", display_name])
-        if compat.CAPS.get("remote_control_flag"):
+        if native:
+            # Long form: compat.py's NAME_RE detects "--name", not "-n".
+            claude_args.extend(["--name", display_name])
             claude_args.extend(["--remote-control", display_name])
         if resume:
             claude_args.append("--resume")
@@ -84,7 +111,11 @@ def build_tmux_command(name, session_dir, mode, model=None, sandbox=False,
         model_flag = MODEL_MAP.get(model) if model else None
         if model_flag:
             claude_args.extend(["--model", model_flag])
-        claude_cmd = " ".join([f"CLAUDECODE= {CLAUDE_BIN}"] + claude_args)
+        # shlex.quote every interpolated token (display name, session id,
+        # model, etc.) so a value containing shell metacharacters can't
+        # break out of the bash -c script.
+        quoted_args = " ".join(shlex.quote(a) for a in claude_args)
+        claude_cmd = f"CLAUDECODE= {shlex.quote(CLAUDE_BIN)} {quoted_args}"
         payload = ["bash", "-c", f'{claude_cmd} 2>&1 || {{ echo ""; sleep 30; }}']
 
     return [
@@ -511,12 +542,16 @@ def setup_session(session_name, display_name, mode):
     print(f"  {session_name}: prompt found, waiting for CLI to fully initialize...")
     time.sleep(10)
 
-    # If build_tmux_command already used --session-id/-n/--remote-control,
-    # RC_SESSION_ID is set on the session from creation: identity and RC
-    # activation are already done natively, so there's nothing left for the
-    # keystroke dance below to accomplish. Sending /remote-control again
-    # would just toggle it off.
-    if get_session_env(session_name, "RC_SESSION_ID"):
+    # If build_tmux_command already used --name/--remote-control (and, off
+    # a resume, --session-id), RC_SESSION_ID is set on the session from
+    # creation AND the installed claude still supports the full native
+    # flag set: identity and RC activation are already done natively, so
+    # there's nothing left for the keystroke dance below to accomplish.
+    # Sending /remote-control again would just toggle it off. Both checks
+    # matter: RC_SESSION_ID alone doesn't prove --remote-control/--name
+    # were actually used (a claude that lost remote_control_flag between
+    # launch and here, for instance), so gate on compat.native_launch too.
+    if get_session_env(session_name, "RC_SESSION_ID") and compat.native_launch(compat.get_caps()):
         print(f"  {session_name}: native session identity in use, skipping /remote-control and /rename")
         return
 
@@ -832,10 +867,13 @@ def restart_session(name, mode=None, workdir=None, model=None, sandbox=False,
         # Brief wait for tmux cleanup
         time.sleep(0.5)
 
-    # Use the display name to search in the picker if no exact UUID found
+    # Use the display name to search in the picker if no exact UUID found.
+    # Pass the resolved UUID as session_id too (when found) so a restart
+    # keeps the same identity for RC_SESSION_ID/RC_TITLE tracking and for
+    # --name/--remote-control when native, same as resume_session.
     cmd = build_tmux_command(
         name, session_dir, mode, model=model, sandbox=sandbox,
-        resume=resume, resume_id=resume_id,
+        resume=resume, resume_id=resume_id, session_id=resume_id,
         resume_search=name.replace(SESSION_PREFIX, ""),
     )
     print(f"  Restarting session: {name} (mode={mode}, resume={resume}, dir={session_dir})")
@@ -953,7 +991,7 @@ def list_resumable_sessions():
 def resume_session(session_name, session_title, project_dir, mode="c"):
     """Launch a new tmux session with claude --resume, select the target session
     in the picker by searching for its title, and set up remote control."""
-    from config import CLAUDE_BIN, RC_FLAGS, MODEL_MAP, SESSION_PREFIX
+    from config import RC_FLAGS, SESSION_PREFIX
 
     if mode not in RC_FLAGS:
         mode = "c"
@@ -1000,9 +1038,9 @@ def resume_session(session_name, session_title, project_dir, mode="c"):
 
     # Pass session UUID directly to --resume to skip the picker. The UUID
     # being resumed is already known (it's session_name), so no new one is
-    # generated - session_id=session_name reuses it, letting a claude that
-    # supports --session-id/-n/--remote-control establish identity natively
-    # here too, same as /start.
+    # generated - session_id=session_name reuses it for RC_SESSION_ID/
+    # RC_TITLE tracking and for --name/--remote-control when native
+    # (build_tmux_command never combines --session-id with --resume itself).
     cmd = build_tmux_command(
         tmux_name, session_dir, mode, model=None, sandbox=(os.geteuid() == 0),
         resume=True, resume_id=session_name, session_id=session_name,
