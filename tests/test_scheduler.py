@@ -64,6 +64,7 @@ class FakeRun:
     def __init__(self):
         self.calls = []
         self.alive = set()
+        self.env = {}  # session_name -> {var: value}
 
     def __call__(self, cmd, *a, **kw):
         self.calls.append(cmd)
@@ -79,11 +80,22 @@ class FakeRun:
         elif isinstance(cmd, list) and cmd[:2] == ["tmux", "new-session"]:
             name = cmd[cmd.index("-s") + 1]
             self.alive.add(name)
+            # Capture any -e VAR=value pairs onto this session's env.
+            env = self.env.setdefault(name, {})
+            for i, part in enumerate(cmd):
+                if part == "-e" and i + 1 < len(cmd) and "=" in cmd[i + 1]:
+                    k, v = cmd[i + 1].split("=", 1)
+                    env[k] = v
         elif isinstance(cmd, list) and cmd[:2] == ["tmux", "kill-session"]:
             name = cmd[cmd.index("-t") + 1]
             self.alive.discard(name)
         elif isinstance(cmd, list) and cmd[:2] == ["tmux", "list-sessions"]:
             R.stdout = "\n".join(self.alive)
+        elif isinstance(cmd, list) and cmd[:2] == ["tmux", "show-environment"]:
+            name = cmd[cmd.index("-t") + 1]
+            var = cmd[-1]
+            val = self.env.get(name, {}).get(var)
+            R.stdout = f"{var}={val}" if val is not None else ""
         return R
 
     def new_session_names(self):
@@ -362,6 +374,62 @@ class SessionCapTest(unittest.TestCase):
                                    "workdir": "/tmp", "prompt": "hi"})
         self.assertEqual(len(self.fake.new_session_names()), 1)
         self.assertFalse(any(h[1] == "skipped" for h in self.history))
+
+
+class AdoptLiveSessionsTest(unittest.TestCase):
+    """Task: after a launcher restart, a still-running rc-run-* or legacy
+    rc-sched-<name>-* tmux session must be adopted back into
+    _active_scheduled_sessions so concurrency=skip/kill and history
+    tracking still work, instead of the scheduler thinking it's gone and
+    starting a duplicate."""
+
+    def setUp(self):
+        self.fake = FakeRun()
+        self._saved = _patch_scheduler(self.fake)
+        self.history = []
+        scheduler.add_history_entry = lambda sid, status, msg, **kw: self.history.append((sid, status, msg))
+
+    def tearDown(self):
+        _restore_scheduler(self._saved)
+
+    def test_adopts_rc_run_session_via_env_var(self):
+        self.fake.alive.add("rc-run-abcdef012345")
+        self.fake.env["rc-run-abcdef012345"] = {"RC_SCHEDULE_ID": "s1"}
+        schedules = [{"id": "s1", "name": "My Task", "cron": "0 9 * * *",
+                      "workdir": "/tmp", "prompt": "hi"}]
+
+        scheduler._adopt_live_sessions(schedules)
+
+        self.assertIn("s1", scheduler._active_scheduled_sessions)
+        self.assertEqual(
+            scheduler._active_scheduled_sessions["s1"]["session_name"],
+            "rc-run-abcdef012345",
+        )
+
+    def test_adopts_legacy_rc_sched_session_by_name(self):
+        self.fake.alive.add("rc-sched-My-Task-20260101")
+        schedules = [{"id": "s1", "name": "My Task", "cron": "0 9 * * *",
+                      "workdir": "/tmp", "prompt": "hi"}]
+
+        scheduler._adopt_live_sessions(schedules)
+
+        self.assertIn("s1", scheduler._active_scheduled_sessions)
+        self.assertEqual(
+            scheduler._active_scheduled_sessions["s1"]["session_name"],
+            "rc-sched-My-Task-20260101",
+        )
+
+    def test_fire_schedule_skips_after_adoption(self):
+        self.fake.alive.add("rc-run-abcdef012345")
+        self.fake.env["rc-run-abcdef012345"] = {"RC_SCHEDULE_ID": "s1"}
+        schedule = {"id": "s1", "name": "My Task", "cron": "0 9 * * *",
+                    "workdir": "/tmp", "prompt": "hi"}
+
+        scheduler._adopt_live_sessions([schedule])
+        scheduler._fire_schedule(schedule)
+
+        self.assertEqual(self.fake.new_session_names(), [])
+        self.assertIn(("s1", "skipped"), [(h[0], h[1]) for h in self.history])
 
 
 if __name__ == "__main__":

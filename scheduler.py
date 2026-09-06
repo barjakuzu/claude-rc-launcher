@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 import stats
 from config import (SESSION_PREFIX, CLAUDE_BIN, RC_FLAGS, MODEL_MAP,
                     resolve_claude_mode, RC_MAX_SESSIONS)
-from sessions import session_exists, setup_session, get_url, list_rc_sessions
+from sessions import session_exists, setup_session, get_url, list_rc_sessions, get_session_env
 from schedules import load_schedules, save_schedules, add_history_entry
 import schedules as schedules_module
 
@@ -334,6 +334,7 @@ def _fire_schedule(schedule):
         "-x", "200", "-y", "50",
         "-e", f"RC_MODE={mode}",
         "-e", f"RC_WORKDIR={workdir}",
+        "-e", f"RC_SCHEDULE_ID={schedule_id}",
         "-e", "DISPLAY=:1",
         "-e", "IS_SANDBOX=1",
         "bash", "-c", wrapper,
@@ -421,8 +422,78 @@ def _scheduler_loop():
         _monitor_scheduled_sessions()
 
 
+def _adopt_live_sessions(schedules=None):
+    """Adopt tmux sessions from a previous scheduler run that are still
+    alive after a launcher restart, so `_active_scheduled_sessions` (which
+    only lives in memory) reflects reality again: concurrency=skip still
+    skips, concurrency=kill has something to kill, and the lifecycle
+    monitor can report on them when they finish.
+
+    Recognizes two session-name shapes:
+    - rc-run-<hex>: v3 scheduled runs. The schedule id is read back from
+      the RC_SCHEDULE_ID env var set on the session at launch time.
+    - rc-sched-<safe_name>-...: pre-v3 legacy sessions, matched by the
+      sanitized schedule name (same sanitization _fire_schedule uses).
+
+    Returns the number of sessions adopted.
+    """
+    if schedules is None:
+        schedules = load_schedules()
+
+    by_id = {s["id"]: s for s in schedules if s.get("id")}
+    by_safe_name = {}
+    for s in schedules:
+        safe = re.sub(r'[^a-zA-Z0-9_-]', '', s.get("name", "task").replace(" ", "-"))
+        by_safe_name.setdefault(safe, s)
+
+    adopted = 0
+    for sess in list_rc_sessions():
+        session_name = sess["name"]
+        if not session_name.startswith(SESSION_PREFIX):
+            continue
+        rest = session_name[len(SESSION_PREFIX):]
+
+        schedule = None
+        safe_name = None
+        if rest.startswith("run-"):
+            schedule_id = get_session_env(session_name, "RC_SCHEDULE_ID")
+            if not schedule_id:
+                continue
+            schedule = by_id.get(schedule_id)
+            if schedule:
+                safe_name = re.sub(r'[^a-zA-Z0-9_-]', '',
+                                    schedule.get("name", "task").replace(" ", "-"))
+        elif rest.startswith("sched-"):
+            remainder = rest[len("sched-"):]
+            for safe, candidate in by_safe_name.items():
+                if remainder == safe or remainder.startswith(safe + "-"):
+                    schedule = candidate
+                    safe_name = safe
+                    break
+
+        if not schedule:
+            continue
+
+        schedule_id = schedule["id"]
+        with _active_scheduled_sessions_lock:
+            if schedule_id in _active_scheduled_sessions:
+                continue
+            _active_scheduled_sessions[schedule_id] = {
+                "session_name": session_name,
+                "started_at": datetime.now(),
+                "schedule_safe_name": safe_name,
+                "adopted": True,
+            }
+        adopted += 1
+
+    if adopted:
+        print(f"  Scheduler: adopted {adopted} live session(s) after restart")
+    return adopted
+
+
 def start_scheduler():
     """Start the scheduler daemon thread."""
+    _adopt_live_sessions()
     t = threading.Thread(target=_scheduler_loop, daemon=True)
     t.start()
     return t
