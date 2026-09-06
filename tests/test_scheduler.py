@@ -419,6 +419,24 @@ class AdoptLiveSessionsTest(unittest.TestCase):
             "rc-sched-My-Task-20260101",
         )
 
+    def test_prefers_longest_matching_safe_name(self):
+        # Two schedules whose sanitized names are prefixes of one another.
+        # A legacy tmux session "rc-sched-deploy-prod-0906-1200" must adopt
+        # into "deploy-prod", not "deploy" (the shorter, earlier-seen match).
+        self.fake.alive.add("rc-sched-deploy-prod-0906-1200")
+        schedules = [
+            {"id": "short-id", "name": "deploy", "cron": "0 9 * * *",
+             "workdir": "/tmp", "prompt": "hi"},
+            {"id": "long-id", "name": "deploy-prod", "cron": "0 9 * * *",
+             "workdir": "/tmp", "prompt": "hi"},
+        ]
+
+        adopted = scheduler._adopt_live_sessions(schedules)
+
+        self.assertEqual(adopted, 1)
+        self.assertIn("long-id", scheduler._active_scheduled_sessions)
+        self.assertNotIn("short-id", scheduler._active_scheduled_sessions)
+
     def test_fire_schedule_skips_after_adoption(self):
         self.fake.alive.add("rc-run-abcdef012345")
         self.fake.env["rc-run-abcdef012345"] = {"RC_SCHEDULE_ID": "s1"}

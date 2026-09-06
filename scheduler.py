@@ -465,7 +465,8 @@ def _adopt_live_sessions(schedules=None):
                                     schedule.get("name", "task").replace(" ", "-"))
         elif rest.startswith("sched-"):
             remainder = rest[len("sched-"):]
-            for safe, candidate in by_safe_name.items():
+            for safe, candidate in sorted(by_safe_name.items(),
+                                           key=lambda kv: len(kv[0]), reverse=True):
                 if remainder == safe or remainder.startswith(safe + "-"):
                     schedule = candidate
                     safe_name = safe
