@@ -490,9 +490,11 @@ def _do_git_update_phase(app_dir, confirm, run=subprocess.run):
 def _version_response():
     """Body for GET /version - the launcher version plus the detected
     capabilities of the installed `claude` binary, extracted so it's
-    testable without a live socket."""
-    return {"version": VERSION, "claude_version": compat.claude_version(),
-            "caps": compat.CAPS}
+    testable without a live socket. Calls compat.get_caps() (lazy,
+    memoized) rather than reading compat.CAPS directly so this works
+    correctly whether or not detection has run yet."""
+    caps = compat.get_caps()
+    return {"version": VERSION, "claude_version": caps.get("version"), "caps": caps}
 
 
 def _pick_restart_command(system_unit_active, user_unit_active, is_macos, uid):
@@ -915,8 +917,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             s["tokens_now"] = sum(x.get("tokens", 0) for x in sess)
             s["sessions"] = len(sess)
             s["max_sessions"] = RC_MAX_SESSIONS
-            s["claude_version"] = compat.claude_version()
-            s["caps"] = compat.CAPS
+            caps = compat.get_caps()
+            s["claude_version"] = caps.get("version")
+            s["caps"] = caps
             self._json(s)
 
         elif path == "/overview":

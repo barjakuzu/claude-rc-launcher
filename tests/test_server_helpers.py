@@ -278,12 +278,24 @@ class DetectAndRestartTest(unittest.TestCase):
 
 
 class VersionResponseTest(unittest.TestCase):
+    """Uses an explicit fake dict via compat.get_caps monkeypatching
+    rather than reading the mutated global compat.CAPS, so this test
+    doesn't depend on whatever detection has (or hasn't) run elsewhere."""
+
     def test_includes_claude_version_and_caps(self):
-        import compat
-        body = server._version_response()
+        fake_caps = {"session_id_flag": True, "name_flag": True,
+                     "remote_control_flag": False, "permission_mode_flag": False,
+                     "agents_json": True, "version": "9.9.9"}
+        orig_get_caps = server.compat.get_caps
+        server.compat.get_caps = lambda: fake_caps
+        try:
+            body = server._version_response()
+        finally:
+            server.compat.get_caps = orig_get_caps
+
         self.assertEqual(body["version"], server.VERSION)
-        self.assertIn("claude_version", body)
-        self.assertEqual(body["caps"], compat.CAPS)
+        self.assertEqual(body["claude_version"], "9.9.9")
+        self.assertEqual(body["caps"], fake_caps)
 
 
 if __name__ == "__main__":
