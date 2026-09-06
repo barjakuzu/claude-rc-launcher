@@ -108,24 +108,24 @@ def list_claude_sessions(claude_bin=None, run=subprocess.run, now_fn=time.time):
     with _refresh_cond:
         now = now_fn()
         if _cache["bin"] == bin_path and now - _cache["at"] < CACHE_TTL_SECONDS:
-            return _cache["rows"]
+            return list(_cache["rows"])
         have_data = _cache["at"] > 0 and _cache["bin"] == bin_path
         if _refreshing:
             if have_data:
-                return _cache["rows"]
+                return list(_cache["rows"])
             # Nothing to serve yet and someone else is already fetching —
             # wait for them rather than spawning a second `claude`.
             _refresh_cond.wait(timeout=15)
-            return _cache["rows"]
+            return list(_cache["rows"])
         _refreshing = True
         if have_data:
             # Stale but usable: serve it now, refresh in the background.
             t = threading.Thread(target=_do_refresh, args=(bin_path, run, now_fn), daemon=True)
             _last_refresh_thread = t
             t.start()
-            return _cache["rows"]
+            return list(_cache["rows"])
 
     # Nothing cached at all for this bin yet: block for one fetch.
     _do_refresh(bin_path, run, now_fn)
     with _refresh_cond:
-        return _cache["rows"]
+        return list(_cache["rows"])

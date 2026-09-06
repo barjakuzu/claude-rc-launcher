@@ -82,6 +82,18 @@ class ListClaudeSessionsTest(AgentsJsonCapsGateMixin, unittest.TestCase):
         self.assertIsNone(rows[2]["name"])
         self.assertEqual(rows[1]["state"], "running")
 
+    def test_returned_list_is_a_copy(self):
+        """Mutating a previously returned list must not corrupt the cache
+        (or the next call's result) — list_claude_sessions must hand back
+        a copy, not the cached list itself."""
+        fake = FakeRun(stdout=RAW_JSON)
+        rows = agents.list_claude_sessions(claude_bin="claude", run=fake)
+        rows.append({"session_id": "injected"})
+        rows.clear()
+
+        rows_again = agents.list_claude_sessions(claude_bin="claude", run=fake)
+        self.assertEqual(len(rows_again), 3)
+
     def test_empty_on_nonzero_exit(self):
         fake = FakeRun(stdout="", returncode=1)
         self.assertEqual(agents.list_claude_sessions(claude_bin="claude", run=fake), [])
