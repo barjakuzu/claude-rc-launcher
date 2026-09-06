@@ -6,6 +6,7 @@ import type { DeviceCard } from '../types';
 
 interface BigCardProps {
   card: DeviceCard;
+  cards: DeviceCard[];
   onClick: () => void;
   mobile?: boolean;
 }
@@ -37,7 +38,7 @@ function V5Stat({ label, value, bar, barColor, sub }: {
   );
 }
 
-export function BigCard({ card, onClick, mobile = false }: BigCardProps) {
+export function BigCard({ card, cards, onClick, mobile = false }: BigCardProps) {
   const hue = hueForId(card.id);
   const KindIcon = Icons[kindForOs(card.os)] || Icons.server;
   const hueColor = tintFor(hue, 0.70, 0.10);
@@ -93,6 +94,18 @@ export function BigCard({ card, onClick, mobile = false }: BigCardProps) {
           }}>
             {card.hostname}
           </div>
+          {card.claude_version && (() => {
+            const hubVersion = cards.find((x) => x.id === 'local')?.claude_version;
+            const skewed = hubVersion && card.claude_version !== hubVersion;
+            return (
+              <div style={{
+                fontSize: 10, color: skewed ? RT.amber : RT.textLow,
+                fontFamily: FONT_MONO, marginTop: 2,
+              }}>
+                Claude Code {card.claude_version}
+              </div>
+            );
+          })()}
         </div>
         {!mobile && <Icons.chevRight size={16} stroke={RT.textLow} />}
       </div>

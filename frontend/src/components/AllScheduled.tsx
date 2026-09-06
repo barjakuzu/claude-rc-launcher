@@ -148,52 +148,54 @@ export function AllScheduled({ cards }: AllScheduledProps) {
                 >
                   <Icons.terminal size={13} stroke={RT.textDim} /> Edit
                 </button>
-                {cards.length > 1 && (
-                  <div style={{ position: 'relative' }}>
-                    <button
-                      style={mobileActionBtn()}
-                      onClick={(e) => {
-                        if (moreOpenId !== d.id + s.id) setMorePos(fixedMenuPos(e.currentTarget, { align: 'left' }));
-                        setMoreOpenId(moreOpenId === d.id + s.id ? null : d.id + s.id);
-                      }}
-                    >
-                      <Icons.more size={13} stroke={RT.textDim} />
-                    </button>
-                    {moreOpenId === d.id + s.id && (
-                      <div style={{
-                        ...(morePos ?? {}),
-                        background: RT.panel, border: `1px solid ${RT.borderHi}`,
-                        borderRadius: 8, padding: 4, zIndex: Z.menu,
-                        boxShadow: '0 8px 24px rgba(0,0,0,.4)', minWidth: 160,
-                      }}>
-                        <button
-                          style={moreItemStyle}
-                          onClick={() => { setMoreOpenId(null); setPickerEntry({ deviceId: d.id, schedule: s, mode: 'copy' }); }}
-                        >
-                          <Icons.copy size={11} stroke={RT.textDim} /> Copy to…
-                        </button>
-                        <button
-                          style={moreItemStyle}
-                          onClick={() => { setMoreOpenId(null); setPickerEntry({ deviceId: d.id, schedule: s, mode: 'move' }); }}
-                        >
-                          <Icons.share size={11} stroke={RT.textDim} /> Move to…
-                        </button>
-                        <div style={{ height: 1, background: RT.border, margin: '3px 0' }} />
-                        <button
-                          style={{ ...moreItemStyle, color: RT.red }}
-                          onClick={() => {
-                            setMoreOpenId(null);
-                            if (window.confirm(`Delete schedule "${s.name}"?`)) {
-                              api.schedDelete(d.id, s.id);
-                            }
-                          }}
-                        >
-                          <Icons.stop size={11} stroke={RT.red} /> Delete
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                )}
+                <div style={{ position: 'relative' }}>
+                  <button
+                    style={mobileActionBtn()}
+                    onClick={(e) => {
+                      if (moreOpenId !== d.id + s.id) setMorePos(fixedMenuPos(e.currentTarget, { align: 'left' }));
+                      setMoreOpenId(moreOpenId === d.id + s.id ? null : d.id + s.id);
+                    }}
+                  >
+                    <Icons.more size={13} stroke={RT.textDim} />
+                  </button>
+                  {moreOpenId === d.id + s.id && (
+                    <div style={{
+                      ...(morePos ?? {}),
+                      background: RT.panel, border: `1px solid ${RT.borderHi}`,
+                      borderRadius: 8, padding: 4, zIndex: Z.menu,
+                      boxShadow: '0 8px 24px rgba(0,0,0,.4)', minWidth: 160,
+                    }}>
+                      {cards.length > 1 && (
+                        <>
+                          <button
+                            style={moreItemStyle}
+                            onClick={() => { setMoreOpenId(null); setPickerEntry({ deviceId: d.id, schedule: s, mode: 'copy' }); }}
+                          >
+                            <Icons.copy size={11} stroke={RT.textDim} /> Copy to…
+                          </button>
+                          <button
+                            style={moreItemStyle}
+                            onClick={() => { setMoreOpenId(null); setPickerEntry({ deviceId: d.id, schedule: s, mode: 'move' }); }}
+                          >
+                            <Icons.share size={11} stroke={RT.textDim} /> Move to…
+                          </button>
+                          <div style={{ height: 1, background: RT.border, margin: '3px 0' }} />
+                        </>
+                      )}
+                      <button
+                        style={{ ...moreItemStyle, color: RT.red }}
+                        onClick={() => {
+                          setMoreOpenId(null);
+                          if (window.confirm(`Delete schedule "${s.name}"?`)) {
+                            api.schedDelete(d.id, s.id);
+                          }
+                        }}
+                      >
+                        <Icons.stop size={11} stroke={RT.red} /> Delete
+                      </button>
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
           );

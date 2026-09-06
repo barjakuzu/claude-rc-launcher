@@ -199,6 +199,30 @@ interface UpdateInfo {
   current?: string;
 }
 
+async function runUpdateFlow(onDone: () => void) {
+  try {
+    let result = await api.update();
+    if (!result.ok && result.remote_sha) {
+      const commits = (result.pending_commits || []).join('\n');
+      const confirmed = window.confirm(
+        `Update to ${result.remote_sha}?\n\nPending commits:\n${commits || '(none)'}`
+      );
+      if (!confirmed) {
+        onDone();
+        return;
+      }
+      result = await api.update({ confirm: result.remote_sha });
+    }
+    if (!result.ok) {
+      window.alert(result.message || 'Update failed.');
+      onDone();
+      return;
+    }
+  } catch {/* likely network error as server restarts — expected */}
+  // Reload after 3s
+  setTimeout(() => { window.location.reload(); }, 3000);
+}
+
 function VersionChip() {
   const mounted = useRef(true);
   useEffect(() => () => { mounted.current = false; }, []);
@@ -214,29 +238,9 @@ function VersionChip() {
     return () => { cancelled = true; };
   }, []);
 
-  const handleUpdate = async () => {
+  const handleUpdate = () => {
     setUpdating(true);
-    try {
-      let result = await api.update();
-      if (!result.ok && result.remote_sha) {
-        const commits = (result.pending_commits || []).join('\n');
-        const confirmed = window.confirm(
-          `Update to ${result.remote_sha}?\n\nPending commits:\n${commits || '(none)'}`
-        );
-        if (!confirmed) {
-          setUpdating(false);
-          return;
-        }
-        result = await api.update({ confirm: result.remote_sha });
-      }
-      if (!result.ok) {
-        window.alert(result.message || 'Update failed.');
-        setUpdating(false);
-        return;
-      }
-    } catch {/* likely network error as server restarts — expected */}
-    // Reload after 3s
-    setTimeout(() => { window.location.reload(); }, 3000);
+    runUpdateFlow(() => setUpdating(false));
   };
 
   if (!info) return null;
@@ -284,6 +288,7 @@ interface GlobalMenuProps {
 function GlobalMenu({ openId, onRefresh }: GlobalMenuProps) {
   const [open, setOpen] = useState(false);
   const [pending, setPending] = useState(false);
+  const [checking, setChecking] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -304,6 +309,23 @@ function GlobalMenu({ openId, onRefresh }: GlobalMenuProps) {
     finally {
       setPending(false);
       onRefresh();
+    }
+  };
+
+  const handleCheckUpdates = async () => {
+    setChecking(true);
+    setOpen(false);
+    try {
+      const data = await api.updateCheck() as { update_available: boolean; current?: string; latest?: string };
+      if (data.update_available) {
+        await runUpdateFlow(() => {});
+      } else {
+        window.alert(`Up to date (v${data.current ?? data.latest ?? '?'}).`);
+      }
+    } catch {
+      window.alert('Could not check for updates.');
+    } finally {
+      setChecking(false);
     }
   };
 
@@ -365,6 +387,16 @@ function GlobalMenu({ openId, onRefresh }: GlobalMenuProps) {
           >
             <Icons.refresh size={11} stroke={RT.textDim} />
             Refresh
+          </button>
+
+          <button
+            style={{ ...menuItemStyle, opacity: checking ? 0.6 : 1 }}
+            onClick={checking ? undefined : handleCheckUpdates}
+            onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = RT.bgRaised; }}
+            onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = 'transparent'; }}
+          >
+            <Icons.refresh size={11} stroke={RT.textDim} />
+            {checking ? 'Checking…' : 'Check for updates'}
           </button>
 
           <div style={{ height: 1, background: RT.border, margin: '4px 0' }} />

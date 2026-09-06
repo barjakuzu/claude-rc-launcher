@@ -7,6 +7,7 @@ import type { DeviceCard } from '../types';
 
 interface HeroProps {
   device: DeviceCard;
+  cards: DeviceCard[];
   mobile?: boolean;
   onClose?: () => void;
   onStopAllDone?: () => void;
@@ -50,7 +51,7 @@ function V5Stat({
   );
 }
 
-export function DeviceHero({ device, mobile = false, onClose, onStopAllDone }: HeroProps) {
+export function DeviceHero({ device, cards, mobile = false, onClose, onStopAllDone }: HeroProps) {
   const hue = hueForId(device.id);
   const hueColor = tintFor(hue, 0.70, 0.10);
   const KindIcon = Icons[kindForOs(device.os)] || Icons.server;
@@ -137,6 +138,18 @@ export function DeviceHero({ device, mobile = false, onClose, onStopAllDone }: H
             </span>
             <span style={{ color: RT.borderHi }}>·</span>
             <span>{device.loadPct}% cpu</span>
+            {device.claude_version && (() => {
+              const hubVersion = cards.find((x) => x.id === 'local')?.claude_version;
+              const skewed = hubVersion && device.claude_version !== hubVersion;
+              return (
+                <>
+                  <span style={{ color: RT.borderHi }}>·</span>
+                  <span style={{ color: skewed ? RT.amber : RT.textLow }}>
+                    Claude Code {device.claude_version}
+                  </span>
+                </>
+              );
+            })()}
           </div>
         </div>
 

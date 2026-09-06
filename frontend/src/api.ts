@@ -32,7 +32,8 @@ export const api = {
   resize: (device: string, name: string, cols: number, rows: number) =>
     req('POST', `/sessions/${encodeURIComponent(name)}/resize`, device, { cols, rows }),
   start: (device: string, body: unknown) => req('POST', '/start', device, body),
-  stop: (device: string, name: string) => req('POST', '/stop', device, { name }),
+  stop: (device: string, name: string, opts?: { external?: boolean; pid?: number }) =>
+    req('POST', '/stop', device, opts?.external ? { external: true, pid: opts.pid } : { name }),
   restart: (device: string, name: string) => req('POST', '/restart', device, { name }),
   unstick: (device: string, name: string) => req('POST', '/unstick', device, { name }),
   stopAll: (device: string) => req('POST', '/stop-all', device),

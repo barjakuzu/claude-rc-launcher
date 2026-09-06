@@ -45,6 +45,7 @@ export function DeviceDetail({ device, cards, tab, setTab, onClose, layout }: De
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minHeight: 0 }}>
       <DeviceHero
         device={device}
+        cards={cards}
         mobile={mobile}
         onClose={onClose}
         onStopAllDone={reloadSessions}
@@ -81,7 +82,7 @@ export function DeviceDetail({ device, cards, tab, setTab, onClose, layout }: De
               <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                 {sessions.map((s) => (
                   <SessionRow
-                    key={s.name}
+                    key={s.kind === 'external' ? 'ext:' + (s.session_id ?? s.sessionId ?? s.name) : (s.session_id ?? s.sessionId ?? s.name)}
                     s={s}
                     hue={hue}
                     deviceId={device.id}
