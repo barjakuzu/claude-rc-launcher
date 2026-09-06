@@ -504,5 +504,94 @@ class GetUrlPrefersHyperlinkTargetOverPlainTextTest(unittest.TestCase):
         self.assertEqual(set_env_calls, [])
 
 
+class GetUrlCapturePaneUsesDashETest(unittest.TestCase):
+    """tmux capture-pane must run with -e, or tmux strips escape sequences
+    and the OSC 8 hyperlink target branch can never fire in production."""
+
+    def setUp(self):
+        self.fake = FakeRun(pane=(
+            "  ~/career-ops | Opus 5 | Tokens: 0/1.0M (0%)          " + OSC_LINK + "\n"
+        ))
+        self._patched_run = sessions.subprocess.run
+        self._patched_env = sessions.get_session_env
+        self._patched_shell = sessions.is_shell_session
+        sessions.subprocess.run = self.fake
+        sessions.get_session_env = lambda name, var: None
+        sessions.is_shell_session = lambda name: False
+
+    def tearDown(self):
+        sessions.subprocess.run = self._patched_run
+        sessions.get_session_env = self._patched_env
+        sessions.is_shell_session = self._patched_shell
+
+    def test_capture_pane_argv_includes_dash_e(self):
+        sessions.get_url("rc-portugal")
+        capture_calls = [c for c in self.fake.calls
+                          if isinstance(c, list) and "capture-pane" in c]
+        self.assertTrue(capture_calls, "capture-pane was never called")
+        for c in capture_calls:
+            self.assertIn("-e", c)
+
+
+class SetupSessionPersistsUrlOnlyFromOsc8Test(unittest.TestCase):
+    """setup_session must only write RC_URL into the tmux environment when
+    the URL came from an OSC 8 hyperlink target — never a plain-text
+    match, even when the status bar independently reports RC as active."""
+
+    PASTED_URL = "https://claude.ai/code/session_01AAAAAAAAAAAAAAAAAAAAAAAA?from=cli"
+
+    def setUp(self):
+        # Status bar shows the "already active" marker but the only URL in
+        # the pane is plain/pasted text (no OSC 8 hyperlink at all).
+        pane = (
+            "  Claude Code v2.1.259\n"
+            "❯ \n"
+            "Remote Control active\n"
+            f"Co-Authored-By: someone <noreply> {self.PASTED_URL}\n"
+        )
+        self.fake = FakeRun(pane=pane)
+        self._patched = {
+            "subprocess": sessions.subprocess.run,
+            "sleep": sessions.time.sleep,
+            "exists": sessions.session_exists,
+            "status": sessions.get_session_status,
+            "env": sessions.get_session_env,
+        }
+        sessions.subprocess.run = self.fake
+        sessions.time.sleep = lambda *_: None
+        sessions.session_exists = lambda n: True
+        sessions.get_session_status = lambda n: "running"
+        sessions.get_session_env = lambda n, v: None
+
+    def tearDown(self):
+        sessions.subprocess.run = self._patched["subprocess"]
+        sessions.time.sleep = self._patched["sleep"]
+        sessions.session_exists = self._patched["exists"]
+        sessions.get_session_status = self._patched["status"]
+        sessions.get_session_env = self._patched["env"]
+
+    def test_text_sourced_url_is_never_persisted(self):
+        sessions.setup_session("rc-portugal", "portugal", "c")
+        set_env_calls = [
+            c for c in self.fake.calls
+            if isinstance(c, list) and "set-environment" in c and "RC_URL" in c
+        ]
+        self.assertEqual(set_env_calls, [])
+
+    def test_osc8_sourced_url_is_persisted(self):
+        self.fake.pane = (
+            "  Claude Code v2.1.259\n"
+            "❯ \n"
+            "Remote Control active\n"
+            "  ~/career-ops | Opus 5 | Tokens: 0/1.0M (0%)          " + OSC_LINK + "\n"
+        )
+        sessions.setup_session("rc-portugal", "portugal", "c")
+        set_env_calls = [
+            c for c in self.fake.calls
+            if isinstance(c, list) and "set-environment" in c and "RC_URL" in c
+        ]
+        self.assertTrue(set_env_calls, "expected RC_URL to be persisted for an OSC 8 URL")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -270,6 +270,19 @@ def get_url(session_name):
     """Extract the claude.ai URL from a tmux session's pane output.
     Shell sessions have no URL.
 
+    Thin wrapper over get_url_with_source for callers that don't need
+    provenance (most of them) — just the URL."""
+    url, _source = get_url_with_source(session_name)
+    return url
+
+
+def get_url_with_source(session_name):
+    """Extract the claude.ai URL from a tmux session's pane output, along
+    with where it came from: (url, source) where source is one of
+    "osc8" (an OSC 8 hyperlink target — authoritative), "text" (a plain/
+    pasted-text match, not persist-worthy), or None (fell back to a
+    previously cached RC_URL, or found nothing).
+
     An OSC 8 hyperlink *target* is the authoritative source: the status
     bar's RC indicator is the only thing that renders the session URL as a
     link target, so a matching target is trustworthy evidence Remote
@@ -282,13 +295,17 @@ def get_url(session_name):
 
     Falls back to a previously cached RC_URL when nothing can be found in
     the current pane — a session that has never shown the URL yet, or
-    whose Remote Control never activated, correctly returns None."""
+    whose Remote Control never activated, correctly returns (None, None).
+
+    Uses `capture-pane -e` so ANSI/OSC escape sequences (and thus the
+    OSC 8 hyperlink target) survive the capture — without -e, tmux strips
+    escapes and the OSC 8 branch can never fire."""
     if is_shell_session(session_name):
-        return None
+        return None, None
     for history_lines in ("-50", "-500"):
         try:
             r = subprocess.run(
-                ["tmux", "capture-pane", "-t", session_name, "-p", "-S", history_lines, "-J"],
+                ["tmux", "capture-pane", "-t", session_name, "-e", "-p", "-S", history_lines, "-J"],
                 capture_output=True, text=True, timeout=5,
             )
             raw = r.stdout
@@ -302,7 +319,7 @@ def get_url(session_name):
                         ["tmux", "set-environment", "-t", session_name, "RC_URL", url],
                         capture_output=True,
                     )
-                return url
+                return url, "osc8"
             if not targets:
                 # No OSC 8 links in this pane at all — fall back to a plain-
                 # text scan, but never persist it: an unlinked URL is just
@@ -311,20 +328,13 @@ def get_url(session_name):
                 text = _strip_osc8(raw).replace("\n", " ")
                 matches = _SESSION_URL_RE.findall(text)
                 if matches:
-                    return matches[-1]
+                    return matches[-1], "text"
         except Exception:
             pass
     stored = get_session_env(session_name, "RC_URL")
     if stored and stored.startswith("https://claude.ai/code/session_"):
-        return stored
-    return None
-
-
-def _get_url_internal(session_name):
-    """Alias kept for setup_session's pre-v3 fallback path — get_url no
-    longer gates on RC-active detection, so there is nothing left that
-    only _get_url_internal could do."""
-    return get_url(session_name)
+        return stored, None
+    return None, None
 
 
 def get_tokens(session_name):
@@ -595,13 +605,14 @@ def setup_session(session_name, display_name, mode):
         )
         clean = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', r.stdout)
         if any(m in clean for m in _RC_ACTIVE_MARKERS):
-            url = _get_url_internal(session_name)
+            url, url_source = get_url_with_source(session_name)
             if url:
                 print(f"  {session_name}: remote-control already active → {url}")
-                subprocess.run(
-                    ["tmux", "set-environment", "-t", session_name, "RC_URL", url],
-                    capture_output=True,
-                )
+                if url_source == "osc8":
+                    subprocess.run(
+                        ["tmux", "set-environment", "-t", session_name, "RC_URL", url],
+                        capture_output=True,
+                    )
                 time.sleep(1)
                 _send_rename(session_name, display_name)
                 return
@@ -616,14 +627,14 @@ def setup_session(session_name, display_name, mode):
 
     def _wait_for_rc_active(sname, timeout=60):
         """Poll until 'Remote Control active' appears in status bar.
-        Returns the URL if successful, None if timed out/failed.
-        Handles menus and failures along the way."""
+        Returns (url, source) if successful, (None, None) if timed
+        out/failed. Handles menus and failures along the way."""
         rc_menu_handled = False
         for _ in range(timeout // 2):
             time.sleep(2)
             if not session_exists(sname):
                 print(f"  {sname}: session died while waiting for URL")
-                return None
+                return None, None
             pane = _capture_pane_text(sname)
             # Handle "Enable Remote Control" menu (first-time setup)
             if not rc_menu_handled and "Enable Remote Control" in pane:
@@ -639,15 +650,15 @@ def setup_session(session_name, display_name, mode):
                 time.sleep(1)
                 # Check if it's already active
                 if _is_rc_active(sname):
-                    url = _get_url_internal(sname)
+                    url, url_source = get_url_with_source(sname)
                     if url:
-                        return url
+                        return url, url_source
                 continue
             # Check status bar for definitive state
             if _is_rc_active(sname):
-                url = _get_url_internal(sname)
+                url, url_source = get_url_with_source(sname)
                 if url:
-                    return url
+                    return url, url_source
             # Check for failure — return None to trigger retry
             try:
                 sr = subprocess.run(
@@ -657,23 +668,24 @@ def setup_session(session_name, display_name, mode):
                 clean = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', sr.stdout)
                 if "Remote Control failed" in clean:
                     print(f"  {sname}: remote-control failed")
-                    return None
+                    return None, None
             except Exception:
                 pass
-        return None
+        return None, None
 
     # Try /remote-control up to 3 times
     url = None
     for attempt in range(3):
         print(f"  {session_name}: sending /remote-control (attempt {attempt + 1}/3)")
         _send_rc(session_name)
-        url = _wait_for_rc_active(session_name, timeout=30)
+        url, url_source = _wait_for_rc_active(session_name, timeout=30)
         if url:
             print(f"  {session_name}: remote-control active → {url}")
-            subprocess.run(
-                ["tmux", "set-environment", "-t", session_name, "RC_URL", url],
-                capture_output=True,
-            )
+            if url_source == "osc8":
+                subprocess.run(
+                    ["tmux", "set-environment", "-t", session_name, "RC_URL", url],
+                    capture_output=True,
+                )
             break
         # Wait before retry
         print(f"  {session_name}: attempt {attempt + 1} failed, waiting before retry...")
