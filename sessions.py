@@ -709,6 +709,19 @@ def stop_session(name):
     subprocess.run(["tmux", "kill-session", "-t", name], capture_output=True)
 
 
+def transcript_path(workdir, session_id):
+    """The JSONL transcript path Claude Code writes for (workdir, session_id).
+
+    Pure/no I/O — callers check existence themselves. Claude Code encodes a
+    project's cwd into its ~/.claude/projects/<encoded> directory name by
+    replacing both '/' and '.' with '-' (verified directly against this
+    box's ~/.claude/projects listing, not from documentation — the
+    transcript path format is explicitly undocumented and unstable).
+    """
+    encoded = workdir.replace("/", "-").replace(".", "-")
+    return os.path.expanduser(os.path.join("~/.claude/projects", encoded, session_id + ".jsonl"))
+
+
 def _find_session_uuid(tmux_name, workdir):
     """Find the Claude session UUID for a tmux session by matching the
     session title (set via /rename) in the project's JSONL files."""
