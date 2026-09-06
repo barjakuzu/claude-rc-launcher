@@ -138,6 +138,18 @@ export function DeviceHero({ device, cards, mobile = false, onClose, onStopAllDo
             </span>
             <span style={{ color: RT.borderHi }}>·</span>
             <span>{device.loadPct}% cpu</span>
+            {device.version && (() => {
+              const hubLauncherVersion = cards.find((x) => x.id === 'local')?.version;
+              const skewed = hubLauncherVersion && device.version !== hubLauncherVersion;
+              return (
+                <>
+                  <span style={{ color: RT.borderHi }}>·</span>
+                  <span style={{ color: skewed ? RT.amber : RT.textLow }}>
+                    Launcher v{device.version}{skewed ? ` (hub v${hubLauncherVersion})` : ''}
+                  </span>
+                </>
+              );
+            })()}
             {device.claude_version && (() => {
               const hubVersion = cards.find((x) => x.id === 'local')?.claude_version;
               const skewed = hubVersion && device.claude_version !== hubVersion;

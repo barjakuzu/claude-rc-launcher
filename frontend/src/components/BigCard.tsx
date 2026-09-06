@@ -94,6 +94,18 @@ export function BigCard({ card, cards, onClick, mobile = false }: BigCardProps) 
           }}>
             {card.hostname}
           </div>
+          {card.version && (() => {
+            const hubLauncherVersion = cards.find((x) => x.id === 'local')?.version;
+            const skewed = hubLauncherVersion && card.version !== hubLauncherVersion;
+            return (
+              <div style={{
+                fontSize: 10, color: skewed ? RT.amber : RT.textLow,
+                fontFamily: FONT_MONO, marginTop: 2,
+              }}>
+                Launcher v{card.version}{skewed ? ` (hub v${hubLauncherVersion})` : ''}
+              </div>
+            );
+          })()}
           {card.claude_version && (() => {
             const hubVersion = cards.find((x) => x.id === 'local')?.claude_version;
             const skewed = hubVersion && card.claude_version !== hubVersion;

@@ -7,6 +7,8 @@ export interface DeviceCard {
   home_dir?: string;
   /** Claude Code version running on this device, from compat.claude_version(). May be absent on an older backend or when claude isn't installed. */
   claude_version?: string;
+  /** This device's own launcher version (from /rc/stats' "version" field). May be absent on an older backend. */
+  version?: string;
 }
 export interface Session {
   name: string; mode: string; url?: string; status?: string;
