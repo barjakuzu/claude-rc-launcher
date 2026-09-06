@@ -6,6 +6,7 @@ import { V5IconButton } from './V5IconButton';
 import { DevicePicker, rewriteHomePaths, type DevicePickResult } from './DevicePicker';
 import { api } from '../api';
 import { fixedMenuPos } from './menuPos';
+import { describeSchedule } from '../scheduleDisplay';
 import type { Schedule, DeviceCard } from '../types';
 
 export interface ScheduledRowProps {
@@ -109,6 +110,7 @@ export function ScheduledRow({ s, deviceId, mobile = false, cards, onChanged, on
         mode: s.mode ?? 'c',
         model: s.model ?? undefined,
         enabled: s.enabled ?? false,
+        concurrency: s.concurrency,
       };
       const res = await api.schedCreate(targetDeviceId, body);
       if (res && res.ok === false) throw new Error(res.message ?? 'create failed');
@@ -169,7 +171,7 @@ export function ScheduledRow({ s, deviceId, mobile = false, cards, onChanged, on
           display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap',
         }}>
           <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-            <Icons.clock size={10} stroke={RT.textLow} /> {s.cron || 'manual'}
+            <Icons.clock size={10} stroke={RT.textLow} /> {describeSchedule(s)}
           </span>
           {s.mode && (
             <>

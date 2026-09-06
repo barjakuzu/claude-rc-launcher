@@ -7,6 +7,7 @@ import { mobileActionBtn } from './mobileActionBtn';
 import { ScheduleModal } from './ScheduleModal';
 import { DevicePicker, rewriteHomePaths, type DevicePickResult } from './DevicePicker';
 import { useAllSchedules } from '../useCrossDevice';
+import { describeSchedule } from '../scheduleDisplay';
 import { api } from '../api';
 import { fixedMenuPos } from './menuPos';
 import type { DeviceCard, Schedule } from '../types';
@@ -63,6 +64,7 @@ export function AllScheduled({ cards }: AllScheduledProps) {
       mode: s.mode ?? 'c',
       model: s.model ?? undefined,
       enabled: s.enabled ?? false,
+      concurrency: s.concurrency,
     };
     try {
       const res = await api.schedCreate(targetDeviceId, body);
@@ -129,7 +131,7 @@ export function AllScheduled({ cards }: AllScheduledProps) {
               {/* Cron + label */}
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontFamily: FONT_MONO, fontSize: 11, color: RT.textLow }}>
                 <Icons.clock size={10} stroke={RT.textLow} />
-                <span>{s.cron || 'manual'}</span>
+                <span>{describeSchedule(s)}</span>
                 {s.schedule_label && <span style={{ color: RT.borderHi }}>({s.schedule_label})</span>}
               </div>
               {/* Actions */}

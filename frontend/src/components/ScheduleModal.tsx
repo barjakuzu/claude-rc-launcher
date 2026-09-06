@@ -79,7 +79,7 @@ export function ScheduleModal({ deviceId, initial, onClose, onSaved }: ScheduleM
   );
   const [enabled, setEnabled] = useState(initial?.enabled ?? true);
   const [concurrency, setConcurrency] = useState<'skip' | 'kill'>(
-    (initial?.concurrency as 'skip' | 'kill') ?? 'skip',
+    initial?.concurrency === 'kill' ? 'kill' : 'skip',
   );
 
   const [preset,       setPreset]       = useState(initial && !initial.cron ? MANUAL_PRESET : '');

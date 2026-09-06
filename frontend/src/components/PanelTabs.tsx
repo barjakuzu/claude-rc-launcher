@@ -16,7 +16,7 @@ export interface PanelTabsProps {
 export function PanelTabs({ tab, setTab, sessionCount, scheduledCount, onResume, mobile }: PanelTabsProps) {
   const allTabs: [PanelTab, string, number | null][] = [
     ['running',   'Sessions',  sessionCount],
-    ['scheduled', 'Scheduled', scheduledCount],
+    ['scheduled', 'Tasks',     scheduledCount],
     ['logs',      'Logs',      null],
     ['settings',  'Settings',  null],
   ];
