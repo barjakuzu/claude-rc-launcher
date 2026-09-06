@@ -20,7 +20,7 @@ export interface ConfigReport {
   skills: { count: number; names: string[]; dangling: string[]; deps_missing: string[]; device_only: string[] };
   agents: string[];
   rules: { shared: string[]; local: string[] };
-  plugins: { declared: string[]; installed: string[]; missing: string[]; extra: string[] };
+  plugins: { declared: string[]; installed: string[]; disabled: string[]; missing: string[]; extra: string[] };
   marketplaces: string[];
   settings: {
     hooks_present: boolean;

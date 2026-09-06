@@ -164,7 +164,19 @@ export function ConfigMatrixView({ cards }: { cards: DeviceCard[] }) {
                       <div>skills: {joinOrDash(report.skills.names)}</div>
                       <div>device-only skills: {joinOrDash(report.skills.device_only)}</div>
                       <div>plugins declared: {joinOrDash(report.plugins.declared)}</div>
-                      <div>plugins installed: {joinOrDash(report.plugins.installed)}</div>
+                      <div>
+                        plugins installed:{' '}
+                        {report.plugins.installed.length ? report.plugins.installed.map((name, i) => {
+                          const disabled = report.plugins.disabled.includes(name);
+                          return (
+                            <span key={name}>
+                              {i > 0 && ', '}
+                              {name}
+                              {disabled && <span style={{ color: RT.amber }}> (disabled)</span>}
+                            </span>
+                          );
+                        }) : '—'}
+                      </div>
                       <div>rules (shared): {joinOrDash(report.rules.shared)}</div>
                       <div>rules (local): {joinOrDash(report.rules.local)}</div>
                       <div>effective model: {report.effective_model || '—'}</div>

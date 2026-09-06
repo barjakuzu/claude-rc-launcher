@@ -209,6 +209,7 @@ def _plugins_report(cfg_dir, run, errors):
     declared_set, installed_set = set(declared), set(installed)
     return {
         "declared": declared, "installed": installed, "installed_status": installed_status,
+        "disabled": sorted(name for name, enabled in installed_status.items() if not enabled),
         "missing": sorted(declared_set - installed_set),
         "extra": sorted(installed_set - declared_set),
     }

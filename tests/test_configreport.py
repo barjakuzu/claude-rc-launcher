@@ -191,6 +191,7 @@ class CollectConfigReportTest(unittest.TestCase):
         self.assertTrue(report["plugins"]["installed_status"]["claude-md-management@claude-plugins-official"])
         self.assertFalse(report["plugins"]["installed_status"]["watch@official"])
         self.assertNotIn("google-workspace@skills-dir", report["plugins"]["installed_status"])
+        self.assertEqual(report["plugins"]["disabled"], ["watch@official"])
 
     def test_plugins_report_stays_lenient_on_old_plain_line_format(self):
         # Older/plain output was a single "name@mk" token per line with no
@@ -200,6 +201,7 @@ class CollectConfigReportTest(unittest.TestCase):
         report = configreport.collect_config_report(home=self.home, run=fake_run)
         self.assertIn("watch@official", report["plugins"]["installed"])
         self.assertTrue(report["plugins"]["installed_status"]["watch@official"])
+        self.assertEqual(report["plugins"]["disabled"], [])
 
     def test_settings_hooks_symlink_and_sha256(self):
         report = configreport.collect_config_report(home=self.home, run=_stub_run)
