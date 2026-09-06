@@ -199,15 +199,18 @@ def _due_to_fire(schedule, now):
 # --- Session lifecycle tracking ---
 
 _active_scheduled_sessions = {}  # schedule_id -> {session_name, started_at, schedule_safe_name}
+_active_scheduled_sessions_lock = threading.Lock()
 
 
 def _monitor_scheduled_sessions():
     """Check if any tracked scheduled sessions have ended."""
-    if not _active_scheduled_sessions:
+    with _active_scheduled_sessions_lock:
+        items = list(_active_scheduled_sessions.items())
+    if not items:
         return
 
     ended = []
-    for schedule_id, info in _active_scheduled_sessions.items():
+    for schedule_id, info in items:
         session_name = info["session_name"]
         # Check if tmux session still exists
         result = subprocess.run(
@@ -216,7 +219,7 @@ def _monitor_scheduled_sessions():
         )
         if result.returncode != 0:
             # Session ended
-            ended.append(schedule_id)
+            ended.append((schedule_id, session_name))
             duration = (datetime.now() - info["started_at"]).total_seconds() / 60
 
             # Try to read the run report if it exists
@@ -243,8 +246,11 @@ def _monitor_scheduled_sessions():
                 duration_minutes=round(duration, 1)
             )
 
-    for schedule_id in ended:
-        del _active_scheduled_sessions[schedule_id]
+    with _active_scheduled_sessions_lock:
+        for schedule_id, ended_session_name in ended:
+            current = _active_scheduled_sessions.get(schedule_id)
+            if current and current["session_name"] == ended_session_name:
+                del _active_scheduled_sessions[schedule_id]
 
 
 # --- Fire mechanism ---
@@ -255,22 +261,40 @@ def _fire_schedule(schedule):
     schedule_id = schedule["id"]
     concurrency = schedule.get("concurrency", "skip")
 
-    existing = _active_scheduled_sessions.get(schedule_id)
-    if existing and session_exists(existing["session_name"]):
-        if concurrency == "kill":
-            subprocess.run(["tmux", "kill-session", "-t", existing["session_name"]],
-                            capture_output=True)
-            print(f"  Scheduler: killed running session {existing['session_name']} "
-                  f"for '{name}' (concurrency=kill)")
-            del _active_scheduled_sessions[schedule_id]
-        else:
-            add_history_entry(schedule_id, "skipped",
-                               f"Still running as {existing['session_name']} (concurrency=skip)")
-            print(f"  Scheduler: skipped '{name}', already running as {existing['session_name']}")
-            return
-
     safe_name = re.sub(r'[^a-zA-Z0-9_-]', '', name.replace(" ", "-"))
     session_name = f"{SESSION_PREFIX}run-{uuid.uuid4().hex[:12]}"
+
+    # Check-and-claim must be atomic: the entry is registered here, under the
+    # lock, before any tmux command runs, so a second _fire_schedule call for
+    # the same schedule (e.g. a double-click on POST /schedules/fire) that
+    # arrives while setup/send is still in flight sees the claim and is
+    # skipped/killed instead of racing a duplicate session into existence.
+    with _active_scheduled_sessions_lock:
+        existing = _active_scheduled_sessions.get(schedule_id)
+        if existing and session_exists(existing["session_name"]):
+            if concurrency == "kill":
+                subprocess.run(["tmux", "kill-session", "-t", existing["session_name"]],
+                                capture_output=True)
+                print(f"  Scheduler: killed running session {existing['session_name']} "
+                      f"for '{name}' (concurrency=kill)")
+            else:
+                add_history_entry(schedule_id, "skipped",
+                                   f"Still running as {existing['session_name']} (concurrency=skip)")
+                print(f"  Scheduler: skipped '{name}', already running as {existing['session_name']}")
+                return
+        _active_scheduled_sessions[schedule_id] = {
+            "session_name": session_name,
+            "started_at": datetime.now(),
+            "schedule_safe_name": safe_name,
+        }
+
+    def _release_claim():
+        """Undo the claim above when the launch fails before the session is
+        actually up, so a failed fire doesn't permanently block later ones."""
+        with _active_scheduled_sessions_lock:
+            current = _active_scheduled_sessions.get(schedule_id)
+            if current and current["session_name"] == session_name:
+                del _active_scheduled_sessions[schedule_id]
 
     workdir = schedule.get("workdir", "/tmp")
     mode = schedule.get("mode", "c")
@@ -280,6 +304,7 @@ def _fire_schedule(schedule):
         mode = "c"
 
     if not os.path.isdir(workdir):
+        _release_claim()
         add_history_entry(schedule["id"], "error", f"Workdir not found: {workdir}")
         print(f"  Scheduler: workdir not found: {workdir}")
         return
@@ -311,6 +336,7 @@ def _fire_schedule(schedule):
             print(f"  Scheduler: instructions_file outside allowed directories: {instructions_file}")
 
     if not prompt:
+        _release_claim()
         add_history_entry(schedule["id"], "error", "No prompt or instructions file")
         return
 
@@ -339,6 +365,7 @@ def _fire_schedule(schedule):
     print(f"  Scheduler: firing '{name}' → session {session_name}")
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
+        _release_claim()
         add_history_entry(schedule["id"], "error", f"tmux failed: {result.stderr.strip()}")
         print(f"  Scheduler: tmux failed: {result.stderr.strip()}")
         return
@@ -349,6 +376,7 @@ def _fire_schedule(schedule):
         setup_session(session_name, session_name, mode)
         # After setup, send the prompt
         if not session_exists(session_name):
+            _release_claim()
             add_history_entry(schedule["id"], "error", "Session died during setup")
             return
 
@@ -374,13 +402,8 @@ def _fire_schedule(schedule):
             capture_output=True,
         )
 
-        # Register session for lifecycle monitoring and concurrency control
-        _active_scheduled_sessions[schedule_id] = {
-            "session_name": session_name,
-            "started_at": datetime.now(),
-            "schedule_safe_name": safe_name,
-        }
-
+        # The claim made before tmux new-session already registered this
+        # session for lifecycle monitoring and concurrency control.
         add_history_entry(schedule["id"], "ok", f"Session {session_name} started")
         print(f"  Scheduler: task '{name}' prompt sent to {session_name}")
 

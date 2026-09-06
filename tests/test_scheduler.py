@@ -1,6 +1,8 @@
 """Tests for scheduler.py."""
 import os
 import sys
+import threading
+import time
 import unittest
 from datetime import datetime
 
@@ -242,6 +244,86 @@ class ConcurrencyTest(unittest.TestCase):
         scheduler._fire_schedule(self._schedule())
         self.assertEqual(len(self.fake.new_session_names()), 1)
         self.assertIn(("s1", "ok"), [(h[0], h[1]) for h in self.history])
+
+
+class FireScheduleClaimRaceTest(unittest.TestCase):
+    """Task 9-10 review finding: the concurrency check-and-register must be
+    atomic and synchronous, not racing a background setup thread."""
+
+    def _schedule(self, **overrides):
+        s = {"id": "s1", "name": "task", "cron": "0 9 * * *", "workdir": "/tmp", "prompt": "hi"}
+        s.update(overrides)
+        return s
+
+    def test_concurrent_fire_calls_are_serialized_by_the_claim(self):
+        fake = FakeRun()
+        saved = _patch_scheduler(fake)
+        history = []
+        scheduler.add_history_entry = lambda sid, status, msg, **kw: history.append((sid, status, msg))
+        # Use a real background thread (not ImmediateThread) so the second
+        # _fire_schedule call genuinely happens while the first is still
+        # inside its background setup step.
+        scheduler.threading.Thread = threading.Thread
+        entered_setup = threading.Event()
+        release = threading.Event()
+
+        def blocking_setup(session_name, name, mode):
+            entered_setup.set()
+            release.wait(timeout=2)
+
+        scheduler.setup_session = blocking_setup
+        try:
+            schedule = self._schedule()
+            scheduler._fire_schedule(schedule)
+            self.assertTrue(entered_setup.wait(timeout=2), "background setup never started")
+
+            # Second fire arrives while the first session's setup is still
+            # in flight (i.e. before it has finished and would otherwise
+            # register itself). The synchronous claim made at the top of
+            # _fire_schedule must already be in place.
+            scheduler._fire_schedule(schedule)
+
+            release.set()
+            time.sleep(0.2)  # let the first background thread finish
+
+            self.assertEqual(len(fake.new_session_names()), 1)
+            self.assertIn(("s1", "skipped"), [(h[0], h[1]) for h in history])
+        finally:
+            _restore_scheduler(saved)
+
+    def test_failed_tmux_launch_releases_the_claim(self):
+        fake = FakeRun()
+        saved = _patch_scheduler(fake)
+        history = []
+        scheduler.add_history_entry = lambda sid, status, msg, **kw: history.append((sid, status, msg))
+
+        def failing_run(cmd, *a, **kw):
+            if isinstance(cmd, list) and cmd[:2] == ["tmux", "new-session"]:
+                class R:
+                    returncode = 1
+                    stdout = ""
+                    stderr = "duplicate session"
+                return R
+            return fake(cmd, *a, **kw)
+
+        scheduler.subprocess.run = failing_run
+        try:
+            schedule = self._schedule()
+            scheduler._fire_schedule(schedule)
+            self.assertNotIn("s1", scheduler._active_scheduled_sessions)
+            self.assertIn(("s1", "error"), [(h[0], h[1]) for h in history])
+
+            # A failed launch must not permanently block later fires: a
+            # second attempt should try again (not be skipped as "already
+            # running").
+            scheduler._fire_schedule(schedule)
+            self.assertEqual(
+                [(h[0], h[1]) for h in history if h[0] == "s1" and h[1] == "error"],
+                [("s1", "error"), ("s1", "error")],
+            )
+            self.assertNotIn(("s1", "skipped"), [(h[0], h[1]) for h in history])
+        finally:
+            _restore_scheduler(saved)
 
 
 if __name__ == "__main__":
