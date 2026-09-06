@@ -73,9 +73,13 @@ export function DeviceDetail({ device, cards, tab, setTab, onClose, layout }: De
         padding: mobile ? '12px 12px 32px' : '16px 20px',
         background: RT.bg,
       }}>
-        {tab === 'running' && (
+        {tab === 'running' && !mobile && (
           <>
-            {/* "+ New schedule" equivalent for sessions: just the list */}
+            {/* "+ New schedule" equivalent for sessions: just the list.
+                Mobile hides this — the Sessions tab (AllSessions.tsx)
+                already lists every device's sessions, so repeating just
+                this device's here would mean scrolling past the same
+                rows twice on a phone screen. */}
             {sessions.length === 0 ? (
               <V5Empty text={device.online ? `No active sessions on ${device.name}. Launch one above.` : 'Device offline.'} />
             ) : (
@@ -94,6 +98,12 @@ export function DeviceDetail({ device, cards, tab, setTab, onClose, layout }: De
               </div>
             )}
           </>
+        )}
+
+        {tab === 'running' && mobile && (
+          <div style={{ fontFamily: FONT_MONO, fontSize: 11.5, color: RT.textLow, padding: '4px 2px' }}>
+            See the Sessions tab for this device's sessions.
+          </div>
         )}
 
         {tab === 'scheduled' && (

@@ -19,6 +19,17 @@ export interface Session {
   session_id?: string;
   pid?: number;
   waiting_for?: string | null;
+  /** Working directory of an external session (sessions.py's "cwd"). */
+  cwd?: string;
+  /** Tmux pane this external session was adopted into, or null/absent if
+   * it isn't running in a tmux pane the launcher can find (e.g.
+   * Terminal.app, VS Code's integrated terminal) — no Preview/terminal
+   * access is possible without this. */
+  tmux?: { session_name: string; pane_id: string } | null;
+  /** Remote Control URL for an adopted external session, from an OSC 8
+   * hyperlink target in its pane (get_url_with_source's "osc8" source
+   * only) — null until Remote Control has been enabled and shown a link. */
+  rc_url?: string | null;
 }
 export interface ScheduleHistoryEntry {
   timestamp: string;

@@ -21,6 +21,8 @@ export function AllSessions({ cards, onOpenDevice }: AllSessionsProps) {
   const items = useAllSessions(cards, true);
   const [pending, setPending] = useState<Record<string, boolean>>({});
   const [preview, setPreview] = useState<PreviewState | null>(null);
+  const [rcUrls, setRcUrls] = useState<Record<string, string>>({});
+  const [rcErrors, setRcErrors] = useState<Record<string, string>>({});
 
   const guard = async (key: string, fn: () => Promise<unknown>) => {
     if (pending[key]) return;
@@ -29,6 +31,53 @@ export function AllSessions({ cards, onOpenDevice }: AllSessionsProps) {
       setPending((p) => ({ ...p, [key]: false }));
     }
   };
+
+  const handleEnableRc = async (key: string, deviceId: string, tmuxName: string) => {
+    if (pending[`rc-${key}`]) return;
+    setPending((p) => ({ ...p, [`rc-${key}`]: true }));
+    setRcErrors((e) => { const { [key]: _drop, ...rest } = e; return rest; });
+    try {
+      const result = await api.enableRc(deviceId, tmuxName);
+      if (result.ok && result.url) {
+        setRcUrls((u) => ({ ...u, [key]: result.url as string }));
+      } else {
+        setRcErrors((e) => ({ ...e, [key]: result.message || 'Failed to enable Remote Control' }));
+      }
+    } catch (err) {
+      setRcErrors((e) => ({ ...e, [key]: err instanceof Error ? err.message : 'Failed to enable Remote Control' }));
+    } finally {
+      setPending((p) => ({ ...p, [`rc-${key}`]: false }));
+    }
+  };
+
+  // Auto-clear an rc error a few seconds after it lands.
+  useEffect(() => {
+    const keys = Object.keys(rcErrors);
+    if (keys.length === 0) return;
+    const t = setTimeout(() => setRcErrors({}), 6000);
+    return () => clearTimeout(t);
+  }, [rcErrors]);
+
+  // The server's rc_url always wins when present. If a later poll reports
+  // s.rc_url as null for a row we optimistically stored locally (RC was
+  // disabled/reset server-side), drop the stale local value too.
+  useEffect(() => {
+    setRcUrls((u) => {
+      let changed = false;
+      const next = { ...u };
+      for (const { device: d, session: s } of items) {
+        const isExternal = s.kind === 'external';
+        const isAdopted = isExternal && !!s.tmux;
+        if (!isAdopted) continue;
+        const key = d.id + ':' + 'ext:' + (s.session_id ?? s.sessionId ?? s.name);
+        if (s.rc_url === null && key in next) {
+          delete next[key];
+          changed = true;
+        }
+      }
+      return changed ? next : u;
+    });
+  }, [items]);
 
   const deviceCount = new Set(items.map((i) => i.device.id)).size;
 
@@ -53,17 +102,20 @@ export function AllSessions({ cards, onOpenDevice }: AllSessionsProps) {
           const hue = hueForId(d.id);
           const chipColor = tintFor(hue, 0.70, 0.10);
           const isExternal = s.kind === 'external';
+          const isAdopted = isExternal && !!s.tmux;
+          const canOpenTerminal = !isExternal || isAdopted;
+          const previewTarget = isAdopted ? s.tmux!.session_name : s.name;
           const key = d.id + ':' + (isExternal ? 'ext:' + (s.session_id ?? s.sessionId ?? s.name) : (s.sessionId ?? s.name));
           return (
             <div
               key={key}
-              onClick={isExternal ? undefined : () => setPreview({ deviceId: d.id, name: s.name, mode: s.mode })}
-              title={isExternal ? undefined : 'Open terminal'}
+              onClick={canOpenTerminal ? () => setPreview({ deviceId: d.id, name: previewTarget, mode: s.mode }) : undefined}
+              title={canOpenTerminal ? 'Open terminal' : undefined}
               style={{
                 background: RT.card, border: `1px solid ${RT.border}`,
                 borderRadius: 10, padding: 12,
                 display: 'flex', flexDirection: 'column', gap: 8,
-                cursor: isExternal ? 'default' : 'pointer',
+                cursor: canOpenTerminal ? 'pointer' : 'default',
               }}>
               {/* Name + status */}
               <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -123,6 +175,43 @@ export function AllSessions({ cards, onOpenDevice }: AllSessionsProps) {
                     />
                   </>
                 )}
+                {isAdopted && (
+                  <>
+                    <button
+                      style={mobileActionBtn()}
+                      onClick={() => setPreview({ deviceId: d.id, name: previewTarget, mode: s.mode })}
+                      title="Show terminal output"
+                    >
+                      <Icons.search size={13} stroke={RT.textDim} /> Preview
+                    </button>
+                    {(() => {
+                      const rowRcUrl = s.rc_url ?? rcUrls[key];
+                      return rowRcUrl ? (
+                        <button
+                          style={mobileActionBtn()}
+                          onClick={() => window.open(rowRcUrl, '_blank', 'noopener,noreferrer')}
+                          title="Open on claude.ai"
+                        >
+                          <Icons.link size={13} stroke={RT.textDim} /> Open on claude.ai
+                        </button>
+                      ) : (
+                        <button
+                          style={mobileActionBtn()}
+                          disabled={!!pending[`rc-${key}`]}
+                          onClick={() => handleEnableRc(key, d.id, s.tmux!.session_name)}
+                          title="Enable Remote Control"
+                        >
+                          <Icons.refresh size={13} stroke={RT.amber} /> Enable RC
+                        </button>
+                      );
+                    })()}
+                  </>
+                )}
+                {isExternal && !isAdopted && (
+                  <span style={{ fontFamily: FONT_MONO, fontSize: 10.5, color: RT.textLow, fontStyle: 'italic' }}>
+                    not in tmux
+                  </span>
+                )}
                 <button
                   style={{ background: RT.panel, border: `1px solid ${RT.border}`, borderRadius: 7, width: 36, height: 36, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', marginLeft: 'auto' }}
                   disabled={!!pending[`stop-${key}`]}
@@ -132,6 +221,11 @@ export function AllSessions({ cards, onOpenDevice }: AllSessionsProps) {
                   <Icons.stop size={12} stroke={RT.red} />
                 </button>
               </div>
+              {rcErrors[key] && (
+                <div style={{ fontFamily: FONT_MONO, fontSize: 10.5, color: RT.red }}>
+                  {rcErrors[key]}
+                </div>
+              )}
             </div>
           );
         })}
@@ -175,7 +269,7 @@ function MoreMenu({ sessionName, sessionId, url, pending, onUnstick }: MoreMenuP
     setOpen(false);
   };
   const handleOpenUrl = () => {
-    if (url) window.open(url, '_blank');
+    if (url) window.open(url, '_blank', 'noopener,noreferrer');
     setOpen(false);
   };
   const handleUnstickClick = () => {
