@@ -813,7 +813,7 @@ def stop_session(name):
     subprocess.run(["tmux", "kill-session", "-t", name], capture_output=True)
 
 
-_SESSION_ID_RE = re.compile(r'^[0-9A-Za-z_-]{1,64}$')
+_SESSION_ID_RE = re.compile(r'^[0-9A-Za-z_-]{1,64}\Z')
 
 
 def _encode_project_dir(workdir):
@@ -841,7 +841,7 @@ def transcript_path(workdir, session_id):
     outside ~/.claude/projects. Callers that consume RC_SESSION_ID treat
     ValueError the same as "no native id" and fall back to the title scan.
     """
-    if not _SESSION_ID_RE.match(session_id):
+    if session_id is None or not _SESSION_ID_RE.match(session_id):
         raise ValueError(f"invalid session_id: {session_id!r}")
     encoded = _encode_project_dir(workdir)
     return os.path.expanduser(os.path.join("~/.claude/projects", encoded, session_id + ".jsonl"))

@@ -104,6 +104,14 @@ class TranscriptPathValidatesSessionIdTest(unittest.TestCase):
         # Should not raise.
         sessions.transcript_path("/home/user/project", "0d3b8b1a-1111-4a2b-9c3d-abcdef012345")
 
+    def test_rejects_trailing_newline(self):
+        with self.assertRaises(ValueError):
+            sessions.transcript_path("/home/user/project", "abc123\n")
+
+    def test_none_session_id_raises_value_error(self):
+        with self.assertRaises(ValueError):
+            sessions.transcript_path("/home/user/project", None)
+
 
 class GetTranscriptFallsBackWhenRcSessionIdIsInvalidTest(unittest.TestCase):
     """A malformed RC_SESSION_ID (stale/corrupt tmux env) must not raise —
