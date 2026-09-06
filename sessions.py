@@ -157,6 +157,7 @@ def list_rc_sessions():
     )
     sessions = []
     known_session_ids = set()
+    claude_rows_by_id = {row["session_id"]: row for row in agents.list_claude_sessions()}
     if r.returncode == 0:
         for line in r.stdout.strip().splitlines():
             parts = line.split("\t", 1)
@@ -181,9 +182,29 @@ def list_rc_sessions():
             if workdir:
                 s["workdir"] = workdir
                 s["project"] = os.path.basename(workdir.rstrip("/"))
+            claude_row = claude_rows_by_id.get(rc_session_id) if rc_session_id else None
+            if claude_row:
+                s["claude"] = {
+                    "status": claude_row.get("status"),
+                    "state": claude_row.get("state"),
+                    "waitingFor": claude_row.get("waiting_for"),
+                    "sessionId": claude_row.get("session_id"),
+                    "pid": claude_row.get("pid"),
+                }
+                # _derive_session_state (server.py) reads top-level
+                # "waiting_for" and "status" (busy), not the nested
+                # "claude" sub-object (aside from claude.state ==
+                # "blocked"), so mirror those two fields up so a
+                # launcher row can actually derive busy/needs_attention.
+                # Skip the status mirror once tmux already reports the
+                # session dead — "dead" must win over a stale "busy".
+                if claude_row.get("waiting_for"):
+                    s["waiting_for"] = claude_row.get("waiting_for")
+                if claude_row.get("status") == "busy" and s.get("status") != "dead":
+                    s["status"] = "busy"
             sessions.append(s)
 
-    for row in agents.list_claude_sessions():
+    for row in claude_rows_by_id.values():
         if row["session_id"] in known_session_ids:
             continue
         sessions.append({

@@ -5,6 +5,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import agents
 import compat
+import server
 
 
 class FakeRun:
@@ -269,6 +270,56 @@ class ListRcSessionsMergesExternalTest(unittest.TestCase):
         external_rows = [s for s in result if s.get("kind") == "external"]
         self.assertEqual(len(external_rows), 1)
         self.assertEqual(external_rows[0]["claude"]["state"], "blocked")
+
+    def test_launcher_row_with_busy_claude_row_derives_busy(self):
+        class FakeRun:
+            def __call__(self, cmd, **kw):
+                class R:
+                    returncode = 0
+                    stderr = ""
+                    stdout = "rc-portugal\n" if "list-sessions" in cmd else ""
+                return R()
+        self.sessions.subprocess.run = FakeRun()
+        self.sessions.get_session_env = lambda name, var: {
+            "RC_MODE": "c", "RC_WORKDIR": "/home/user/proj",
+            "RC_SESSION_ID": "known-uuid-1",
+        }.get(var)
+        agents.list_claude_sessions = lambda: [
+            {"session_id": "known-uuid-1", "name": "portugal", "cwd": "/home/user/proj",
+             "kind": "interactive", "status": "busy", "started_at": 1, "pid": 1,
+             "waiting_for": None, "state": "running"},
+        ]
+
+        result = self.sessions.list_rc_sessions()
+
+        launcher_row = next(s for s in result if s["name"] == "rc-portugal")
+        self.assertEqual(launcher_row["claude"]["status"], "busy")
+        self.assertEqual(server._derive_session_state(launcher_row), "busy")
+
+    def test_launcher_row_with_waiting_for_derives_needs_attention(self):
+        class FakeRun:
+            def __call__(self, cmd, **kw):
+                class R:
+                    returncode = 0
+                    stderr = ""
+                    stdout = "rc-portugal\n" if "list-sessions" in cmd else ""
+                return R()
+        self.sessions.subprocess.run = FakeRun()
+        self.sessions.get_session_env = lambda name, var: {
+            "RC_MODE": "c", "RC_WORKDIR": "/home/user/proj",
+            "RC_SESSION_ID": "known-uuid-1",
+        }.get(var)
+        agents.list_claude_sessions = lambda: [
+            {"session_id": "known-uuid-1", "name": "portugal", "cwd": "/home/user/proj",
+             "kind": "interactive", "status": "idle", "started_at": 1, "pid": 1,
+             "waiting_for": "permission_prompt", "state": "waiting"},
+        ]
+
+        result = self.sessions.list_rc_sessions()
+
+        launcher_row = next(s for s in result if s["name"] == "rc-portugal")
+        self.assertEqual(launcher_row["claude"]["waitingFor"], "permission_prompt")
+        self.assertEqual(server._derive_session_state(launcher_row), "needs_attention")
 
 
 if __name__ == "__main__":
