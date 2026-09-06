@@ -135,6 +135,57 @@ class UpdateConfirmedTest(unittest.TestCase):
         self.assertFalse(server._update_confirmed("", ""))
 
 
+class GitUpdatePhaseTest(unittest.TestCase):
+    """The git fetch/rev-parse/log/merge sequence for /update, extracted so
+    it can be exercised without a live socket or a real git repo."""
+
+    def test_hung_fetch_times_out_cleanly(self):
+        import subprocess as sp
+
+        def fake_run(cmd, **kw):
+            raise sp.TimeoutExpired(cmd=cmd, timeout=kw.get("timeout"))
+
+        status, result, merged_sha = server._do_git_update_phase(
+            "/some/app-dir", "confirm-sha", run=fake_run)
+
+        self.assertEqual(status, 500)
+        self.assertEqual(result, {"ok": False, "error": "git timed out"})
+        self.assertIsNone(merged_sha)
+
+    def test_missing_git_binary_returns_error_not_exception(self):
+        def fake_run(cmd, **kw):
+            raise OSError("git not found")
+
+        status, result, merged_sha = server._do_git_update_phase(
+            "/some/app-dir", "confirm-sha", run=fake_run)
+
+        self.assertEqual(status, 500)
+        self.assertEqual(result, {"ok": False, "error": "git timed out"})
+
+    def test_successful_merge_returns_ok(self):
+        class R:
+            def __init__(self, returncode=0, stdout="", stderr=""):
+                self.returncode = returncode
+                self.stdout = stdout
+                self.stderr = stderr
+
+        def fake_run(cmd, **kw):
+            if "fetch" in cmd:
+                return R()
+            if "rev-parse" in cmd:
+                return R(stdout="deadbeef\n")
+            if "merge" in cmd:
+                return R()
+            return R()
+
+        status, result, merged_sha = server._do_git_update_phase(
+            "/some/app-dir", "deadbeef", run=fake_run)
+
+        self.assertEqual(status, 200)
+        self.assertTrue(result["ok"])
+        self.assertEqual(merged_sha, "deadbeef")
+
+
 class PickRestartCommandTest(unittest.TestCase):
     def test_prefers_active_system_unit(self):
         cmd = server._pick_restart_command(True, True, True, 501)

@@ -445,6 +445,47 @@ def _update_confirmed(confirm, remote_sha):
     return bool(remote_sha) and confirm == remote_sha
 
 
+def _do_git_update_phase(app_dir, confirm, run=subprocess.run):
+    """Run the git fetch/rev-parse/(log)/merge sequence for POST /update.
+
+    Extracted so a hung or missing git binary can't drop the connection: a
+    subprocess.TimeoutExpired (a git call outliving its timeout) or OSError
+    (e.g. git not installed) is caught here and turned into a normal error
+    response instead of propagating out of the request handler.
+
+    Returns (http_status, response_dict, merged_sha). merged_sha is the
+    commit that was ff-only merged, or None if nothing was merged (error,
+    or confirmation still needed)."""
+    try:
+        fetch = run(["git", "-C", app_dir, "fetch", "origin", "main"],
+                    capture_output=True, text=True, timeout=30)
+        if fetch.returncode != 0:
+            return 500, {"ok": False, "message": f"git fetch failed: {fetch.stderr.strip()}"}, None
+
+        head = run(["git", "-C", app_dir, "rev-parse", "origin/main"],
+                   capture_output=True, text=True, timeout=10)
+        if head.returncode != 0:
+            return 500, {"ok": False, "message": f"git rev-parse failed: {head.stderr.strip()}"}, None
+        remote_sha = head.stdout.strip()
+
+        if not _update_confirmed(confirm, remote_sha):
+            log = run(["git", "-C", app_dir, "log", "--oneline", f"HEAD..{remote_sha}"],
+                      capture_output=True, text=True, timeout=10)
+            pending = log.stdout.strip().splitlines() if log.returncode == 0 else []
+            return 409, {"ok": False,
+                         "message": "Confirm the exact commit to update to (see remote_sha / pending_commits).",
+                         "remote_sha": remote_sha, "pending_commits": pending}, None
+
+        merge = run(["git", "-C", app_dir, "merge", "--ff-only", remote_sha],
+                    capture_output=True, text=True, timeout=30)
+        if merge.returncode != 0:
+            return 500, {"ok": False, "message": f"git merge failed: {merge.stderr.strip()}"}, None
+
+        return 200, {"ok": True}, remote_sha
+    except (subprocess.TimeoutExpired, OSError):
+        return 500, {"ok": False, "error": "git timed out"}, None
+
+
 def _pick_restart_command(system_unit_active, user_unit_active, is_macos, uid):
     """Pick the command to restart the launcher, in priority order: an
     active system unit, then a user unit, then macOS launchd. Returns None
@@ -1264,40 +1305,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not os.path.isdir(git_dir):
                 self._json({"ok": False, "message": "Not a git install. Re-run the install script."}, 400)
                 return
-            fetch = subprocess.run(
-                ["git", "-C", app_dir, "fetch", "origin", "main"],
-                capture_output=True, text=True, timeout=30,
-            )
-            if fetch.returncode != 0:
-                self._json({"ok": False, "message": f"git fetch failed: {fetch.stderr.strip()}"}, 500)
-                return
-            head = subprocess.run(
-                ["git", "-C", app_dir, "rev-parse", "origin/main"],
-                capture_output=True, text=True, timeout=10,
-            )
-            if head.returncode != 0:
-                self._json({"ok": False, "message": f"git rev-parse failed: {head.stderr.strip()}"}, 500)
-                return
-            remote_sha = head.stdout.strip()
             body = self._read_body()
-            if not _update_confirmed(body.get("confirm", ""), remote_sha):
-                log = subprocess.run(
-                    ["git", "-C", app_dir, "log", "--oneline", f"HEAD..{remote_sha}"],
-                    capture_output=True, text=True, timeout=10,
-                )
-                pending = log.stdout.strip().splitlines() if log.returncode == 0 else []
-                self._json({"ok": False,
-                             "message": "Confirm the exact commit to update to (see remote_sha / pending_commits).",
-                             "remote_sha": remote_sha, "pending_commits": pending}, 409)
+            status, result, merged_sha = _do_git_update_phase(app_dir, body.get("confirm", ""))
+            if not result.get("ok"):
+                self._json(result, status)
                 return
             old_ver = VERSION
-            merge = subprocess.run(
-                ["git", "-C", app_dir, "merge", "--ff-only", remote_sha],
-                capture_output=True, text=True, timeout=30,
-            )
-            if merge.returncode != 0:
-                self._json({"ok": False, "message": f"git merge failed: {merge.stderr.strip()}"}, 500)
-                return
             new_ver = old_ver
             try:
                 cfg_path = os.path.join(app_dir, "config.py")
