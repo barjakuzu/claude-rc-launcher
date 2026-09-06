@@ -29,5 +29,25 @@ class EnrichNextRunTest(unittest.TestCase):
         self.assertNotIn("next_run", original)
 
 
+class ValidSessionNameTest(unittest.TestCase):
+    def test_accepts_a_normal_rc_session_name(self):
+        self.assertTrue(server._valid_session_name("rc-portugal"))
+
+    def test_rejects_missing_prefix(self):
+        self.assertFalse(server._valid_session_name("portugal"))
+
+    def test_rejects_empty(self):
+        self.assertFalse(server._valid_session_name(""))
+
+    def test_rejects_path_traversal(self):
+        self.assertFalse(server._valid_session_name("rc-../../etc/passwd"))
+
+    def test_rejects_embedded_slash(self):
+        self.assertFalse(server._valid_session_name("rc-foo/bar"))
+
+    def test_rejects_dotdot_even_with_prefix(self):
+        self.assertFalse(server._valid_session_name("rc-..secret"))
+
+
 if __name__ == "__main__":
     unittest.main()

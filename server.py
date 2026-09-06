@@ -415,6 +415,13 @@ _CONTENT_TYPES = {
 }
 
 
+def _valid_session_name(name):
+    """True if `name` is safe to use as a tmux session identifier: non-empty,
+    no path traversal or separators, and carries our 'rc-' prefix so a
+    logged-in browser can only reach sessions the launcher itself created."""
+    return bool(name) and ".." not in name and "/" not in name and name.startswith(SESSION_PREFIX)
+
+
 class Handler(http.server.BaseHTTPRequestHandler):
     def _serve_static(self, path):
         """Serve a file from the static/ directory."""
@@ -602,8 +609,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             # Live terminal WebSocket (see ws.py). Takes over the socket.
             clean = path.split('?')[0]
             name = clean[len("/sessions/"):-len("/ws")]
-            if not name or ".." in name or "/" in name:
-                self.send_error(404)
+            if not _valid_session_name(name):
+                self._json({"ok": False, "message": "Invalid session name"}, 400)
                 return
             if not session_exists(name):
                 self.send_error(404)
@@ -616,8 +623,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         elif path.startswith("/sessions/") and path.endswith("/transcript"):
             name = path[len("/sessions/"):-len("/transcript")]
-            if not name or ".." in name or "/" in name:
-                self.send_error(404)
+            if not _valid_session_name(name):
+                self._json({"ok": False, "message": "Invalid session name"}, 400)
                 return
             if not session_exists(name):
                 self._json({"ok": False, "message": "Session not found"}, 404)
@@ -631,8 +638,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif path.split('?')[0].startswith("/sessions/") and path.split('?')[0].endswith("/preview"):
             clean = path.split('?')[0]
             name = clean[len("/sessions/"):-len("/preview")]
-            if not name or ".." in name:
-                self.send_error(404)
+            if not _valid_session_name(name):
+                self._json({"ok": False, "message": "Invalid session name"}, 400)
                 return
             # Viewer size negotiation: each poll reports its terminal size;
             # the window is sized to the min across live viewers.
@@ -1007,8 +1014,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             # A viewer closed its preview: drop it from the registry and
             # re-apply the effective size (restores 200×50 when none remain).
             name = path[len("/sessions/"):-len("/preview-bye")]
-            if not name or ".." in name or "/" in name:
-                self.send_error(404)
+            if not _valid_session_name(name):
+                self._json({"ok": False, "message": "Invalid session name"}, 400)
                 return
             body = self._read_body()
             viewer = str(body.get("viewer", ""))
@@ -1020,8 +1027,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             # Resize the tmux window to match the browser terminal so the
             # TUI renders at the viewer's real cols/rows (no wrap artifacts).
             name = path[len("/sessions/"):-len("/resize")]
-            if not name or ".." in name or "/" in name:
-                self.send_error(404)
+            if not _valid_session_name(name):
+                self._json({"ok": False, "message": "Invalid session name"}, 400)
                 return
             body = self._read_body()
             try:
@@ -1042,8 +1049,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         elif path.startswith("/sessions/") and path.endswith("/keys"):
             name = path[len("/sessions/"):-len("/keys")]
-            if not name or ".." in name or "/" in name:
-                self.send_error(404)
+            if not _valid_session_name(name):
+                self._json({"ok": False, "message": "Invalid session name"}, 400)
                 return
             body = self._read_body()
             keys = body.get("keys")
