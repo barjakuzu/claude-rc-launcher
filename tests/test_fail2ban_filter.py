@@ -65,6 +65,14 @@ class TestFail2banFilter(unittest.TestCase):
         sample = "INFO server started on port 8080"
         self.assertIsNone(self.regex.match(sample))
 
+    def test_rejects_empty_user(self):
+        sample = "AUTH FAIL ip=203.0.113.9 user="
+        self.assertIsNone(self.regex.match(sample))
+
+    def test_rejects_trailing_junk_after_user(self):
+        sample = "AUTH FAIL ip=203.0.113.9 user=admin; rm -rf /"
+        self.assertIsNone(self.regex.match(sample))
+
 
 if __name__ == "__main__":
     unittest.main()

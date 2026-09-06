@@ -5,28 +5,12 @@ on:
     branches: [main]
 
 jobs:
+  # Reuses ci.yml's `test` job (Python tests, frontend build, Gitleaks, and
+  # the personal-identifier grep) so main gets the exact same gate as PRs.
   checks:
-    runs-on: ubuntu-latest
     if: "!contains(github.event.head_commit.message, '[skip ci]')"
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.9"
-
-      - name: Python tests
-        run: python3 -m unittest discover tests
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-
-      - name: Frontend build
-        run: |
-          cd frontend
-          npm ci
-          npm run build
+    uses: ./.github/workflows/ci.yml
+    secrets: inherit
 
   release:
     needs: checks

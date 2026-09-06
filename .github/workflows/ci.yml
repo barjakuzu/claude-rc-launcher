@@ -4,6 +4,7 @@ on:
   pull_request:
   push:
     branches-ignore: [main]
+  workflow_call:
 
 jobs:
   test:
@@ -30,6 +31,8 @@ jobs:
           npm ci
           npm run build
 
+      # Gitleaks is free for personal repos; GITLEAKS_LICENSE is only
+      # required for org-owned repos, which this is not.
       - name: Gitleaks
         uses: gitleaks/gitleaks-action@v2
         env:
@@ -38,9 +41,9 @@ jobs:
       - name: No personal identifiers outside docs/private
         run: |
           set -e
-          if grep -rniE 'barjazz|tail82c219|tbarjadze|hetzner|tba-lin|100\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}|/root/' \
-              --exclude-dir=.git --exclude-dir=node_modules --exclude-dir=docs/private \
-              --exclude-dir=dist --exclude=docker-compose.yml -- .; then
+          if git ls-files -z \
+              | grep -zvE '^(\.github/|docs/superpowers/|docs/private/|static/dist/|frontend/node_modules/|docker-compose\.yml$)' \
+              | xargs -0 --no-run-if-empty grep -nEi 'barjazz|tail82c219|tbarjadze|hetzner|tba-lin|100\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}|/root/'; then
             echo "Found personal identifiers outside docs/private/ - see matches above."
             exit 1
           fi
