@@ -149,7 +149,10 @@ class GitUpdatePhaseTest(unittest.TestCase):
             "/some/app-dir", "confirm-sha", run=fake_run)
 
         self.assertEqual(status, 500)
-        self.assertEqual(result, {"ok": False, "error": "git timed out"})
+        self.assertEqual(result["ok"], False)
+        self.assertIn("message", result)
+        self.assertNotIn("error", result)
+        self.assertTrue(result["message"].startswith("git failed:"))
         self.assertIsNone(merged_sha)
 
     def test_missing_git_binary_returns_error_not_exception(self):
@@ -160,7 +163,9 @@ class GitUpdatePhaseTest(unittest.TestCase):
             "/some/app-dir", "confirm-sha", run=fake_run)
 
         self.assertEqual(status, 500)
-        self.assertEqual(result, {"ok": False, "error": "git timed out"})
+        self.assertEqual(result["ok"], False)
+        self.assertIn("message", result)
+        self.assertIn("git not found", result["message"])
 
     def test_successful_merge_returns_ok(self):
         class R:

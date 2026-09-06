@@ -482,8 +482,8 @@ def _do_git_update_phase(app_dir, confirm, run=subprocess.run):
             return 500, {"ok": False, "message": f"git merge failed: {merge.stderr.strip()}"}, None
 
         return 200, {"ok": True}, remote_sha
-    except (subprocess.TimeoutExpired, OSError):
-        return 500, {"ok": False, "error": "git timed out"}, None
+    except (subprocess.TimeoutExpired, OSError) as e:
+        return 500, {"ok": False, "message": f"git failed: {e}"}, None
 
 
 def _pick_restart_command(system_unit_active, user_unit_active, is_macos, uid):
