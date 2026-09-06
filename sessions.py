@@ -989,28 +989,15 @@ def resume_session(session_name, session_title, project_dir, mode="c"):
     if not session_dir or not os.path.isdir(session_dir):
         session_dir = os.path.expanduser("~")
 
-    claude_flags = RC_FLAGS[mode]
-    # Pass session UUID directly to --resume to skip the picker
-    claude_args = claude_flags.split() + ["--resume", session_name]
-
-    env_flags = [
-        "-e", f"RC_MODE={mode}",
-        "-e", f"RC_WORKDIR={session_dir}",
-        "-e", "DISPLAY=:1",
-        "-e", "TERM=xterm-256color",
-    ]
-    if os.geteuid() == 0:
-        env_flags.extend(["-e", "IS_SANDBOX=1"])
-
-    claude_cmd = " ".join([f"CLAUDECODE= {CLAUDE_BIN}"] + claude_args)
-    wrapper = f'{claude_cmd} 2>&1 || {{ echo ""; sleep 30; }}'
-    cmd = [
-        "tmux", "new-session", "-d", "-s", tmux_name,
-        "-c", session_dir,
-        "-x", "200", "-y", "50",
-        *env_flags,
-        "bash", "-c", wrapper,
-    ]
+    # Pass session UUID directly to --resume to skip the picker. The UUID
+    # being resumed is already known (it's session_name), so no new one is
+    # generated - session_id=session_name reuses it, letting a claude that
+    # supports --session-id/-n/--remote-control establish identity natively
+    # here too, same as /start.
+    cmd = build_tmux_command(
+        tmux_name, session_dir, mode, model=None, sandbox=(os.geteuid() == 0),
+        resume=True, resume_id=session_name, session_id=session_name,
+    )
 
     print(f"  Resume: starting session {tmux_name} (resume={session_name[:8]}, dir={session_dir})")
     result = subprocess.run(cmd, capture_output=True, text=True)

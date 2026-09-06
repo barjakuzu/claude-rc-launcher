@@ -298,5 +298,14 @@ class VersionResponseTest(unittest.TestCase):
         self.assertEqual(body["caps"], fake_caps)
 
 
+class NewSessionIdTest(unittest.TestCase):
+    def test_returns_a_uuid_string(self):
+        import uuid
+        sid = server._new_session_id()
+        self.assertIsInstance(sid, str)
+        # Round-trips through uuid.UUID without raising -> it's a valid UUID.
+        uuid.UUID(sid)
+
+
 if __name__ == "__main__":
     unittest.main()

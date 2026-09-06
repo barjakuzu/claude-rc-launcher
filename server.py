@@ -16,6 +16,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import uuid
 from http.cookies import SimpleCookie
 from urllib.parse import urlparse, parse_qs
 
@@ -437,6 +438,13 @@ def _valid_session_name(name):
     no path traversal or separators, and carries our 'rc-' prefix so a
     logged-in browser can only reach sessions the launcher itself created."""
     return bool(name) and ".." not in name and "/" not in name and name.startswith(SESSION_PREFIX)
+
+
+def _new_session_id():
+    """One session id per /start call, passed to build_tmux_command so a
+    session that supports --session-id gets a known UUID from birth
+    instead of one discovered later by scanning JSONL titles."""
+    return str(uuid.uuid4())
 
 
 def _update_confirmed(confirm, remote_sha):
@@ -1122,8 +1130,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._json({"ok": False, "message": cap_msg}, 429)
                 return
 
+            session_id = _new_session_id()
             cmd = build_tmux_command(name, session_dir, mode, model=model,
-                                     sandbox=sandbox)
+                                     sandbox=sandbox, session_id=session_id)
             print(f"  Starting session: {name} (mode={mode}, model={model}, dir={session_dir})")
             print(f"  CMD: {' '.join(cmd)}")
             result = subprocess.run(cmd, capture_output=True, text=True)
