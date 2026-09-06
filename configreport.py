@@ -10,7 +10,6 @@ import os
 import re
 import subprocess
 import time
-from typing import Optional
 
 import compat
 
@@ -19,7 +18,7 @@ def _run_ok(run, cmd, timeout=10):
     """Returns (ok, stdout_or_None). Never raises."""
     try:
         r = run(cmd, capture_output=True, text=True, timeout=timeout)
-    except (OSError, subprocess.TimeoutExpired):
+    except Exception:
         return False, None
     if r.returncode != 0:
         return False, None
@@ -28,6 +27,18 @@ def _run_ok(run, cmd, timeout=10):
 
 def _git_cmd(cfg_dir, *args):
     return ["git", "-C", cfg_dir] + list(args)
+
+
+def _unquote_git_path(name):
+    """git status --porcelain quotes paths containing special/non-ASCII
+    chars in double quotes with C-style backslash escapes; strip that."""
+    if len(name) >= 2 and name[0] == '"' and name[-1] == '"':
+        inner = name[1:-1]
+        try:
+            return inner.encode("latin-1").decode("unicode_escape").encode("latin-1").decode("utf-8")
+        except (UnicodeDecodeError, UnicodeEncodeError):
+            return inner
+    return name
 
 
 def _dir_names(path):
@@ -72,7 +83,7 @@ def _git_state(cfg_dir, run, errors):
             name = line[3:].strip()
             if " -> " in name:
                 name = name.split(" -> ", 1)[1]
-            dirty_files.append(name)
+            dirty_files.append(_unquote_git_path(name))
         state["dirty_files"] = dirty_files
         # A dirty config/settings.json alone is install-ordering, not drift
         # (plugin installs rewrite it) — only flag `dirty` when something
@@ -119,7 +130,7 @@ def _broken_link_targets_external(cfg_dir, link_path):
     return (target + os.sep).startswith(external_prefix) or target == os.path.join(cfg_dir, "external")
 
 
-def _skills_report(cfg_dir, home, errors):
+def _skills_report(cfg_dir, errors):
     skills_dir = os.path.join(cfg_dir, "skills")
     names = _dir_names(skills_dir)
     device_only = set(_device_only_names_from_gitignore(cfg_dir, errors))
@@ -131,7 +142,13 @@ def _skills_report(cfg_dir, home, errors):
             if not os.path.exists(entry):
                 broken_links.append(entry)
         else:
-            for root, _dirs, files in os.walk(entry, followlinks=True):
+            # followlinks=False: a self-referential/cyclic symlink inside a
+            # skill dir must never cause an infinite walk. os.walk never
+            # reports a symlinked dir as a "dir" to descend into when
+            # followlinks is False, but a broken symlink is still surfaced
+            # as a file-like entry in `files` (os.path.isdir on a broken
+            # link is always False), so broken-link detection is unaffected.
+            for root, _dirs, files in os.walk(entry, followlinks=False):
                 for f in files:
                     full = os.path.join(root, f)
                     if os.path.islink(full) and not os.path.exists(full):
@@ -160,14 +177,17 @@ def _plugins_report(cfg_dir, run, errors):
         except OSError:
             errors.append("plugins.txt: read failed")
     installed = []
+    plugin_entry_re = re.compile(r"^[\w.-]+@[\w.-]+$")
     ok, out = _run_ok(run, ["claude", "plugin", "list"])
     if ok:
         for line in out.splitlines():
             line = line.strip()
-            if "@" not in line:
+            if not line:
                 continue
             entry = line.split()[0]
-            marketplace = entry.split("@", 1)[1] if "@" in entry else ""
+            if not plugin_entry_re.match(entry):
+                continue
+            marketplace = entry.split("@", 1)[1]
             if marketplace == "skills-dir":
                 continue  # synthetic marketplace for ~/.claude/skills entries; always undeclared by design
             installed.append(entry)
@@ -196,7 +216,7 @@ def _marketplaces(cfg_dir, errors):
 def _settings_report(cfg_dir, home, errors):
     path = os.path.join(cfg_dir, "config", "settings.json")
     result = {"hooks_present": False, "remote_control_at_startup": None,
-              "symlinked": False, "sha256": None}
+              "settings_symlinked": False, "skills_symlinked": False, "sha256": None}
     settings_data = {}
     if os.path.isfile(path):
         try:
@@ -208,11 +228,12 @@ def _settings_report(cfg_dir, home, errors):
             result["remote_control_at_startup"] = settings_data.get("remoteControlAtStartup")
         except (OSError, ValueError) as e:
             errors.append(f"settings.json: {e}")
-    # "symlinked" reflects whether this device's ~/.claude/skills is a live
-    # symlink into claude-config/skills (a proper linked install) rather
-    # than a copy — settings.json itself is never symlinked in practice.
-    live_skills = os.path.join(home, ".claude", "skills")
-    result["symlinked"] = os.path.islink(live_skills)
+    # settings_symlinked: is the live ~/.claude/settings.json itself a
+    # symlink (into claude-config/config/settings.json).
+    # skills_symlinked: is ~/.claude/skills a symlink into
+    # claude-config/skills (a proper linked install rather than a copy).
+    result["settings_symlinked"] = os.path.islink(os.path.join(home, ".claude", "settings.json"))
+    result["skills_symlinked"] = os.path.islink(os.path.join(home, ".claude", "skills"))
     return result, settings_data
 
 
@@ -239,7 +260,7 @@ def collect_config_report(home=None, run=subprocess.run):
     return {
         "claude_version": claude_version,
         "claude_config": _git_state(cfg_dir, run, errors),
-        "skills": _skills_report(cfg_dir, home, errors),
+        "skills": _skills_report(cfg_dir, errors),
         "agents": _file_stems(os.path.join(cfg_dir, "agents")),
         "rules": {
             "shared": _file_stems(os.path.join(cfg_dir, "rules")),

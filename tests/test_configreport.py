@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -15,8 +16,21 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import configreport
 
 
-def _run(cmd, **kw):
-    return subprocess.run(cmd, capture_output=True, text=True, timeout=kw.get("timeout", 10))
+class _FakePluginResult:
+    def __init__(self, returncode, stdout, stderr=""):
+        self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
+
+
+def _stub_run(cmd, **kw):
+    """Default injected `run`: real git (so git-state tests exercise real
+    plumbing) but a canned answer for `claude plugin list` and a hard
+    failure on anything else, so the suite never shells out to a real
+    `claude` binary and never needs one on PATH."""
+    if cmd and cmd[0] == "git":
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=kw.get("timeout", 10))
+    if cmd[:2] == ["claude", "plugin"]:
+        return _FakePluginResult(0, "watch@official  v1.0\n")
+    raise AssertionError("unexpected command in test stub: %r" % (cmd,))
 
 
 def _git(cwd, *args):
@@ -81,20 +95,18 @@ class CollectConfigReportTest(unittest.TestCase):
         _git(self.cfg, "commit", "-q", "-m", "init")
         os.makedirs(os.path.join(self.home, ".claude"), exist_ok=True)
         os.symlink(os.path.join(self.cfg, "skills"), os.path.join(self.home, ".claude", "skills"))
+        os.symlink(os.path.join(self.cfg, "config", "settings.json"),
+                    os.path.join(self.home, ".claude", "settings.json"))
 
     def _fake_run_with_plugins(self, plugin_lines):
         def fake_run(cmd, **kw):
-            class R:
-                pass
-            r = R()
             if cmd[:2] == ["claude", "plugin"]:
-                r.returncode, r.stdout, r.stderr = 0, "\n".join(plugin_lines) + "\n", ""
-                return r
-            return _run(cmd, **kw)
+                return _FakePluginResult(0, "\n".join(plugin_lines) + "\n")
+            return _stub_run(cmd, **kw)
         return fake_run
 
     def test_reports_git_state(self):
-        report = configreport.collect_config_report(home=self.home, run=_run)
+        report = configreport.collect_config_report(home=self.home, run=_stub_run)
         self.assertTrue(report["claude_config"]["head"])
         self.assertEqual(len(report["claude_config"]["short_head"]), 7)
         self.assertFalse(report["claude_config"]["dirty"])
@@ -103,19 +115,19 @@ class CollectConfigReportTest(unittest.TestCase):
     def test_dirty_true_when_non_settings_file_dirty(self):
         with open(os.path.join(self.cfg, "agents", "claude.md"), "a") as f:
             f.write("more\n")
-        report = configreport.collect_config_report(home=self.home, run=_run)
+        report = configreport.collect_config_report(home=self.home, run=_stub_run)
         self.assertTrue(report["claude_config"]["dirty"])
         self.assertIn("agents/claude.md", report["claude_config"]["dirty_files"])
 
     def test_dirty_false_when_only_settings_json_dirty(self):
         with open(os.path.join(self.cfg, "config", "settings.json"), "a") as f:
             f.write("\n")
-        report = configreport.collect_config_report(home=self.home, run=_run)
+        report = configreport.collect_config_report(home=self.home, run=_stub_run)
         self.assertFalse(report["claude_config"]["dirty"])
         self.assertIn("config/settings.json", report["claude_config"]["dirty_files"])
 
     def test_deps_missing_vs_dangling_split(self):
-        report = configreport.collect_config_report(home=self.home, run=_run)
+        report = configreport.collect_config_report(home=self.home, run=_stub_run)
         self.assertIn("uninstalled-dep", report["skills"]["deps_missing"])
         self.assertIn("truly-broken", report["skills"]["dangling"])
         self.assertNotIn("uninstalled-dep", report["skills"]["dangling"])
@@ -124,13 +136,13 @@ class CollectConfigReportTest(unittest.TestCase):
         self.assertNotIn("watch", report["skills"]["dangling"])
 
     def test_device_only_skill_from_gitignore_never_reads_contents(self):
-        report = configreport.collect_config_report(home=self.home, run=_run)
+        report = configreport.collect_config_report(home=self.home, run=_stub_run)
         self.assertIn("google-workspace", report["skills"]["device_only"])
         dumped = json.dumps(report)
         self.assertNotIn("super-secret-token-do-not-read", dumped)
 
     def test_agents_and_rules_empty_local_not_error(self):
-        report = configreport.collect_config_report(home=self.home, run=_run)
+        report = configreport.collect_config_report(home=self.home, run=_stub_run)
         self.assertIn("claude", report["agents"])
         self.assertEqual(report["rules"]["shared"], [])
         self.assertEqual(report["rules"]["local"], [])
@@ -150,10 +162,11 @@ class CollectConfigReportTest(unittest.TestCase):
         self.assertNotIn("google-workspace@skills-dir", report["plugins"]["extra"])
 
     def test_settings_hooks_symlink_and_sha256(self):
-        report = configreport.collect_config_report(home=self.home, run=_run)
+        report = configreport.collect_config_report(home=self.home, run=_stub_run)
         self.assertTrue(report["settings"]["hooks_present"])
         self.assertTrue(report["settings"]["remote_control_at_startup"])
-        self.assertTrue(report["settings"]["symlinked"])
+        self.assertTrue(report["settings"]["settings_symlinked"])
+        self.assertTrue(report["settings"]["skills_symlinked"])
         expected = hashlib.sha256(
             open(os.path.join(self.cfg, "config", "settings.json"), "rb").read()
         ).hexdigest()
@@ -163,7 +176,7 @@ class CollectConfigReportTest(unittest.TestCase):
         old = os.environ.get("ANTHROPIC_MODEL")
         os.environ["ANTHROPIC_MODEL"] = "claude-sonnet-env"
         try:
-            report = configreport.collect_config_report(home=self.home, run=_run)
+            report = configreport.collect_config_report(home=self.home, run=_stub_run)
             self.assertEqual(report["effective_model"], "claude-sonnet-env")
         finally:
             if old is None:
@@ -173,23 +186,32 @@ class CollectConfigReportTest(unittest.TestCase):
 
     def test_effective_model_falls_back_to_settings_json(self):
         os.environ.pop("ANTHROPIC_MODEL", None)
-        report = configreport.collect_config_report(home=self.home, run=_run)
+        report = configreport.collect_config_report(home=self.home, run=_stub_run)
         self.assertEqual(report["effective_model"], "claude-opus")
 
     def test_claude_local_md_detected(self):
         with open(os.path.join(self.home, ".claude", "CLAUDE.local.md"), "w") as f:
             f.write("local notes\n")
-        report = configreport.collect_config_report(home=self.home, run=_run)
+        report = configreport.collect_config_report(home=self.home, run=_stub_run)
         self.assertTrue(report["claude_local_md"])
 
     def test_never_raises_on_missing_repo(self):
         empty_home = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, empty_home, ignore_errors=True)
-        report = configreport.collect_config_report(home=empty_home, run=_run)
+        report = configreport.collect_config_report(home=empty_home, run=_stub_run)
         self.assertIsNone(report["claude_config"]["head"])
         self.assertEqual(report["skills"]["names"], [])
         self.assertGreater(len(report["errors"]), 0)
 
     def test_generated_at_is_int_epoch(self):
-        report = configreport.collect_config_report(home=self.home, run=_run)
+        report = configreport.collect_config_report(home=self.home, run=_stub_run)
         self.assertIsInstance(report["generated_at"], int)
+
+    def test_self_referential_symlink_in_skill_returns_quickly(self):
+        loop_dir = os.path.join(self.cfg, "skills", "loopy")
+        os.makedirs(loop_dir)
+        os.symlink(loop_dir, os.path.join(loop_dir, "self"))
+        start = time.monotonic()
+        report = configreport.collect_config_report(home=self.home, run=_stub_run)
+        self.assertLess(time.monotonic() - start, 5)
+        self.assertIn("loopy", report["skills"]["names"])
