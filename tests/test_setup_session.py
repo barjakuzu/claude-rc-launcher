@@ -93,6 +93,43 @@ class SetupSessionRenameTest(unittest.TestCase):
         self.assertFalse(sessions.is_shell_session("rc-portugal"))
 
 
+class SetupSessionNativeIdentitySkipsRcDanceTest(unittest.TestCase):
+    """When build_tmux_command already used --session-id/-n/--remote-control
+    (signalled by RC_SESSION_ID being set on the session), setup_session
+    must return immediately after the prompt/init wait: no /remote-control
+    keystrokes, no /rename keystrokes, no polling loop."""
+
+    def setUp(self):
+        self.fake = FakeRun()
+        self._patched = {
+            "subprocess": sessions.subprocess.run,
+            "sleep": sessions.time.sleep,
+            "exists": sessions.session_exists,
+            "status": sessions.get_session_status,
+            "env": sessions.get_session_env,
+        }
+        sessions.subprocess.run = self.fake
+        sessions.time.sleep = lambda *_: None
+        sessions.session_exists = lambda name: True
+        sessions.get_session_status = lambda name: "running"
+        sessions.get_session_env = lambda name, var: (
+            "0d3b8b1a-1111-4a2b-9c3d-abcdef012345" if var == "RC_SESSION_ID" else None
+        )
+
+    def tearDown(self):
+        sessions.subprocess.run = self._patched["subprocess"]
+        sessions.time.sleep = self._patched["sleep"]
+        sessions.session_exists = self._patched["exists"]
+        sessions.get_session_status = self._patched["status"]
+        sessions.get_session_env = self._patched["env"]
+
+    def test_no_remote_control_or_rename_keystrokes_sent(self):
+        sessions.setup_session("rc-portugal", "portugal", "c")
+        sent = self.fake.sent_text()
+        self.assertNotIn("/remote-control", sent)
+        self.assertFalse(any(s.startswith("/rename") for s in sent))
+
+
 class BuildTmuxCommandNativeFlagsTest(unittest.TestCase):
     """build_tmux_command adds --session-id/-n/--remote-control/
     --permission-mode only when compat.CAPS says the installed claude

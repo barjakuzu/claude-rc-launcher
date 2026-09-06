@@ -511,6 +511,15 @@ def setup_session(session_name, display_name, mode):
     print(f"  {session_name}: prompt found, waiting for CLI to fully initialize...")
     time.sleep(10)
 
+    # If build_tmux_command already used --session-id/-n/--remote-control,
+    # RC_SESSION_ID is set on the session from creation: identity and RC
+    # activation are already done natively, so there's nothing left for the
+    # keystroke dance below to accomplish. Sending /remote-control again
+    # would just toggle it off.
+    if get_session_env(session_name, "RC_SESSION_ID"):
+        print(f"  {session_name}: native session identity in use, skipping /remote-control and /rename")
+        return
+
     # Check if remote-control is already active (status bar shows "Remote Control active")
     try:
         r = subprocess.run(
