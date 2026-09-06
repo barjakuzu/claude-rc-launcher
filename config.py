@@ -34,8 +34,8 @@ RC_FLAGS = {
 def resolve_claude_mode(mode):
     """Coerce a mode to one that actually runs Claude Code.
 
-    The scheduler and the schedule wizard always need a Claude session; a
-    shell (or an unknown mode) would leave them driving a bare prompt.
+    The scheduler always needs a Claude session; a shell (or an unknown
+    mode) would leave it driving a bare prompt.
     """
     if mode == SHELL_MODE or mode not in RC_FLAGS:
         return "c"

@@ -127,14 +127,15 @@ playwright-cli -s=mysite close
 
 The built-in scheduler runs Claude Code sessions on a cron schedule — fully autonomous, no human in the loop.
 
-### Creating a Schedule (Wizard)
+### Creating a Schedule
 
 1. Click **"+ New"** on the Scheduled Tasks tab
-2. **Describe your task** — write what you want Claude to do (e.g. "Check our website for broken links and report results")
-3. **Pick a frequency** — choose from presets like "Every hour", "Daily at 9 AM", "Weekdays at 9 AM", etc.
+2. **Write the prompt** — what you want Claude to do (e.g. "Check our website for broken links and report results")
+3. **Pick a frequency** — choose from presets like "Every hour", "Daily at 9 AM", "Weekdays at 9 AM", etc., or write the cron expression yourself
 4. **Configure options** — set the working directory, launch mode, and task name
-5. **Create with Claude** — this launches a live Claude Code session marked as a "wizard" session. Open it to refine the task details interactively with Claude — answer questions, clarify requirements, and finalize the schedule prompt together
-6. Once finalized, the schedule appears in the UI and fires automatically on the cron
+5. Save — the schedule appears in the UI immediately and fires automatically on the cron
+
+You can also create and manage schedules by chatting with any Claude Code session that has `mcp_server.py` configured as an MCP server — it exposes `create_schedule`, `list_schedules`, `update_schedule`, `delete_schedule`, and `fire_schedule` tools that proxy to the same HTTP API.
 
 ### How It Works
 

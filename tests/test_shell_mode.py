@@ -100,7 +100,8 @@ class ShellSessionsSkipClaudeScrapingTest(unittest.TestCase):
 
 
 class ResolveClaudeModeTest(unittest.TestCase):
-    """The scheduler and the wizard must never end up running a bare shell."""
+    """The scheduler always needs a Claude session; it must never end up
+    running a bare shell."""
 
     def test_shell_mode_falls_back_to_standard(self):
         self.assertEqual(config.resolve_claude_mode(config.SHELL_MODE), "c")

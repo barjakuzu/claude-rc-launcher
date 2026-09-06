@@ -89,7 +89,6 @@ async function api(method, path, body) {
 let browsers = {
   launch: { path: null, selected: null, open: false },
   sched: { path: null, selected: null, open: false },
-  wiz: { path: null, selected: null, open: false },
 };
 let hasProjects = false;
 
@@ -208,11 +207,9 @@ function selectDir(ctx) {
   browsers[ctx].selected = browsers[ctx].path;
   document.getElementById(ids.input).value = browsers[ctx].selected;
   closeBrowser(ctx);
-  // For sched/wiz context, also update the workdir input
+  // For sched context, also update the workdir input
   if (ctx === 'sched') {
     document.getElementById('sched-workdir').value = browsers[ctx].selected;
-  } else if (ctx === 'wiz') {
-    document.getElementById('wiz-workdir').value = browsers[ctx].selected;
   }
 }
 

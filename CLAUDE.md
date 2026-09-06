@@ -81,8 +81,8 @@ All under `/rc/` prefix:
 - `POST /start` — create new session (params: `name`, `mode`, `workdir`)
   - `mode` is one of `c` / `ci` / `safe` (Claude Code) or `sh` (plain login
     shell). Shell sessions skip `setup_session` entirely and are excluded
-    from URL/token/transcript scraping; the scheduler and schedule wizard
-    coerce `sh` back to `c` via `resolve_claude_mode`.
+    from URL/token/transcript scraping; the scheduler coerces `sh` back to
+    `c` via `resolve_claude_mode`.
 - `POST /stop` — stop session by name
 - `POST /stop-all` — stop all sessions
 - `POST /tunnel/start` / `POST /tunnel/stop` — manage tunnel
