@@ -73,6 +73,8 @@ export const api = {
     req('POST', `/sessions/${encodeURIComponent(name)}/keys`, device, body),
   resize: (device: string, name: string, cols: number, rows: number) =>
     req('POST', `/sessions/${encodeURIComponent(name)}/resize`, device, { cols, rows }),
+  enableRc: (device: string, name: string): Promise<{ ok: boolean; url?: string; message?: string }> =>
+    req('POST', `/sessions/${encodeURIComponent(name)}/enable-rc`, device),
   start: (device: string, body: unknown) => req('POST', '/start', device, body),
   stop: (device: string, name: string, opts?: { external?: boolean; pid?: number }) =>
     req('POST', '/stop', device, opts?.external ? { external: true, pid: opts.pid } : { name }),
