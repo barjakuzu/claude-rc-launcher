@@ -942,5 +942,84 @@ class AdoptedWindowSizeTest(unittest.TestCase):
         cap.assert_not_called()
 
 
+class KeysTargetTest(unittest.TestCase):
+    """server._keys_target: adopted external rows must be addressed by
+    their validated pane_id, never the tmux session name, while rc-*
+    launcher rows keep the session-name target."""
+
+    def test_rc_session_targets_its_own_name_without_consulting_rows(self):
+        # No rows passed at all — proves the rc-* branch never looks up
+        # adoption state.
+        self.assertEqual(server._keys_target("rc-portugal"), "rc-portugal")
+
+    def test_adopted_session_targets_its_validated_pane_id(self):
+        rows = [{"external": True, "tmux": {"session_name": "mysession", "pane_id": "%7"}}]
+        self.assertEqual(server._keys_target("mysession", rows), "%7")
+
+    def test_adopted_session_with_malformed_pane_id_falls_back_to_name(self):
+        rows = [{"external": True, "tmux": {"session_name": "mysession", "pane_id": "not-a-pane"}}]
+        self.assertEqual(server._keys_target("mysession", rows), "mysession")
+
+    def test_not_currently_adopted_falls_back_to_name(self):
+        rows = [{"external": True, "tmux": {"session_name": "other", "pane_id": "%3"}}]
+        self.assertEqual(server._keys_target("mysession", rows), "mysession")
+
+    def test_lazily_computes_rows_when_not_passed(self):
+        fake_rows = [{"external": True, "tmux": {"session_name": "mysession", "pane_id": "%9"}}]
+        orig = server.list_rc_sessions
+        server.list_rc_sessions = lambda: fake_rows
+        try:
+            self.assertEqual(server._keys_target("mysession"), "%9")
+        finally:
+            server.list_rc_sessions = orig
+
+
+class KeysRouteTargetingTest(unittest.TestCase):
+    """POST /sessions/<name>/keys must send-keys against _keys_target(name),
+    not the raw path-derived name, so an adopted row's keystrokes land on
+    its pane_id."""
+
+    def test_keys_route_sends_to_keys_target_not_raw_name(self):
+        import inspect
+        src = inspect.getsource(server.Handler.do_POST)
+        block = src.split('endswith("/keys"):', 1)[1]
+        block = block[:block.index("elif path.startswith(\"/sessions/\") and path.endswith(\"/enable-rc\")")]
+        self.assertIn("target = _keys_target(name)", block)
+        self.assertIn('["tmux", "send-keys", "-t", target, *special]', block)
+        self.assertIn('["tmux", "send-keys", "-t", target, "-l", keys]', block)
+        self.assertNotIn('"-t", name, *special', block)
+        self.assertNotIn('"-t", name, "-l", keys', block)
+
+    def test_ws_route_passes_keys_target_to_serve_terminal(self):
+        import inspect
+        src = inspect.getsource(server.Handler.do_GET)
+        block = src.split("endswith(\"/ws\"):", 1)[1][:1200]
+        self.assertIn("ws_terminal.serve_terminal(self, name, keys_target=_keys_target(name))", block)
+
+
+class WsServeTerminalKeysTargetTest(unittest.TestCase):
+    """ws.serve_terminal's own send-keys calls must address keys_target
+    (defaulting to `name` when the caller passes none), not `name` itself
+    — the control-mode attach line is the sole exception and stays on
+    `name`."""
+
+    def test_send_keys_blocks_use_keys_target_variable(self):
+        import inspect
+        import ws
+        src = inspect.getsource(ws.serve_terminal)
+        self.assertIn('def serve_terminal(handler, name, keys_target=None):', src)
+        self.assertIn('["tmux", "send-keys", "-t", keys_target, "-l", str(msg["keys"])]', src)
+        self.assertIn('["tmux", "send-keys", "-t", keys_target, *keys]', src)
+        # The control-mode attach itself stays targeted by session name.
+        self.assertIn('["tmux", "-C", "attach-session", "-t", name]', src)
+
+    def test_keys_target_defaults_to_name_when_falsy(self):
+        import inspect
+        import ws
+        self.assertIn("keys_target = keys_target if keys_target else name",
+                       inspect.getsource(ws.serve_terminal))
+
+
+
 if __name__ == "__main__":
     unittest.main()

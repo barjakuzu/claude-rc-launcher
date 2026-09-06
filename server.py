@@ -714,6 +714,21 @@ _enable_rc_in_flight_lock = threading.Lock()
 _PANE_ID_RE = re.compile(r"^%\d+$")
 
 
+def _keys_target(name, rows=None):
+    """tmux target to address for send-keys against `name`: for an adopted
+    external row, its validated pane_id (_adopted_pane_id + _valid_pane_id)
+    so keystrokes land on the exact pane we adopted rather than whatever
+    tmux resolves `name` to (a session name can outlive/mismatch the pane
+    once other windows exist); for an rc-* launcher session, `name` itself
+    unchanged. Falls back to `name` if the adoption record has no valid
+    pane_id (e.g. it vanished between lookup and use) — the caller already
+    checked session_exists(name), so this still addresses something real."""
+    if name.startswith(SESSION_PREFIX):
+        return name
+    pane_id = _adopted_pane_id(name, rows)
+    return pane_id if _valid_pane_id(pane_id) else name
+
+
 def _valid_pane_id(pane_id):
     """True only for a well-formed tmux pane_id like "%7". Guards the
     enable-rc route: pane_id must be present and match this shape before
@@ -1028,7 +1043,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._json({"ok": False, "message": "WebSocket upgrade required"}, 400)
                 return
             self.close_connection = True
-            ws_terminal.serve_terminal(self, name)
+            ws_terminal.serve_terminal(self, name, keys_target=_keys_target(name))
 
         elif path.startswith("/sessions/") and path.endswith("/transcript"):
             name = path[len("/sessions/"):-len("/transcript")]
@@ -1503,12 +1518,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not session_exists(name):
                 self._json({"ok": False, "message": "Session not found"}, 404)
                 return
+            target = _keys_target(name)
             try:
                 if special:
-                    cmd = ["tmux", "send-keys", "-t", name, *special]
+                    cmd = ["tmux", "send-keys", "-t", target, *special]
                     subprocess.run(cmd, capture_output=True, check=False, timeout=5)
                 if keys:
-                    cmd = ["tmux", "send-keys", "-t", name, "-l", keys]
+                    cmd = ["tmux", "send-keys", "-t", target, "-l", keys]
                     subprocess.run(cmd, capture_output=True, check=False, timeout=5)
                 self._json({"ok": True})
             except subprocess.SubprocessError as e:

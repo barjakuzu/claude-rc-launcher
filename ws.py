@@ -174,12 +174,22 @@ def _snapshot(name):
     return out
 
 
-def serve_terminal(handler, name):
+def serve_terminal(handler, name, keys_target=None):
     """Upgrade the request to a WebSocket and stream the session until close.
 
     Called from the HTTP handler for GET /sessions/<name>/ws. Takes over the
     connection socket entirely; returns when the client disconnects.
+
+    `keys_target` is the tmux target this client's "keys"/"special" messages
+    are sent to via send-keys. For an adopted external session the caller
+    (server.py, via _keys_target) resolves this to the adoption record's
+    validated pane_id rather than `name` — a session name can outlive/
+    mismatch the pane it was adopted from. Defaults to `name` (unchanged
+    behavior for rc-* launcher sessions and any caller that doesn't pass
+    one). The control-mode attach below always targets `name` — that part
+    is unaffected and stays session-name based.
     """
+    keys_target = keys_target if keys_target else name
     key = handler.headers.get("Sec-WebSocket-Key", "")
     if not key:
         handler.send_error(400)
@@ -303,14 +313,14 @@ def serve_terminal(handler, name):
             if mtype == "keys" and msg.get("keys"):
                 assert_size()
                 subprocess.run(
-                    ["tmux", "send-keys", "-t", name, "-l", str(msg["keys"])],
+                    ["tmux", "send-keys", "-t", keys_target, "-l", str(msg["keys"])],
                     capture_output=True, timeout=5,
                 )
             elif mtype == "special" and isinstance(msg.get("special"), list):
                 assert_size()
                 keys = [str(k) for k in msg["special"][:8]]
                 subprocess.run(
-                    ["tmux", "send-keys", "-t", name, *keys],
+                    ["tmux", "send-keys", "-t", keys_target, *keys],
                     capture_output=True, timeout=5,
                 )
             elif mtype == "resize":
