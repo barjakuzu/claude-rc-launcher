@@ -12,6 +12,7 @@ import threading
 
 import agents
 import compat
+import panes
 from config import (SESSION_PREFIX, CLAUDE_BIN, RC_FLAGS, MODEL_MAP,
                     SHELL_BIN, SHELL_MODE, PERMISSION_MODE, EXTRA_FLAGS)
 
@@ -207,7 +208,7 @@ def list_rc_sessions():
     for row in claude_rows_by_id.values():
         if row["session_id"] in known_session_ids:
             continue
-        sessions.append({
+        entry = {
             "name": row["name"] or f"external-{row['session_id'][:8]}",
             "mode": None,
             "url": None,
@@ -219,7 +220,18 @@ def list_rc_sessions():
             "pid": row["pid"],
             "waiting_for": row["waiting_for"],
             "claude": {"state": row.get("state")},
-        })
+            "tmux": None,
+            "rc_url": None,
+        }
+        pid = row.get("pid")
+        if pid:
+            pane = panes.pane_for_pid(pid)
+            if pane and not pane["session_name"].startswith(SESSION_PREFIX):
+                entry["tmux"] = {"session_name": pane["session_name"], "pane_id": pane["pane_id"]}
+                url, source = get_url_with_source(pane["session_name"])
+                if source == "osc8":
+                    entry["rc_url"] = url
+        sessions.append(entry)
 
     return sessions
 
