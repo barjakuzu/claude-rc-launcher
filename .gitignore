@@ -9,3 +9,11 @@ frontend/.vite
 frontend/vite.config.js
 frontend/vite.config.d.ts
 .env.bak*
+*.log
+auth-tokens.json
+hub.db*
+events/
+jobs/
+.wizard-token*
+.superpowers/
+docs/private/
