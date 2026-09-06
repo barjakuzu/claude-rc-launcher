@@ -12,6 +12,23 @@ from config import (SESSION_PREFIX, CLAUDE_BIN, RC_FLAGS, MODEL_MAP,
                     resolve_claude_mode)
 from sessions import session_exists, setup_session, get_url, list_rc_sessions
 from schedules import load_schedules, save_schedules, add_history_entry
+import schedules as schedules_module
+
+_last_logged_schedule_error = None
+
+
+def _schedule_error_to_log(err):
+    """Return the message to print for a schedules-load failure, or None if
+    `err` is falsy or already the last one logged (so a persistent failure
+    logs once, not every 60 seconds)."""
+    global _last_logged_schedule_error
+    if not err:
+        _last_logged_schedule_error = None
+        return None
+    if err == _last_logged_schedule_error:
+        return None
+    _last_logged_schedule_error = err
+    return f"Scheduler: schedules.json failed to load: {err}"
 
 
 WIZARD_PROMPT = """I want to create a scheduled task for the Claude RC Launcher.
@@ -355,6 +372,9 @@ def _scheduler_loop():
             pass
 
         schedules = load_schedules()
+        msg = _schedule_error_to_log(schedules_module.LAST_LOAD_ERROR)
+        if msg:
+            print(f"  {msg}")
 
         for schedule in schedules:
             if not schedule.get("enabled", False):
