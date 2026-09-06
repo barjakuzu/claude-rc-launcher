@@ -18,8 +18,9 @@ export interface ScheduleHistoryEntry {
 }
 
 export interface Schedule {
-  id: string; name: string; cron: string; enabled: boolean;
+  id: string; name: string; cron: string | null; enabled: boolean;
   prompt?: string; instructions_file?: string; mode?: string; model?: string; workdir?: string; next_run?: string; device?: string;
   schedule_label?: string;
+  concurrency?: string;
   history?: ScheduleHistoryEntry[];
 }
