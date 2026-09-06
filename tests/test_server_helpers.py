@@ -14,6 +14,11 @@ import config
 import server
 
 
+class _FakeCompleted:
+    def __init__(self, returncode):
+        self.returncode = returncode
+
+
 class EnrichNextRunTest(unittest.TestCase):
     def test_manual_schedule_has_no_next_run(self):
         s = server._enrich_next_run({"enabled": True, "cron": None})
@@ -276,6 +281,47 @@ class DetectAndRestartTest(unittest.TestCase):
             raise FileNotFoundError("systemctl not found")
         server.subprocess.run = _raise_missing
         self.assertEqual(server._detect_and_restart(), "Restart manually to apply the update.")
+
+    def test_falls_back_to_launchd_when_systemctl_missing(self):
+        # macOS: no systemctl at all (FileNotFoundError), but a registered
+        # launchd agent for com.claude-rc.launcher. Detection must not stop
+        # at the first failing mechanism.
+        uid = os.getuid()
+        calls = []
+
+        def fake_run(cmd, **kw):
+            calls.append(cmd)
+            if cmd[0] == "systemctl":
+                raise FileNotFoundError("systemctl not found")
+            if cmd[:2] == ["launchctl", "print"]:
+                self.assertEqual(cmd[2], f"gui/{uid}/com.claude-rc.launcher")
+                return _FakeCompleted(0)
+            raise AssertionError("unexpected command: %r" % (cmd,))
+
+        msg = server._detect_and_restart(run=fake_run)
+        self.assertIn("launchctl kickstart -k", msg)
+        self.assertIn(f"gui/{uid}/com.claude-rc.launcher", msg)
+        self.assertTrue(any(cmd[:2] == ["launchctl", "print"] for cmd in calls))
+
+    def test_manual_restart_only_when_systemd_and_launchd_all_fail(self):
+        def fake_run(cmd, **kw):
+            return _FakeCompleted(1)  # every detection command runs but reports inactive
+        self.assertEqual(server._detect_and_restart(run=fake_run),
+                          "Restart manually to apply the update.")
+
+    def test_launchd_detection_timeout_falls_back_to_other_mechanisms(self):
+        # A hanging `launchctl print` must not prevent detecting an active
+        # user systemd unit checked before it, nor abort the whole function.
+        def fake_run(cmd, **kw):
+            if cmd[:2] == ["systemctl", "--user"]:
+                return _FakeCompleted(0)
+            if cmd[0] == "systemctl":
+                return _FakeCompleted(1)
+            if cmd[0] == "launchctl":
+                raise server.subprocess.TimeoutExpired(cmd=cmd, timeout=10)
+            raise AssertionError("unexpected command: %r" % (cmd,))
+        msg = server._detect_and_restart(run=fake_run)
+        self.assertIn("systemctl --user restart claude-rc", msg)
 
 
 class VersionResponseTest(unittest.TestCase):

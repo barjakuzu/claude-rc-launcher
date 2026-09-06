@@ -507,45 +507,53 @@ def _version_response():
     return {"version": VERSION, "claude_version": caps.get("version"), "caps": caps}
 
 
-def _pick_restart_command(system_unit_active, user_unit_active, is_macos, uid):
+def _pick_restart_command(system_unit_active, user_unit_active, launchd_active, uid):
     """Pick the command to restart the launcher, in priority order: an
-    active system unit, then a user unit, then macOS launchd. Returns None
-    if none apply - the operator restarts manually."""
+    active system unit, then a user unit, then a detected launchd agent.
+    Returns None if none apply - the operator restarts manually."""
     if system_unit_active:
         return ["systemctl", "restart", "claude-rc-launcher"]
     if user_unit_active:
         return ["systemctl", "--user", "restart", "claude-rc"]
-    if is_macos:
+    if launchd_active:
         return ["launchctl", "kickstart", "-k", f"gui/{uid}/com.claude-rc.launcher"]
     return None
 
 
-def _detect_and_restart():
-    """Restart the launcher via whichever install mechanism is active, and
-    return a human-readable status message. Falls back to a manual-restart
-    message if the detection commands hang or systemctl/launchctl aren't
-    installed, rather than raising out of the /update handler."""
+def _detect_active(run, cmd, timeout=10):
+    """True if `cmd` runs and exits 0. Each detection command is isolated:
+    a missing binary or a hang for one mechanism (e.g. no systemctl on
+    macOS) must not prevent trying the others."""
     try:
-        system_active = subprocess.run(
-            ["systemctl", "is-active", "--quiet", "claude-rc-launcher"],
-            capture_output=True, timeout=10,
-        ).returncode == 0
-        user_active = subprocess.run(
-            ["systemctl", "--user", "is-active", "--quiet", "claude-rc"],
-            capture_output=True, timeout=10,
-        ).returncode == 0
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        return "Restart manually to apply the update."
+        return run(cmd, capture_output=True, timeout=timeout).returncode == 0
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return False
 
-    cmd = _pick_restart_command(system_active, user_active, sys.platform == "darwin", os.getuid())
+
+def _detect_and_restart(run=None):
+    """Restart the launcher via whichever install mechanism is active, and
+    return a human-readable status message. Detection tries, in order: an
+    active system systemd unit, an active user systemd unit, and (via
+    `launchctl print gui/<uid>/com.claude-rc.launcher`) a registered macOS
+    launchd agent. Falls back to a manual-restart message only when all
+    three detection attempts fail, rather than raising out of the /update
+    handler. `run` is injectable for tests; defaults to subprocess.run."""
+    if run is None:
+        run = subprocess.run
+    uid = os.getuid()
+    system_active = _detect_active(run, ["systemctl", "is-active", "--quiet", "claude-rc-launcher"])
+    user_active = _detect_active(run, ["systemctl", "--user", "is-active", "--quiet", "claude-rc"])
+    launchd_active = _detect_active(run, ["launchctl", "print", f"gui/{uid}/com.claude-rc.launcher"])
+
+    cmd = _pick_restart_command(system_active, user_active, launchd_active, uid)
     if cmd is None:
         return "Restart manually to apply the update."
 
     def _run_delayed():
         time.sleep(1)
         try:
-            subprocess.run(cmd, capture_output=True, timeout=10)
-        except (subprocess.TimeoutExpired, FileNotFoundError):
+            run(cmd, capture_output=True, timeout=10)
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
             pass
 
     threading.Thread(target=_run_delayed, daemon=True).start()
