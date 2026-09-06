@@ -10,6 +10,7 @@ import subprocess
 import time
 import threading
 
+import agents
 import compat
 from config import (SESSION_PREFIX, CLAUDE_BIN, RC_FLAGS, MODEL_MAP,
                     SHELL_BIN, SHELL_MODE, PERMISSION_MODE, EXTRA_FLAGS)
@@ -143,32 +144,53 @@ def _store_session_error(name, error):
 
 
 def list_rc_sessions():
-    """Return list of rc-* tmux sessions with name, mode, URL, workdir, and status."""
+    """Return rc-* tmux sessions (name, mode, URL, workdir, status) plus
+    any Claude Code session `claude agents --json` knows about that this
+    launcher didn't start — those get kind: "external", no terminal."""
     r = subprocess.run(
         ["tmux", "list-sessions", "-F", "#{session_name}"],
         capture_output=True, text=True,
     )
-    if r.returncode != 0:
-        return []
-
     sessions = []
-    for line in r.stdout.strip().splitlines():
-        name = line.strip()
-        if not name.startswith(SESSION_PREFIX):
+    known_session_ids = set()
+    if r.returncode == 0:
+        for line in r.stdout.strip().splitlines():
+            name = line.strip()
+            if not name.startswith(SESSION_PREFIX):
+                continue
+            mode = get_session_env(name, "RC_MODE") or "c"
+            workdir = get_session_env(name, "RC_WORKDIR")
+            is_sh = mode == SHELL_MODE
+            url = None if is_sh else get_url(name)
+            status = get_session_status(name)
+            tokens = None if is_sh else get_tokens(name)
+            rc_session_id = get_session_env(name, "RC_SESSION_ID")
+            if rc_session_id:
+                known_session_ids.add(rc_session_id)
+            s = {"name": name, "mode": mode, "url": url, "status": status}
+            if tokens is not None:
+                s["tokens"] = tokens
+            if workdir:
+                s["workdir"] = workdir
+                s["project"] = os.path.basename(workdir.rstrip("/"))
+            sessions.append(s)
+
+    for row in agents.list_claude_sessions():
+        if row["session_id"] in known_session_ids:
             continue
-        mode = get_session_env(name, "RC_MODE") or "c"
-        workdir = get_session_env(name, "RC_WORKDIR")
-        is_sh = mode == SHELL_MODE
-        url = None if is_sh else get_url(name)
-        status = get_session_status(name)
-        tokens = None if is_sh else get_tokens(name)
-        s = {"name": name, "mode": mode, "url": url, "status": status}
-        if tokens is not None:
-            s["tokens"] = tokens
-        if workdir:
-            s["workdir"] = workdir
-            s["project"] = os.path.basename(workdir.rstrip("/"))
-        sessions.append(s)
+        sessions.append({
+            "name": row["name"] or f"external-{row['session_id'][:8]}",
+            "mode": None,
+            "url": None,
+            "status": row["status"] or "unknown",
+            "kind": "external",
+            "external": True,
+            "session_id": row["session_id"],
+            "cwd": row["cwd"],
+            "pid": row["pid"],
+            "waiting_for": row["waiting_for"],
+        })
+
     return sessions
 
 
