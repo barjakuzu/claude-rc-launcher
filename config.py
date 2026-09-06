@@ -19,6 +19,7 @@ RC_TRUSTED_PROXIES = set(
     p.strip() for p in os.environ.get("RC_TRUSTED_PROXIES", "127.0.0.1,::1").split(",")
     if p.strip()
 )
+RC_BEHIND_TLS = os.environ.get("RC_BEHIND_TLS", "") == "1"
 
 # Resolve relative working dir to absolute
 WORKING_DIR = os.path.abspath(WORKING_DIR)

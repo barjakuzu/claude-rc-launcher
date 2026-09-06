@@ -20,7 +20,7 @@ from config import (
     VERSION, HOST, PORT, SESSION_PREFIX, WORKING_DIR, CLAUDE_BIN,
     AUTH_USER, AUTH_PASS, RC_FLAGS, MODEL_MAP, SHELL_BIN, SHELL_MODE,
     resolve_claude_mode,
-    BROWSE_ROOTS, RC_TRUSTED_PROXIES,
+    BROWSE_ROOTS, RC_TRUSTED_PROXIES, RC_BEHIND_TLS,
 )
 from sessions import (
     list_rc_sessions, session_exists, setup_session, stop_session,
@@ -184,12 +184,14 @@ def _is_rate_limited(ip):
     return len(recent) >= _LOGIN_MAX_ATTEMPTS
 
 
-def _record_failed_login(ip):
-    """Record a failed login attempt."""
+def _record_failed_login(ip, user=""):
+    """Record a failed login attempt and log a stable line fail2ban can
+    match (see docs/fail2ban/claude-rc.conf)."""
     now = time.time()
     if ip not in _login_attempts:
         _login_attempts[ip] = []
     _login_attempts[ip].append(now)
+    print(f"AUTH FAIL ip={ip} user={user}")
 
 
 def _check_auth(handler):
@@ -422,6 +424,13 @@ def _valid_session_name(name):
     return bool(name) and ".." not in name and "/" not in name and name.startswith(SESSION_PREFIX)
 
 
+def _cookie_secure_flag(behind_tls, forwarded_proto):
+    """True if the Secure cookie attribute should be set: either the
+    operator has explicitly said we sit behind TLS termination, or the
+    proxy told us this particular request arrived over https."""
+    return bool(behind_tls) or forwarded_proto == "https"
+
+
 def _resolve_client_ip(peer_ip, real_ip_header, forwarded_for_header, trusted_proxies):
     """Return the IP to use for login rate limiting.
 
@@ -550,7 +559,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", "text/html")
             self.send_header("Cache-Control", "no-cache, must-revalidate")
-            self.send_header("Set-Cookie", f"csrf={csrf}; Path=/; HttpOnly; SameSite=Strict")
+            csrf_secure = "; Secure" if _cookie_secure_flag(RC_BEHIND_TLS, self.headers.get("X-Forwarded-Proto")) else ""
+            self.send_header("Set-Cookie", f"csrf={csrf}; Path=/; HttpOnly; SameSite=Strict{csrf_secure}")
             self.end_headers()
             self.wfile.write(_login_html(csrf, error).encode())
             return
@@ -892,7 +902,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 if "csrf" in cookie and hmac.compare_digest(cookie["csrf"].value, csrf_form):
                     csrf_ok = True
             if not csrf_ok:
-                _record_failed_login(client_ip)
+                _record_failed_login(client_ip, user)
                 self.send_response(302)
                 self.send_header("Location", "/login?err=1")
                 self.end_headers()
@@ -905,14 +915,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 _save_auth_tokens()
                 self.send_response(302)
                 self.send_header("Location", "/")
-                secure = "Secure; " if self.headers.get("X-Forwarded-Proto") == "https" else ""
+                secure = "Secure; " if _cookie_secure_flag(RC_BEHIND_TLS, self.headers.get("X-Forwarded-Proto")) else ""
                 self.send_header("Set-Cookie",
                     f"rc_session={token}; Path=/; HttpOnly; SameSite=Lax; {secure}Max-Age=2592000")
                 # Clear CSRF cookie
                 self.send_header("Set-Cookie", "csrf=; Path=/; Max-Age=0; HttpOnly")
                 self.end_headers()
             else:
-                _record_failed_login(client_ip)
+                _record_failed_login(client_ip, user)
                 self.send_response(302)
                 self.send_header("Location", "/login?err=1")
                 self.end_headers()
