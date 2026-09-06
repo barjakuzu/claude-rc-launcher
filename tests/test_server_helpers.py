@@ -494,5 +494,28 @@ class CountLauncherSessionsCapTest(unittest.TestCase):
         self.assertEqual(sessions.count_launcher_sessions([]), 0)
 
 
+class GetCachedConfigReportTest(unittest.TestCase):
+    def test_caches_for_60_seconds(self):
+        calls = {"n": 0}
+
+        def fake_collect(**kw):
+            calls["n"] += 1
+            return {"generated_at": calls["n"]}
+
+        orig = server.configreport.collect_config_report
+        server.configreport.collect_config_report = fake_collect
+        try:
+            clock = {"t": 1000.0}
+            r1 = server._get_cached_config_report(now_fn=lambda: clock["t"])
+            clock["t"] += 10
+            r2 = server._get_cached_config_report(now_fn=lambda: clock["t"])
+            self.assertEqual(r1, r2)
+            clock["t"] += 60
+            r3 = server._get_cached_config_report(now_fn=lambda: clock["t"])
+            self.assertNotEqual(r1, r3)
+        finally:
+            server.configreport.collect_config_report = orig
+
+
 if __name__ == "__main__":
     unittest.main()

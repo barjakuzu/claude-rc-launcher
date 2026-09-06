@@ -44,6 +44,7 @@ from scheduler import validate_cron, next_cron_run, _fire_schedule
 from devices import (
     get_device, list_devices_public, load_devices, get_local_name, rename_device,
 )
+import configreport
 import overview
 import ws as ws_terminal
 
@@ -561,6 +562,22 @@ def _session_cap_message(current_count, max_sessions):
     return None
 
 
+_config_report_cache = {"report": None, "at": 0.0}
+_CONFIG_REPORT_TTL_SECONDS = 60
+
+
+def _get_cached_config_report(now_fn=time.time):
+    """GET /config-report backing store: collect_config_report() shells out
+    to git/find plugin dirs, so cache the result in-process for 60s rather
+    than re-collecting on every hub fan-out request."""
+    now = now_fn()
+    if _config_report_cache["report"] is not None and now - _config_report_cache["at"] < _CONFIG_REPORT_TTL_SECONDS:
+        return _config_report_cache["report"]
+    report = configreport.collect_config_report()
+    _config_report_cache["report"], _config_report_cache["at"] = report, now
+    return report
+
+
 # A launcher session younger than this still reports status unknown/None
 # while its pane settles — after this age, an unknown status is treated as
 # idle rather than starting forever (a session that's been "starting" for
@@ -1031,12 +1048,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
             s["caps"] = caps
             self._json(s)
 
+        elif path == "/config-report":
+            self._json(_get_cached_config_report())
+
         elif path == "/overview":
             local_sess = list_rc_sessions()
             local_stats = {**stats.system_stats(), "token_history": stats.token_history()}
             local_card = {"id": "local", "name": get_local_name(), "base_url": ""}
             cards = overview.build_overview(local_card, local_sess, local_stats, load_devices())
             self._json({"devices": cards})
+
+        elif path == "/api/config-matrix":
+            hub_report = _get_cached_config_report()
+            matrix = overview.build_config_matrix(hub_report, load_devices())
+            self._json(matrix)
 
         elif path == "/update-check":
             # Check latest version from GitHub API (cached for 10 min)
@@ -1560,7 +1585,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         path = self.path.split("?")[0]
         if path in ("/rc/sessions", "/rc/tunnel/status", "/rc/projects",
                      "/rc/browse", "/rc/schedules", "/rc/version",
-                     "/rc/resume/sessions", "/rc/stats", "/rc/overview") or \
+                     "/rc/resume/sessions", "/rc/stats", "/rc/overview",
+                     "/rc/config-report", "/api/config-matrix") or \
                 path.startswith("/rc/static/") or path.startswith("/static/") or \
                 path.startswith("/rc/jobs/") or "/preview" in path:
             return

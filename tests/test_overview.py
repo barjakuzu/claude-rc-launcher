@@ -63,5 +63,75 @@ class CardFromPartsClaudeVersionTest(unittest.TestCase):
         self.assertIsNone(card["claude_version"])
 
 
+class BuildConfigMatrixTest(unittest.TestCase):
+    def _report(self, head="abc123", dirty=False, dirty_files=None, deps_missing=None,
+                missing=None, hooks=True, version="2.1.263"):
+        return {
+            "claude_version": version,
+            "claude_config": {"head": head, "dirty": dirty, "dirty_files": dirty_files or []},
+            "skills": {"deps_missing": deps_missing or [], "dangling": [], "device_only": []},
+            "plugins": {"missing": missing or [], "extra": []},
+            "settings": {"hooks_present": hooks},
+            "rules": {"shared": [], "local": []},
+        }
+
+    def test_local_device_has_no_skew_against_itself(self):
+        hub = self._report()
+        matrix = overview.build_config_matrix(hub, [], fetch=lambda d: None)
+        self.assertEqual(matrix["skew"]["local"], [])
+        self.assertEqual(matrix["hub_head"], "abc123")
+
+    def test_head_mismatch_flagged(self):
+        hub = self._report(head="abc123")
+        other = self._report(head="def456")
+        matrix = overview.build_config_matrix(
+            hub, [{"id": "dev2", "base_url": "http://x"}], fetch=lambda d: other)
+        self.assertIn("head differs from hub", matrix["skew"]["dev2"])
+
+    def test_dirty_deps_missing_missing_plugins_no_hooks_and_version(self):
+        hub = self._report()
+        other = self._report(head="abc123", dirty=True, dirty_files=["agents/claude.md"],
+                              deps_missing=["watch"], missing=["ghost@official"],
+                              hooks=False, version="2.0.0")
+        matrix = overview.build_config_matrix(
+            hub, [{"id": "dev2", "base_url": "http://x"}], fetch=lambda d: other)
+        reasons = matrix["skew"]["dev2"]
+        for expected in ("dirty", "external skills not installed (run bootstrap)",
+                          "missing plugins", "no hooks", "claude version differs"):
+            self.assertIn(expected, reasons)
+        self.assertNotIn("head differs from hub", reasons)
+        self.assertNotIn("settings uncommitted", reasons)
+
+    def test_settings_only_dirty_is_separate_reason_not_dirty(self):
+        hub = self._report()
+        other = self._report(head="abc123", dirty=False, dirty_files=["config/settings.json"])
+        matrix = overview.build_config_matrix(
+            hub, [{"id": "dev2", "base_url": "http://x"}], fetch=lambda d: other)
+        reasons = matrix["skew"]["dev2"]
+        self.assertIn("settings uncommitted", reasons)
+        self.assertNotIn("dirty", reasons)
+
+    def test_unreachable_device_marked(self):
+        hub = self._report()
+        matrix = overview.build_config_matrix(
+            hub, [{"id": "dev2", "base_url": "http://x"}], fetch=lambda d: None)
+        self.assertEqual(matrix["skew"]["dev2"], ["unreachable"])
+        self.assertEqual(matrix["devices"]["dev2"], {"error": "unreachable"})
+
+    def test_matching_device_has_no_skew(self):
+        hub = self._report()
+        matrix = overview.build_config_matrix(
+            hub, [{"id": "dev2", "base_url": "http://x"}], fetch=lambda d: self._report())
+        self.assertEqual(matrix["skew"]["dev2"], [])
+
+    def test_empty_rules_and_device_only_skills_are_never_skew(self):
+        hub = self._report()
+        other = self._report(head="abc123")
+        other["skills"]["device_only"] = ["google-workspace"]
+        matrix = overview.build_config_matrix(
+            hub, [{"id": "dev2", "base_url": "http://x"}], fetch=lambda d: other)
+        self.assertEqual(matrix["skew"]["dev2"], [])
+
+
 if __name__ == "__main__":
     unittest.main()
