@@ -304,10 +304,6 @@ async function refresh() {
         ? '<span class="perm-tag perm-normal">safe</span>'
         : '<span class="perm-tag perm-skip">skip-perms</span>';
       const modeLabel = s.mode === 'ci' ? 'teammate' : s.mode === 'safe' ? 'safe' : 'standard';
-      const wizardBadge = s.wizard ? ' <span class="badge badge-wizard">wizard</span>' : '';
-      const wizardHint = (s.wizard && s.url && s.status !== 'dead')
-        ? '<div style="font-size:0.72rem;color:#fbbf24;margin-bottom:0.5rem;">Open this session to finalize your scheduled task with Claude</div>'
-        : '';
       const isDead = s.status === 'dead';
       const urlHtml = isDead
         ? '<div class="session-url"><span class="session-dead">\u26a0 Session exited (connection timed out or process stopped)</span></div>'
@@ -343,12 +339,12 @@ async function refresh() {
         : '<button class="btn-stop" onclick="stopSession(\'' + s.name.replace(/'/g, "\\'") + '\')">' + ICN.stop + ' Stop</button>';
       return '<div class="session-card' + (isDead ? ' session-card-dead' : '') + '">' +
         '<div class="session-header">' +
-          '<span class="session-name">' + escHtml(s.name) + wizardBadge + '</span>' +
+          '<span class="session-name">' + escHtml(s.name) + '</span>' +
           '<span style="display:flex;gap:0.3rem;align-items:center;">' + permTag +
             '<span class="badge ' + badgeClass + '">' + modeLabel + '</span>' +
           '</span>' +
         '</div>' +
-        projectHtml + tokenHtml + wizardHint + urlHtml +
+        projectHtml + tokenHtml + urlHtml +
         '<div class="session-actions"><div class="session-actions-left">' + previewBtn + restartBtn + stopBtn + '</div>' + (nudgeBtn || copyBtn) + '</div>' +
       '</div>';
     }).join('');
@@ -951,192 +947,19 @@ async function populateSchedProjects(currentWorkdir) {
   }
 }
 
-/* --- Wizard --- */
-
-const SCHEDULE_PRESETS = [
-  { label: "Every hour",         cron: "0 * * * *"   },
-  { label: "Every 2 hours",      cron: "0 */2 * * *" },
-  { label: "Every 6 hours",      cron: "0 */6 * * *" },
-  { label: "Daily at 9 AM",      cron: "0 9 * * *"   },
-  { label: "Daily at noon",      cron: "0 12 * * *"  },
-  { label: "Daily at midnight",  cron: "0 0 * * *"   },
-  { label: "Weekdays at 9 AM",   cron: "0 9 * * 1-5" },
-  { label: "Weekly on Monday",   cron: "0 9 * * 1"   },
-  { label: "Monthly on the 1st", cron: "0 0 1 * *"   },
-];
-
-let wizardStep = 0;
-let wizSelectedPreset = null;
-
 function openNewSchedule() {
-  wizardStep = 0;
-  wizSelectedPreset = null;
-  document.getElementById('wiz-description').value = '';
-  document.getElementById('wiz-name').value = '';
-  document.getElementById('wiz-mode').value = 'c';
-  document.getElementById('wiz-workdir').value = '';
-  renderPresetGrid();
-  populateWizProjects();
-  updateWizardSteps();
-  document.getElementById('wizard-modal').style.display = 'flex';
-}
-
-function closeWizard() {
-  document.getElementById('wizard-modal').style.display = 'none';
-}
-
-function renderPresetGrid() {
-  const grid = document.getElementById('wiz-preset-grid');
-  grid.innerHTML = SCHEDULE_PRESETS.map((p, i) =>
-    '<button class="preset-btn" data-idx="' + i + '" onclick="selectPreset(' + i + ')">' + escHtml(p.label) + '</button>'
-  ).join('');
-}
-
-function selectPreset(idx) {
-  wizSelectedPreset = idx;
-  document.querySelectorAll('.preset-btn').forEach((btn, i) => {
-    btn.classList.toggle('selected', i === idx);
-  });
-}
-
-function updateWizardSteps() {
-  for (let i = 0; i < 4; i++) {
-    document.getElementById('wstep-' + i).classList.toggle('active', i === wizardStep);
-    const dot = document.getElementById('wdot-' + i);
-    dot.classList.toggle('active', i === wizardStep);
-    dot.classList.toggle('done', i < wizardStep);
-  }
-}
-
-function wizardNext() {
-  if (wizardStep === 0) {
-    const desc = document.getElementById('wiz-description').value.trim();
-    if (!desc) return;
-    const nameInput = document.getElementById('wiz-name');
-    if (!nameInput.value.trim()) {
-      nameInput.value = desc.split(/\s+/).slice(0, 4).join('-').toLowerCase().replace(/[^a-z0-9-]/g, '');
-    }
-  }
-  if (wizardStep === 1 && wizSelectedPreset === null) return;
-  wizardStep = Math.min(wizardStep + 1, 2);
-  updateWizardSteps();
-}
-
-function wizardBack() {
-  wizardStep = Math.max(wizardStep - 1, 0);
-  updateWizardSteps();
-}
-
-function onWizProjectChange() {
-  const sel = document.getElementById('wiz-project-select');
-  const input = document.getElementById('wiz-workdir');
-  const browserWrap = document.getElementById('wiz-dir-browser-wrap');
-  if (sel.value === '__custom__') {
-    input.style.display = 'none';
-    browserWrap.style.display = 'block';
-    browsers.wiz.selected = null;
-    const startPath = browsers.wiz.path || '/';
-    document.getElementById('wiz-dir-browser-input').value = startPath;
-    browseTo('wiz', startPath);
-  } else if (sel.value) {
-    input.style.display = 'none';
-    browserWrap.style.display = 'none';
-    closeBrowser('wiz');
-    input.value = sel.value;
-  }
-}
-
-async function populateWizProjects() {
-  const wrap = document.getElementById('wiz-project-wrap');
-  try {
-    const data = await api('GET', '/projects');
-    const projects = data.projects || [];
-    browsers.wiz.path = data.default || '/';
-    const sel = document.getElementById('wiz-project-select');
-    sel.innerHTML = '';
-    const defOpt = document.createElement('option');
-    defOpt.value = data.default || '';
-    defOpt.textContent = 'Default (' + (data.default_name || 'home') + ')';
-    sel.appendChild(defOpt);
-    projects.forEach(p => {
-      const opt = document.createElement('option');
-      opt.value = p.path;
-      opt.textContent = p.name + (p.exists ? '' : ' (missing)');
-      if (!p.exists) opt.disabled = true;
-      sel.appendChild(opt);
-    });
-    const custom = document.createElement('option');
-    custom.value = '__custom__';
-    custom.textContent = 'Custom path\u2026';
-    sel.appendChild(custom);
-    wrap.style.display = '';
-    const input = document.getElementById('wiz-workdir');
-    sel.value = data.default || '';
-    input.value = data.default || '';
-    input.style.display = 'none';
-  } catch(e) {
-    wrap.style.display = 'none';
-  }
-}
-
-async function wizardCreate() {
-  const description = document.getElementById('wiz-description').value.trim();
-  if (!description || wizSelectedPreset === null) return;
-
-  const preset = SCHEDULE_PRESETS[wizSelectedPreset];
-  const wizProjSel = document.getElementById('wiz-project-select');
-  let workdir = document.getElementById('wiz-workdir').value.trim();
-  if (wizProjSel && wizProjSel.value && wizProjSel.value !== '__custom__') {
-    workdir = wizProjSel.value;
-  } else if (wizProjSel && wizProjSel.value === '__custom__' && browsers.wiz.selected) {
-    workdir = browsers.wiz.selected;
-  }
-  const mode = document.getElementById('wiz-mode').value;
-  let name = document.getElementById('wiz-name').value.trim();
-  if (!name) name = description.split(/\s+/).slice(0, 4).join('-').toLowerCase().replace(/[^a-z0-9-]/g, '');
-
-  const btn = document.getElementById('wiz-create-btn');
-  btn.disabled = true;
-  btn.innerHTML = '<span class="spinner spinner-sm"></span> Creating\u2026';
-
-  const result = await api('POST', '/schedules/wizard', {
-    description,
-    schedule_label: preset.label,
-    cron: preset.cron,
-    workdir,
-    mode,
-    name,
-  });
-
-  const sessionName = result.name || name;
-
-  let sessionUrl = null;
-  for (let i = 0; i < 15; i++) {
-    await new Promise(r => setTimeout(r, 2000));
-    const data = await api('GET', '/sessions');
-    const s = (data.sessions || []).find(s => s.name === sessionName);
-    if (s && s.url) {
-      sessionUrl = s.url;
-      break;
-    }
-  }
-
-  btn.disabled = false;
-  btn.innerHTML = '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg> Create with Claude';
-
-  const urlEl = document.getElementById('wiz-session-url');
-  const linkEl = document.getElementById('wiz-open-link');
-  if (sessionUrl) {
-    urlEl.innerHTML = '<a href="' + escHtml(sessionUrl) + '" target="_blank">' + escHtml(sessionUrl) + '</a>';
-    linkEl.href = sessionUrl;
-    linkEl.style.display = '';
-  } else {
-    urlEl.innerHTML = '<span class="waiting">' + ICN.loader + ' Session starting\u2026 check the sessions list below.</span>';
-    linkEl.style.display = 'none';
-  }
-  wizardStep = 3;
-  updateWizardSteps();
-  refresh();
+  editingScheduleId = null;
+  document.getElementById('modal-title').textContent = 'New Schedule';
+  document.getElementById('sched-name').value = '';
+  document.getElementById('sched-cron').value = '';
+  document.getElementById('sched-cron-preset').value = '';
+  document.getElementById('sched-prompt').value = '';
+  document.getElementById('sched-file').value = '';
+  document.getElementById('sched-mode').value = 'c';
+  document.getElementById('sched-model').value = '';
+  updateCronPreview();
+  populateSchedProjects('');
+  document.getElementById('schedule-modal').style.display = 'flex';
 }
 
 async function openEditSchedule(id) {
