@@ -84,6 +84,10 @@ def save_schedules(schedules):
         if os.path.isfile(SCHEDULES_FILE):
             try:
                 shutil.copyfile(SCHEDULES_FILE, SCHEDULES_FILE + ".bak")
+                try:
+                    os.chmod(SCHEDULES_FILE + ".bak", 0o600)
+                except OSError:
+                    pass
             except OSError as e:
                 print(f"  Warning: could not update schedules.json.bak: {e}")
         fd, tmp_path = tempfile.mkstemp(

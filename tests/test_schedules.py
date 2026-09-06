@@ -39,6 +39,19 @@ class SaveSchedulesTest(unittest.TestCase):
         with open(bak_path) as f:
             self.assertEqual(json.load(f), [{"id": "a", "name": "A"}])
 
+    def test_backup_is_chmoded_0600_even_if_original_was_looser(self):
+        # Simulate upgrading from an older schedules.json that predates the
+        # 0600 write mode.
+        with open(self.sched_file, "w") as f:
+            json.dump([{"id": "a", "name": "A"}], f)
+        os.chmod(self.sched_file, 0o644)
+
+        schedules.save_schedules([{"id": "b", "name": "B"}])
+
+        bak_path = self.sched_file + ".bak"
+        mode = stat.S_IMODE(os.stat(bak_path).st_mode)
+        self.assertEqual(mode, 0o600)
+
     def test_no_backup_written_on_first_ever_save(self):
         schedules.save_schedules([{"id": "a", "name": "A"}])
         self.assertFalse(os.path.isfile(self.sched_file + ".bak"))
