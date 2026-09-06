@@ -11,19 +11,67 @@ from config import SCHEDULES_FILE
 
 _schedules_lock = threading.Lock()
 
+LAST_LOAD_ERROR = None
+
+
+def _validate_schedules(data):
+    """Validate the raw JSON loaded from SCHEDULES_FILE.
+
+    Returns (schedules, error). `schedules` is the list of entries that
+    passed validation - invalid entries are dropped rather than discarding
+    the whole file. `error` is None when every entry validated cleanly,
+    otherwise a human-readable summary of what was dropped and why.
+    """
+    if not isinstance(data, list):
+        return [], f"expected a JSON array, got {type(data).__name__}"
+    valid = []
+    problems = []
+    for i, entry in enumerate(data):
+        if not isinstance(entry, dict):
+            problems.append(f"entry {i}: not an object")
+            continue
+        sid = entry.get("id")
+        if not sid or not isinstance(sid, str):
+            problems.append(f"entry {i}: missing or invalid 'id'")
+            continue
+        if "name" in entry and not isinstance(entry["name"], str):
+            problems.append(f"entry {i} ({sid}): 'name' must be a string")
+            continue
+        cron = entry.get("cron")
+        if cron is not None and not isinstance(cron, str):
+            problems.append(f"entry {i} ({sid}): 'cron' must be a string or null")
+            continue
+        valid.append(entry)
+    error = "; ".join(problems) if problems else None
+    return valid, error
+
 
 def load_schedules():
-    """Load schedules from JSON file. Returns list of schedule dicts."""
+    """Load schedules from JSON file. Returns list of schedule dicts.
+
+    Sets the module-level LAST_LOAD_ERROR to a description of what went
+    wrong (JSON parse failure, or per-entry validation problems) so callers
+    (GET /schedules, the scheduler loop) can surface it instead of it
+    looking indistinguishable from "no schedules configured". Cleared to
+    None on a fully clean load.
+    """
+    global LAST_LOAD_ERROR
     with _schedules_lock:
         if not os.path.isfile(SCHEDULES_FILE):
+            LAST_LOAD_ERROR = None
             return []
         try:
             with open(SCHEDULES_FILE, "r") as f:
                 data = json.load(f)
-            return data if isinstance(data, list) else []
         except Exception as e:
+            LAST_LOAD_ERROR = f"failed to parse {SCHEDULES_FILE}: {e}"
             print(f"  Warning: failed to load schedules: {e}")
             return []
+        valid, error = _validate_schedules(data)
+        LAST_LOAD_ERROR = error
+        if error:
+            print(f"  Warning: schedules.json has invalid entries: {error}")
+        return valid
 
 
 def save_schedules(schedules):
