@@ -799,20 +799,35 @@ def get_transcript(tmux_name, limit=300):
     ~/.claude/projects/<dir>/<uuid>.jsonl — serve it for a natively
     scrollable history view. Returns None if the session can't be mapped —
     including shell sessions, which write no JSONL at all.
+
+    Prefers RC_SESSION_ID (set at launch by build_tmux_command for
+    sessions using native identity) over the title-scan fallback
+    (_find_session_uuid), which stays for pre-v3 sessions and for a stale
+    RC_SESSION_ID whose file no longer exists.
     """
     if is_shell_session(tmux_name):
         return None
     workdir = get_session_env(tmux_name, "RC_WORKDIR") or ""
-    uuid = _find_session_uuid(tmux_name, workdir)
+    uuid = None
+    path = None
+    rc_session_id = get_session_env(tmux_name, "RC_SESSION_ID")
+    if rc_session_id:
+        candidate = transcript_path(workdir, rc_session_id)
+        if os.path.isfile(candidate):
+            uuid = rc_session_id
+            path = candidate
     if not uuid:
-        return None
-    paths = glob.glob(os.path.expanduser(
-        os.path.join("~/.claude/projects", "*", uuid + ".jsonl")))
-    if not paths:
-        return None
+        uuid = _find_session_uuid(tmux_name, workdir)
+        if not uuid:
+            return None
+        paths = glob.glob(os.path.expanduser(
+            os.path.join("~/.claude/projects", "*", uuid + ".jsonl")))
+        if not paths:
+            return None
+        path = paths[0]
     messages = []
     try:
-        with open(paths[0]) as fh:
+        with open(path) as fh:
             for line in fh:
                 try:
                     d = json.loads(line)
