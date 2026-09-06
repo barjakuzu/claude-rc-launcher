@@ -21,12 +21,24 @@ export function AllSessions({ cards, onOpenDevice }: AllSessionsProps) {
   const items = useAllSessions(cards, true);
   const [pending, setPending] = useState<Record<string, boolean>>({});
   const [preview, setPreview] = useState<PreviewState | null>(null);
+  const [rcUrls, setRcUrls] = useState<Record<string, string>>({});
 
   const guard = async (key: string, fn: () => Promise<unknown>) => {
     if (pending[key]) return;
     setPending((p) => ({ ...p, [key]: true }));
     try { await fn(); } finally {
       setPending((p) => ({ ...p, [key]: false }));
+    }
+  };
+
+  const handleEnableRc = async (key: string, deviceId: string, tmuxName: string) => {
+    if (pending[`rc-${key}`]) return;
+    setPending((p) => ({ ...p, [`rc-${key}`]: true }));
+    try {
+      const result = await api.enableRc(deviceId, tmuxName);
+      if (result.ok && result.url) setRcUrls((u) => ({ ...u, [key]: result.url as string }));
+    } finally {
+      setPending((p) => ({ ...p, [`rc-${key}`]: false }));
     }
   };
 
@@ -53,17 +65,20 @@ export function AllSessions({ cards, onOpenDevice }: AllSessionsProps) {
           const hue = hueForId(d.id);
           const chipColor = tintFor(hue, 0.70, 0.10);
           const isExternal = s.kind === 'external';
+          const isAdopted = isExternal && !!s.tmux;
+          const canOpenTerminal = !isExternal || isAdopted;
+          const previewTarget = isAdopted ? s.tmux!.session_name : s.name;
           const key = d.id + ':' + (isExternal ? 'ext:' + (s.session_id ?? s.sessionId ?? s.name) : (s.sessionId ?? s.name));
           return (
             <div
               key={key}
-              onClick={isExternal ? undefined : () => setPreview({ deviceId: d.id, name: s.name, mode: s.mode })}
-              title={isExternal ? undefined : 'Open terminal'}
+              onClick={canOpenTerminal ? () => setPreview({ deviceId: d.id, name: previewTarget, mode: s.mode }) : undefined}
+              title={canOpenTerminal ? 'Open terminal' : undefined}
               style={{
                 background: RT.card, border: `1px solid ${RT.border}`,
                 borderRadius: 10, padding: 12,
                 display: 'flex', flexDirection: 'column', gap: 8,
-                cursor: isExternal ? 'default' : 'pointer',
+                cursor: canOpenTerminal ? 'pointer' : 'default',
               }}>
               {/* Name + status */}
               <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -122,6 +137,40 @@ export function AllSessions({ cards, onOpenDevice }: AllSessionsProps) {
                       onUnstick={() => guard(`unstick-${key}`, () => api.unstick(d.id, s.name))}
                     />
                   </>
+                )}
+                {isAdopted && (
+                  <>
+                    <button
+                      style={mobileActionBtn()}
+                      onClick={() => setPreview({ deviceId: d.id, name: previewTarget, mode: s.mode })}
+                      title="Show terminal output"
+                    >
+                      <Icons.search size={13} stroke={RT.textDim} /> Preview
+                    </button>
+                    {rcUrls[key] || s.rc_url ? (
+                      <button
+                        style={mobileActionBtn()}
+                        onClick={() => window.open(rcUrls[key] ?? s.rc_url ?? '', '_blank')}
+                        title="Open on claude.ai"
+                      >
+                        <Icons.link size={13} stroke={RT.textDim} /> Open on claude.ai
+                      </button>
+                    ) : (
+                      <button
+                        style={mobileActionBtn()}
+                        disabled={!!pending[`rc-${key}`]}
+                        onClick={() => handleEnableRc(key, d.id, s.tmux!.session_name)}
+                        title="Enable Remote Control"
+                      >
+                        <Icons.refresh size={13} stroke={RT.amber} /> Enable RC
+                      </button>
+                    )}
+                  </>
+                )}
+                {isExternal && !isAdopted && (
+                  <span style={{ fontFamily: FONT_MONO, fontSize: 10.5, color: RT.textLow, fontStyle: 'italic' }}>
+                    not in tmux
+                  </span>
                 )}
                 <button
                   style={{ background: RT.panel, border: `1px solid ${RT.border}`, borderRadius: 7, width: 36, height: 36, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', marginLeft: 'auto' }}
