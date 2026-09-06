@@ -40,11 +40,12 @@ jobs:
 
       - name: No personal identifiers outside docs/private
         run: |
-          set -e
-          if git ls-files -z \
+          git ls-files -z \
               | grep -zvE '^(\.github/|docs/superpowers/|docs/private/|static/dist/|frontend/node_modules/|docker-compose\.yml$)' \
-              | xargs -0 --no-run-if-empty grep -nEi 'barjazz|tail82c219|tbarjadze|hetzner|tba-lin|100\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}|/root/'; then
+              | xargs -0 grep -nEi 'barjazz|tail82c219|tbarjadze|hetzner|tba-lin|100\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}|/root/' > /tmp/hits.txt || true
+          if [ -s /tmp/hits.txt ]; then
             echo "Found personal identifiers outside docs/private/ - see matches above."
+            cat /tmp/hits.txt
             exit 1
           fi
           echo "No personal identifiers found."
