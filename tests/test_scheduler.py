@@ -326,5 +326,27 @@ class FireScheduleClaimRaceTest(unittest.TestCase):
             _restore_scheduler(saved)
 
 
+class SessionCapTest(unittest.TestCase):
+    def setUp(self):
+        self.fake = FakeRun()
+        self._saved = _patch_scheduler(self.fake)
+        self.history = []
+        scheduler.add_history_entry = lambda sid, status, msg, **kw: self.history.append((sid, status, msg))
+        self._orig_max = scheduler.RC_MAX_SESSIONS
+
+    def tearDown(self):
+        scheduler.RC_MAX_SESSIONS = self._orig_max
+        _restore_scheduler(self._saved)
+
+    def test_skips_firing_when_at_session_cap(self):
+        scheduler.RC_MAX_SESSIONS = 2
+        scheduler.list_rc_sessions = lambda: [{"name": "rc-a"}, {"name": "rc-b"}]
+        scheduler._fire_schedule({"id": "s1", "name": "task", "cron": "0 9 * * *",
+                                   "workdir": "/tmp", "prompt": "hi"})
+        self.assertEqual(self.fake.new_session_names(), [])
+        self.assertEqual(len(self.history), 1)
+        self.assertEqual(self.history[0][1], "skipped")
+
+
 if __name__ == "__main__":
     unittest.main()

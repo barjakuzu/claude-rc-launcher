@@ -22,7 +22,7 @@ from config import (
     VERSION, HOST, PORT, SESSION_PREFIX, WORKING_DIR, CLAUDE_BIN,
     AUTH_USER, AUTH_PASS, RC_FLAGS, MODEL_MAP, SHELL_BIN, SHELL_MODE,
     resolve_claude_mode,
-    BROWSE_ROOTS, RC_TRUSTED_PROXIES, RC_BEHIND_TLS,
+    BROWSE_ROOTS, RC_TRUSTED_PROXIES, RC_BEHIND_TLS, RC_MAX_SESSIONS,
 )
 from sessions import (
     list_rc_sessions, session_exists, setup_session, stop_session,
@@ -481,6 +481,13 @@ def _detect_and_restart():
     return f"Restarting ({' '.join(cmd)})..."
 
 
+def _session_cap_message(current_count, max_sessions):
+    """None if under the session cap, else the 429 message to return."""
+    if current_count >= max_sessions:
+        return f"Session cap reached ({max_sessions}). Stop a session first."
+    return None
+
+
 def _cookie_secure_flag(behind_tls, forwarded_proto):
     """True if the Secure cookie attribute should be set: either the
     operator has explicitly said we sit behind TLS termination, or the
@@ -845,6 +852,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             s["token_history"] = stats.token_history()
             s["tokens_now"] = sum(x.get("tokens", 0) for x in sess)
             s["sessions"] = len(sess)
+            s["max_sessions"] = RC_MAX_SESSIONS
             self._json(s)
 
         elif path == "/overview":
@@ -1042,6 +1050,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._json({"ok": True, "message": "Already running", "name": name})
                 return
 
+            cap_msg = _session_cap_message(len(list_rc_sessions()), RC_MAX_SESSIONS)
+            if cap_msg:
+                self._json({"ok": False, "message": cap_msg}, 429)
+                return
+
             cmd = build_tmux_command(name, session_dir, mode, model=model,
                                      sandbox=sandbox)
             print(f"  Starting session: {name} (mode={mode}, model={model}, dir={session_dir})")
@@ -1174,6 +1187,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             mode = body.get("mode", "c")
             if not session_id or not project:
                 self._json({"ok": False, "message": "Missing session_id or project"}, 400)
+                return
+            cap_msg = _session_cap_message(len(list_rc_sessions()), RC_MAX_SESSIONS)
+            if cap_msg:
+                self._json({"ok": False, "message": cap_msg}, 429)
                 return
             ok, msg, name = resume_session(session_id, session_title, project, mode)
             self._json({"ok": ok, "message": msg, "name": name})

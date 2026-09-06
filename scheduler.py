@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 
 import stats
 from config import (SESSION_PREFIX, CLAUDE_BIN, RC_FLAGS, MODEL_MAP,
-                    resolve_claude_mode)
+                    resolve_claude_mode, RC_MAX_SESSIONS)
 from sessions import session_exists, setup_session, get_url, list_rc_sessions
 from schedules import load_schedules, save_schedules, add_history_entry
 import schedules as schedules_module
@@ -231,6 +231,11 @@ def _fire_schedule(schedule):
 
     safe_name = re.sub(r'[^a-zA-Z0-9_-]', '', name.replace(" ", "-"))
     session_name = f"{SESSION_PREFIX}run-{uuid.uuid4().hex[:12]}"
+
+    if len(list_rc_sessions()) >= RC_MAX_SESSIONS:
+        add_history_entry(schedule_id, "skipped", f"Session cap reached ({RC_MAX_SESSIONS})")
+        print(f"  Scheduler: skipped '{name}', session cap reached ({RC_MAX_SESSIONS})")
+        return
 
     # Check-and-claim must be atomic: the entry is registered here, under the
     # lock, before any tmux command runs, so a second _fire_schedule call for

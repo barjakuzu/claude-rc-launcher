@@ -152,5 +152,21 @@ class PickRestartCommandTest(unittest.TestCase):
         self.assertIsNone(server._pick_restart_command(False, False, False, 501))
 
 
+class SessionCapMessageTest(unittest.TestCase):
+    def test_none_when_under_cap(self):
+        self.assertIsNone(server._session_cap_message(3, 10))
+
+    def test_message_when_at_cap(self):
+        msg = server._session_cap_message(10, 10)
+        self.assertIsNotNone(msg)
+        self.assertIn("10", msg)
+
+    def test_message_when_over_cap(self):
+        self.assertIsNotNone(server._session_cap_message(11, 10))
+
+    def test_default_max_sessions_is_ten(self):
+        self.assertEqual(config.RC_MAX_SESSIONS, 10)
+
+
 if __name__ == "__main__":
     unittest.main()
