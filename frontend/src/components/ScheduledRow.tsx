@@ -169,7 +169,7 @@ export function ScheduledRow({ s, deviceId, mobile = false, cards, onChanged, on
           display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap',
         }}>
           <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-            <Icons.clock size={10} stroke={RT.textLow} /> {s.cron}
+            <Icons.clock size={10} stroke={RT.textLow} /> {s.cron || 'manual'}
           </span>
           {s.mode && (
             <>

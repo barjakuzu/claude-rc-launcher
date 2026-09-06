@@ -87,7 +87,7 @@ export function AllScheduled({ cards }: AllScheduledProps) {
     <div style={{ flex: 1, overflow: 'auto', display: 'flex', flexDirection: 'column' }}>
       <MobileHeader
         subtitle={`${items.length} task${items.length !== 1 ? 's' : ''} across devices`}
-        title="Scheduled"
+        title="Tasks"
         right={
           <button
             style={{ background: RT.panel, border: `1px solid ${RT.border}`, borderRadius: 7, width: 34, height: 34, display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', opacity: cards.length === 0 ? 0.4 : 1 }}
@@ -129,7 +129,7 @@ export function AllScheduled({ cards }: AllScheduledProps) {
               {/* Cron + label */}
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontFamily: FONT_MONO, fontSize: 11, color: RT.textLow }}>
                 <Icons.clock size={10} stroke={RT.textLow} />
-                <span>{s.cron}</span>
+                <span>{s.cron || 'manual'}</span>
                 {s.schedule_label && <span style={{ color: RT.borderHi }}>({s.schedule_label})</span>}
               </div>
               {/* Actions */}
