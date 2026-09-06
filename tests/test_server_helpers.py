@@ -5,6 +5,7 @@ import contextlib
 import io
 import os
 import sys
+import time
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -320,13 +321,21 @@ class DeriveSessionStateTest(unittest.TestCase):
         row = {"status": "busy", "kind": "external"}
         self.assertEqual(server._derive_session_state(row), "busy")
 
-    def test_unknown_status_non_external_is_starting(self):
-        row = {"status": "unknown"}
+    def test_unknown_status_non_external_with_created_at_is_starting(self):
+        row = {"status": "unknown", "created_at": time.time()}
         self.assertEqual(server._derive_session_state(row), "starting")
 
-    def test_none_status_non_external_is_starting(self):
-        row = {"status": None}
+    def test_none_status_non_external_with_created_at_is_starting(self):
+        row = {"status": None, "created_at": time.time()}
         self.assertEqual(server._derive_session_state(row), "starting")
+
+    def test_unknown_status_non_external_without_created_at_is_idle(self):
+        row = {"status": "unknown"}
+        self.assertEqual(server._derive_session_state(row), "idle")
+
+    def test_none_status_non_external_without_created_at_is_idle(self):
+        row = {"status": None}
+        self.assertEqual(server._derive_session_state(row), "idle")
 
     def test_unknown_status_external_is_not_starting(self):
         row = {"status": "unknown", "kind": "external"}
@@ -448,9 +457,13 @@ class DeriveSessionStateStartingBoundaryTest(unittest.TestCase):
             "idle",
         )
 
-    def test_missing_created_at_is_still_starting(self):
+    def test_missing_created_at_falls_back_to_idle(self):
         row = {"status": "unknown", "created_at": None}
-        self.assertEqual(server._derive_session_state(row, now=999999), "starting")
+        self.assertEqual(server._derive_session_state(row, now=999999), "idle")
+
+    def test_missing_created_at_still_needs_attention_if_claude_says_so(self):
+        row = {"status": "unknown", "created_at": None, "waiting_for": "permission"}
+        self.assertEqual(server._derive_session_state(row, now=999999), "needs_attention")
 
     def test_blocked_claude_state_is_needs_attention(self):
         row = {"status": "busy", "claude": {"state": "blocked"}}

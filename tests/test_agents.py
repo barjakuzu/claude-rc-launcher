@@ -178,6 +178,30 @@ class SingleFlightRefreshTest(AgentsJsonCapsGateMixin, unittest.TestCase):
         self.assertEqual(len(slow_fake.calls), 1)
 
 
+class DoRefreshClearsFlagOnExceptionTest(unittest.TestCase):
+    """An unexpected exception inside _do_refresh (not one of the handled
+    _fetch_rows failure modes) must still clear _refreshing, or every
+    subsequent caller would see the cache as permanently mid-refresh and
+    never spawn again."""
+
+    def tearDown(self):
+        with agents._refresh_cond:
+            agents._refreshing = False
+
+    def test_refreshing_cleared_after_unexpected_exception(self):
+        with agents._refresh_cond:
+            agents._refreshing = True
+
+        def boom(*a, **kw):
+            raise RuntimeError("boom")
+
+        with self.assertRaises(RuntimeError):
+            agents._do_refresh("claude", boom, time.time)
+
+        with agents._refresh_cond:
+            self.assertFalse(agents._refreshing)
+
+
 class ListRcSessionsMergesExternalTest(unittest.TestCase):
     def setUp(self):
         _reset_agents_state()

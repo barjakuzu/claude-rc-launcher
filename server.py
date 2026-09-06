@@ -586,7 +586,11 @@ def _derive_session_state(session_row, now=None):
     if status in ("unknown", None) and session_row.get("kind") != "external":
         created_at = session_row.get("created_at")
         if created_at is None:
-            return "starting"
+            # tmux `#{session_created}` was unavailable — treat as past the
+            # grace period rather than staying "starting" forever (the
+            # claude row's waiting_for/blocked checks above still take
+            # precedence when they apply).
+            return "idle"
         if now is None:
             now = time.time()
         if now - created_at < STARTING_GRACE_SECONDS:

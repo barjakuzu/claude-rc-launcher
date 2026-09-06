@@ -71,11 +71,14 @@ def _do_refresh(bin_path, run, now_fn):
     hold up other threads reading stale cache), then publish the result
     and release anyone waiting on it."""
     global _refreshing
-    rows = _fetch_rows(bin_path, run)
-    with _refresh_cond:
-        _cache["rows"], _cache["at"], _cache["bin"] = rows, now_fn(), bin_path
-        _refreshing = False
-        _refresh_cond.notify_all()
+    try:
+        rows = _fetch_rows(bin_path, run)
+        with _refresh_cond:
+            _cache["rows"], _cache["at"], _cache["bin"] = rows, now_fn(), bin_path
+    finally:
+        with _refresh_cond:
+            _refreshing = False
+            _refresh_cond.notify_all()
 
 
 def list_claude_sessions(claude_bin=None, run=subprocess.run, now_fn=time.time):
