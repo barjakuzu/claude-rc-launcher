@@ -266,6 +266,21 @@ class BuildTmuxCommandNativeFlagsTest(unittest.TestCase):
         self.assertIn("RC_SESSION_ID=0d3b8b1a-1111-4a2b-9c3d-abcdef012345", cmd)
         self.assertIn("RC_TITLE=portugal", cmd)
 
+    def test_mixed_caps_session_id_flag_only_disables_native_session_id_too(self):
+        # session_id_flag + remote_control_flag present but name_flag
+        # missing -> native_launch is false (needs the full set), so
+        # --session-id must NOT be emitted either (it used to be gated on
+        # caps["session_id_flag"] alone, which let a mixed-caps claude get
+        # --session-id without --name/--remote-control).
+        self._set_caps({**NATIVE_CAPS, "name_flag": False})
+        cmd = sessions.build_tmux_command(
+            "rc-portugal", "/home/user/project", "c",
+            session_id="0d3b8b1a-1111-4a2b-9c3d-abcdef012345")
+        joined = " ".join(cmd)
+        self.assertNotIn("--session-id", joined)
+        self.assertNotIn("RC_SESSION_ID=", " ".join(cmd))
+        self.assertNotIn("--remote-control", joined)
+
     def test_title_overrides_display_name(self):
         self._set_caps(NATIVE_CAPS)
         cmd = sessions.build_tmux_command(

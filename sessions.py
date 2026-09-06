@@ -98,7 +98,7 @@ def build_tmux_command(name, session_dir, mode, model=None, sandbox=False,
             claude_args = RC_FLAGS.get(mode, RC_FLAGS["c"]).split()
         # --session-id and --resume are mutually exclusive: on a resume
         # launch, --resume <uuid> alone pins the conversation.
-        if session_id and not resume and caps.get("session_id_flag"):
+        if session_id and not resume and native:
             claude_args.extend(["--session-id", session_id])
         if native:
             # Long form: compat.py's NAME_RE detects "--name", not "-n".
