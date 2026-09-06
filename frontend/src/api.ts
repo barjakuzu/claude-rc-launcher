@@ -1,3 +1,10 @@
+export interface UpdateResult {
+  ok: boolean;
+  message: string;
+  remote_sha?: string;
+  pending_commits?: string[];
+}
+
 async function req(method: string, path: string, device?: string, body?: unknown) {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (device && device !== 'local') headers['X-RC-Device'] = device;
@@ -40,7 +47,7 @@ export const api = {
   tunnelStart: () => req('POST', '/tunnel/start'),
   tunnelStop: () => req('POST', '/tunnel/stop'),
   updateCheck: () => req('GET', '/update-check'),
-  update: () => req('POST', '/update'),
+  update: (body?: { confirm?: string }): Promise<UpdateResult> => req('POST', '/update', undefined, body ?? {}),
   // Device registry lives on the hub — never proxied, so no device arg.
   deviceRename: (id: string, name: string) => req('POST', '/devices/rename', undefined, { id, name }),
 };

@@ -217,7 +217,23 @@ function VersionChip() {
   const handleUpdate = async () => {
     setUpdating(true);
     try {
-      await api.update();
+      let result = await api.update();
+      if (!result.ok && result.remote_sha) {
+        const commits = (result.pending_commits || []).join('\n');
+        const confirmed = window.confirm(
+          `Update to ${result.remote_sha}?\n\nPending commits:\n${commits || '(none)'}`
+        );
+        if (!confirmed) {
+          setUpdating(false);
+          return;
+        }
+        result = await api.update({ confirm: result.remote_sha });
+      }
+      if (!result.ok) {
+        window.alert(result.message || 'Update failed.');
+        setUpdating(false);
+        return;
+      }
     } catch {/* likely network error as server restarts — expected */}
     // Reload after 3s
     setTimeout(() => { window.location.reload(); }, 3000);
