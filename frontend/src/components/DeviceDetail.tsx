@@ -141,7 +141,7 @@ export function DeviceDetail({ device, cards, tab, setTab, onClose, layout }: De
         )}
 
         {tab === 'settings' && (
-          <DeviceSettings device={device} mobile={mobile} />
+          <DeviceSettings device={device} cards={cards} mobile={mobile} />
         )}
       </div>
 
