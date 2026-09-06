@@ -1306,7 +1306,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._json({"ok": False, "message": "Not a git install. Re-run the install script."}, 400)
                 return
             body = self._read_body()
-            status, result, merged_sha = _do_git_update_phase(app_dir, body.get("confirm", ""))
+            status, result, _merged_sha = _do_git_update_phase(app_dir, body.get("confirm", ""))
             if not result.get("ok"):
                 self._json(result, status)
                 return
