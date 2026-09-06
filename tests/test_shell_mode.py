@@ -2,11 +2,29 @@
 import os, sys, unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import compat
 import config
 import sessions
 
+# This file's BuildTmuxCommandTest predates native-flag support and
+# exercises the legacy RC_FLAGS-driven argv shape specifically - it must
+# not depend on whatever claude binary happens to be installed on the
+# machine running the tests, so caps are pinned to all-False here.
+_LEGACY_CAPS = {
+    "session_id_flag": False, "name_flag": False,
+    "remote_control_flag": False, "permission_mode_flag": False,
+    "agents_json": False, "version": None,
+}
+
 
 class BuildTmuxCommandTest(unittest.TestCase):
+    def setUp(self):
+        self._orig_get_caps = compat.get_caps
+        compat.get_caps = lambda: dict(_LEGACY_CAPS)
+
+    def tearDown(self):
+        compat.get_caps = self._orig_get_caps
+
     def _env_value(self, cmd, key):
         """Return the value of an -e KEY=VALUE pair in a tmux argv."""
         for i, arg in enumerate(cmd):
@@ -112,6 +130,30 @@ class ResolveClaudeModeTest(unittest.TestCase):
     def test_claude_modes_pass_through(self):
         for mode in ("c", "ci", "safe"):
             self.assertEqual(config.resolve_claude_mode(mode), mode)
+
+
+class PermissionModeMappingTest(unittest.TestCase):
+    def test_every_claude_mode_has_a_permission_mode(self):
+        for mode in ("c", "ci", "safe"):
+            self.assertIn(mode, config.PERMISSION_MODE)
+
+    def test_c_and_ci_bypass_safe_accepts_edits(self):
+        self.assertEqual(config.PERMISSION_MODE["c"], "bypassPermissions")
+        self.assertEqual(config.PERMISSION_MODE["ci"], "bypassPermissions")
+        self.assertEqual(config.PERMISSION_MODE["safe"], "acceptEdits")
+
+    def test_ci_carries_teammate_mode_extra_flag(self):
+        self.assertEqual(config.EXTRA_FLAGS.get("ci"), ["--teammate-mode", "in-process"])
+        self.assertEqual(config.EXTRA_FLAGS.get("c", []), [])
+        self.assertEqual(config.EXTRA_FLAGS.get("safe", []), [])
+
+    def test_shell_mode_has_no_permission_mode(self):
+        self.assertNotIn(config.SHELL_MODE, config.PERMISSION_MODE)
+
+    def test_rc_flags_still_present_for_back_compat(self):
+        # Old callers (e.g. a rolling upgrade of a device still on Phase 0)
+        # that read RC_FLAGS as a string must keep working.
+        self.assertEqual(config.RC_FLAGS["c"], "--dangerously-skip-permissions --verbose")
 
 
 if __name__ == "__main__":

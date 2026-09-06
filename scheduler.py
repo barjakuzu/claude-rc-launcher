@@ -9,9 +9,10 @@ import uuid
 from datetime import datetime, timedelta
 
 import stats
-from config import (SESSION_PREFIX, CLAUDE_BIN, RC_FLAGS, MODEL_MAP,
+from config import (SESSION_PREFIX, RC_FLAGS,
                     resolve_claude_mode, RC_MAX_SESSIONS)
-from sessions import session_exists, setup_session, get_url, list_rc_sessions, get_session_env
+from sessions import (session_exists, setup_session, get_url, list_rc_sessions,
+                      get_session_env, build_tmux_command)
 from schedules import load_schedules, save_schedules, add_history_entry
 import schedules as schedules_module
 
@@ -317,28 +318,19 @@ def _fire_schedule(schedule):
         return
 
     # Create tmux session (use sandbox workaround for root, same as server.py)
-    # A scheduled run always needs Claude, never a plain shell.
+    # A scheduled run always needs Claude, never a plain shell. Routed
+    # through build_tmux_command (shared with /start, restart_session,
+    # resume_session) so a scheduled run gets the same UUID pre-assignment
+    # and native --session-id/--name/--remote-control when the installed
+    # claude supports it; sandbox=True unconditionally to preserve this
+    # function's previous always-on IS_SANDBOX=1 behavior.
     mode = resolve_claude_mode(mode)
-    claude_flags = RC_FLAGS[mode]
-    model_flag = MODEL_MAP.get(model) if model else None
-    claude_args = claude_flags.split()
-    if model_flag:
-        claude_args.extend(["--model", model_flag])
-    claude_cmd = " ".join(
-        [f"CLAUDECODE= {CLAUDE_BIN}"] + claude_args
+    session_id = str(uuid.uuid4())
+    cmd = build_tmux_command(
+        session_name, workdir, mode, model=model, sandbox=True,
+        session_id=session_id, title=safe_name,
+        extra_env=["-e", f"RC_SCHEDULE_ID={schedule_id}"],
     )
-    wrapper = f'{claude_cmd} 2>&1 || {{ echo ""; sleep 30; }}'
-    cmd = [
-        "tmux", "new-session", "-d", "-s", session_name,
-        "-c", workdir,
-        "-x", "200", "-y", "50",
-        "-e", f"RC_MODE={mode}",
-        "-e", f"RC_WORKDIR={workdir}",
-        "-e", f"RC_SCHEDULE_ID={schedule_id}",
-        "-e", "DISPLAY=:1",
-        "-e", "IS_SANDBOX=1",
-        "bash", "-c", wrapper,
-    ]
     print(f"  Scheduler: firing '{name}' → session {session_name}")
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
@@ -350,7 +342,10 @@ def _fire_schedule(schedule):
     # Setup session in background (trust prompt, /remote-control, /rename)
     # Then send the task prompt after setup completes
     def _setup_and_send():
-        setup_session(session_name, session_name, mode)
+        # safe_name matches the title build_tmux_command used for
+        # --name/--remote-control above, so a native launch's RC_TITLE and
+        # the /rename fallback both land on the same display name.
+        setup_session(session_name, safe_name, mode)
         # After setup, send the prompt
         if not session_exists(session_name):
             _release_claim()
@@ -465,7 +460,8 @@ def _adopt_live_sessions(schedules=None):
                                     schedule.get("name", "task").replace(" ", "-"))
         elif rest.startswith("sched-"):
             remainder = rest[len("sched-"):]
-            for safe, candidate in by_safe_name.items():
+            for safe, candidate in sorted(by_safe_name.items(),
+                                           key=lambda kv: len(kv[0]), reverse=True):
                 if remainder == safe or remainder.startswith(safe + "-"):
                     schedule = candidate
                     safe_name = safe

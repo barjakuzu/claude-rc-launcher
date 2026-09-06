@@ -1,6 +1,7 @@
 """HTTP handler and routing."""
 
 import base64
+import compat
 import hmac
 import http.server
 import ipaddress
@@ -8,6 +9,7 @@ import json
 import os
 import re
 import secrets
+import signal
 import stats
 import subprocess
 import sys
@@ -15,6 +17,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import uuid
 from http.cookies import SimpleCookie
 from urllib.parse import urlparse, parse_qs
 
@@ -438,6 +441,13 @@ def _valid_session_name(name):
     return bool(name) and ".." not in name and "/" not in name and name.startswith(SESSION_PREFIX)
 
 
+def _new_session_id():
+    """One session id per /start call, passed to build_tmux_command so a
+    session that supports --session-id gets a known UUID from birth
+    instead of one discovered later by scanning JSONL titles."""
+    return str(uuid.uuid4())
+
+
 def _update_confirmed(confirm, remote_sha):
     """True if the client explicitly confirmed the exact commit to update
     to. Prevents a single stray POST /update from silently deploying
@@ -482,8 +492,18 @@ def _do_git_update_phase(app_dir, confirm, run=subprocess.run):
             return 500, {"ok": False, "message": f"git merge failed: {merge.stderr.strip()}"}, None
 
         return 200, {"ok": True}, remote_sha
-    except (subprocess.TimeoutExpired, OSError):
-        return 500, {"ok": False, "error": "git timed out"}, None
+    except (subprocess.TimeoutExpired, OSError) as e:
+        return 500, {"ok": False, "message": f"git failed: {e}"}, None
+
+
+def _version_response():
+    """Body for GET /version - the launcher version plus the detected
+    capabilities of the installed `claude` binary, extracted so it's
+    testable without a live socket. Calls compat.get_caps() (lazy,
+    memoized) rather than reading compat.CAPS directly so this works
+    correctly whether or not detection has run yet."""
+    caps = compat.get_caps()
+    return {"version": VERSION, "claude_version": caps.get("version"), "caps": caps}
 
 
 def _pick_restart_command(system_unit_active, user_unit_active, is_macos, uid):
@@ -539,6 +559,51 @@ def _session_cap_message(current_count, max_sessions):
     if current_count >= max_sessions:
         return f"Session cap reached ({max_sessions}). Stop a session first."
     return None
+
+
+def _derive_session_state(session_row):
+    """One of starting|busy|idle|needs_attention|ended from a session row
+    (either shape list_rc_sessions returns: a launcher rc-* row with
+    status running|dead|unknown, or an external row with status from
+    claude agents --json: idle|busy|ended)."""
+    if session_row.get("waiting_for"):
+        return "needs_attention"
+    status = session_row.get("status")
+    if status == "dead" or status == "ended":
+        return "ended"
+    if status == "busy":
+        return "busy"
+    if status in ("unknown", None) and session_row.get("kind") != "external":
+        return "starting"
+    return "idle"
+
+
+def _stop_external_pid(pid, run=subprocess.run):
+    """Stop a non-launcher (external) session by signaling its process
+    directly, only after verifying /proc/<pid>/cmdline's first argv token
+    is literally 'claude' — this is the only guard between "stop any
+    session shown in the UI" and "kill an arbitrary pid a browser named",
+    since external rows have no rc-* tmux session to scope the request to.
+    `run` is accepted for interface symmetry with other server.py helpers
+    that inject subprocess.run for testability, but the actual check reads
+    /proc directly (Linux-only) rather than shelling out.
+    """
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            raw = f.read()
+    except (FileNotFoundError, OSError):
+        return False, "Process not found"
+    parts = raw.split(b"\x00")
+    argv0 = parts[0].decode(errors="replace") if parts else ""
+    if os.path.basename(argv0) != "claude":
+        return False, "Not a claude process"
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except PermissionError:
+        return False, "Permission denied"
+    except ProcessLookupError:
+        return False, "Process not found"
+    return True, "Stopped"
 
 
 def _cookie_secure_flag(behind_tls, forwarded_proto):
@@ -751,6 +816,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         elif path == "/sessions":
             sessions = list_rc_sessions()
+            for s in sessions:
+                s["state"] = _derive_session_state(s)
             errors = get_all_session_errors()
             resp = {"sessions": sessions}
             if errors:
@@ -897,7 +964,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._json(get_tunnel_status(AUTH_USER, AUTH_PASS))
 
         elif path == "/version":
-            self._json({"version": VERSION})
+            self._json(_version_response())
 
         elif path == "/stats":
             sess = list_rc_sessions()
@@ -906,6 +973,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             s["tokens_now"] = sum(x.get("tokens", 0) for x in sess)
             s["sessions"] = len(sess)
             s["max_sessions"] = RC_MAX_SESSIONS
+            caps = compat.get_caps()
+            s["claude_version"] = caps.get("version")
+            s["caps"] = caps
             self._json(s)
 
         elif path == "/overview":
@@ -1108,8 +1178,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._json({"ok": False, "message": cap_msg}, 429)
                 return
 
+            session_id = _new_session_id()
             cmd = build_tmux_command(name, session_dir, mode, model=model,
-                                     sandbox=sandbox)
+                                     sandbox=sandbox, session_id=session_id)
             print(f"  Starting session: {name} (mode={mode}, model={model}, dir={session_dir})")
             print(f"  CMD: {' '.join(cmd)}")
             result = subprocess.run(cmd, capture_output=True, text=True)
@@ -1135,6 +1206,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         elif path == "/stop":
             body = self._read_body()
+            if body.get("external") and body.get("pid"):
+                ok, reason = _stop_external_pid(int(body["pid"]))
+                self._json({"ok": ok, "message": reason}, 200 if ok else 400)
+                return
             name = body.get("name", "").strip()
             if not name:
                 self._json({"ok": False, "message": "Missing session name"}, 400)
@@ -1306,7 +1381,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._json({"ok": False, "message": "Not a git install. Re-run the install script."}, 400)
                 return
             body = self._read_body()
-            status, result, merged_sha = _do_git_update_phase(app_dir, body.get("confirm", ""))
+            status, result, _merged_sha = _do_git_update_phase(app_dir, body.get("confirm", ""))
             if not result.get("ok"):
                 self._json(result, status)
                 return

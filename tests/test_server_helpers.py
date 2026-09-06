@@ -149,7 +149,10 @@ class GitUpdatePhaseTest(unittest.TestCase):
             "/some/app-dir", "confirm-sha", run=fake_run)
 
         self.assertEqual(status, 500)
-        self.assertEqual(result, {"ok": False, "error": "git timed out"})
+        self.assertEqual(result["ok"], False)
+        self.assertIn("message", result)
+        self.assertNotIn("error", result)
+        self.assertTrue(result["message"].startswith("git failed:"))
         self.assertIsNone(merged_sha)
 
     def test_missing_git_binary_returns_error_not_exception(self):
@@ -160,7 +163,9 @@ class GitUpdatePhaseTest(unittest.TestCase):
             "/some/app-dir", "confirm-sha", run=fake_run)
 
         self.assertEqual(status, 500)
-        self.assertEqual(result, {"ok": False, "error": "git timed out"})
+        self.assertEqual(result["ok"], False)
+        self.assertIn("message", result)
+        self.assertIn("git not found", result["message"])
 
     def test_successful_merge_returns_ok(self):
         class R:
@@ -270,6 +275,101 @@ class DetectAndRestartTest(unittest.TestCase):
             raise FileNotFoundError("systemctl not found")
         server.subprocess.run = _raise_missing
         self.assertEqual(server._detect_and_restart(), "Restart manually to apply the update.")
+
+
+class VersionResponseTest(unittest.TestCase):
+    """Uses an explicit fake dict via compat.get_caps monkeypatching
+    rather than reading the mutated global compat.CAPS, so this test
+    doesn't depend on whatever detection has (or hasn't) run elsewhere."""
+
+    def test_includes_claude_version_and_caps(self):
+        fake_caps = {"session_id_flag": True, "name_flag": True,
+                     "remote_control_flag": False, "permission_mode_flag": False,
+                     "agents_json": True, "version": "9.9.9"}
+        orig_get_caps = server.compat.get_caps
+        server.compat.get_caps = lambda: fake_caps
+        try:
+            body = server._version_response()
+        finally:
+            server.compat.get_caps = orig_get_caps
+
+        self.assertEqual(body["version"], server.VERSION)
+        self.assertEqual(body["claude_version"], "9.9.9")
+        self.assertEqual(body["caps"], fake_caps)
+
+
+class NewSessionIdTest(unittest.TestCase):
+    def test_returns_a_uuid_string(self):
+        import uuid
+        sid = server._new_session_id()
+        self.assertIsInstance(sid, str)
+        # Round-trips through uuid.UUID without raising -> it's a valid UUID.
+        uuid.UUID(sid)
+
+
+class DeriveSessionStateTest(unittest.TestCase):
+    def test_waiting_for_wins_over_everything(self):
+        row = {"status": "busy", "waiting_for": "permission_prompt"}
+        self.assertEqual(server._derive_session_state(row), "needs_attention")
+
+    def test_dead_launcher_session_is_ended(self):
+        row = {"status": "dead"}
+        self.assertEqual(server._derive_session_state(row), "ended")
+
+    def test_busy_status_is_busy(self):
+        row = {"status": "busy", "kind": "external"}
+        self.assertEqual(server._derive_session_state(row), "busy")
+
+    def test_unknown_status_non_external_is_starting(self):
+        row = {"status": "unknown"}
+        self.assertEqual(server._derive_session_state(row), "starting")
+
+    def test_none_status_non_external_is_starting(self):
+        row = {"status": None}
+        self.assertEqual(server._derive_session_state(row), "starting")
+
+    def test_unknown_status_external_is_not_starting(self):
+        row = {"status": "unknown", "kind": "external"}
+        self.assertEqual(server._derive_session_state(row), "idle")
+
+    def test_running_launcher_session_is_idle(self):
+        row = {"status": "running"}
+        self.assertEqual(server._derive_session_state(row), "idle")
+
+    def test_idle_external_session_is_idle(self):
+        row = {"status": "idle", "kind": "external"}
+        self.assertEqual(server._derive_session_state(row), "idle")
+
+    def test_ended_external_session(self):
+        row = {"status": "ended", "kind": "external"}
+        self.assertEqual(server._derive_session_state(row), "ended")
+
+
+class StopExternalPidTest(unittest.TestCase):
+    def test_refuses_non_claude_process(self):
+        import unittest.mock as mock
+        with mock.patch("builtins.open", mock.mock_open(read_data=b"/usr/bin/python3\x00script.py\x00")):
+            ok, reason = server._stop_external_pid(99999)
+        self.assertFalse(ok)
+        self.assertEqual(reason, "Not a claude process")
+
+    def test_refuses_when_cmdline_unreadable(self):
+        import unittest.mock as mock
+        with mock.patch("builtins.open", side_effect=FileNotFoundError):
+            ok, reason = server._stop_external_pid(99999)
+        self.assertFalse(ok)
+        self.assertEqual(reason, "Process not found")
+
+    def test_stops_a_verified_claude_process(self):
+        import unittest.mock as mock
+        with mock.patch("builtins.open", mock.mock_open(read_data=b"/usr/local/bin/claude\x00--resume\x00")), \
+             mock.patch("os.kill") as fake_kill:
+            ok, reason = server._stop_external_pid(12345)
+        self.assertTrue(ok)
+        self.assertEqual(reason, "Stopped")
+        fake_kill.assert_called_once()
+        import signal
+        self.assertEqual(fake_kill.call_args[0], (12345, signal.SIGTERM))
 
 
 if __name__ == "__main__":

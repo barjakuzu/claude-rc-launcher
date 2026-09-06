@@ -8,7 +8,24 @@ from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import compat
 import scheduler
+
+# _fire_schedule now routes through sessions.build_tmux_command, which calls
+# compat.get_caps() - pin it deterministically so scheduler tests don't
+# depend on whatever claude binary happens to be installed on the machine
+# running the suite. Default to legacy (matches these tests' pre-native
+# expectations); FireScheduleNativeFlagsTest overrides per-case.
+_LEGACY_CAPS = {
+    "session_id_flag": False, "name_flag": False,
+    "remote_control_flag": False, "permission_mode_flag": False,
+    "agents_json": False, "version": None,
+}
+_NATIVE_CAPS = {
+    "session_id_flag": True, "name_flag": True,
+    "remote_control_flag": True, "permission_mode_flag": True,
+    "agents_json": True, "version": "2.1.263",
+}
 
 
 class ScheduleErrorLoggingTest(unittest.TestCase):
@@ -127,6 +144,7 @@ def _patch_scheduler(fake):
         "thread": scheduler.threading.Thread,
         "list_sessions": scheduler.list_rc_sessions,
         "add_history": scheduler.add_history_entry,
+        "get_caps": compat.get_caps,
     }
     scheduler.subprocess.run = fake
     scheduler.time.sleep = lambda *_: None
@@ -134,6 +152,7 @@ def _patch_scheduler(fake):
     scheduler.setup_session = lambda *a, **kw: None
     scheduler.threading.Thread = ImmediateThread
     scheduler.list_rc_sessions = lambda: [{"name": n} for n in fake.alive]
+    compat.get_caps = lambda: dict(_LEGACY_CAPS)
     scheduler._active_scheduled_sessions.clear()
     return saved
 
@@ -146,6 +165,7 @@ def _restore_scheduler(saved):
     scheduler.threading.Thread = saved["thread"]
     scheduler.list_rc_sessions = saved["list_sessions"]
     scheduler.add_history_entry = saved["add_history"]
+    compat.get_caps = saved["get_caps"]
     scheduler._active_scheduled_sessions.clear()
 
 
@@ -212,6 +232,59 @@ class FireScheduleNamingTest(unittest.TestCase):
         names = self.fake.new_session_names()
         self.assertEqual(len(names), 1)
         self.assertRegex(names[0], r'^rc-run-[0-9a-f]{12}$')
+
+
+class FireScheduleNativeFlagsTest(unittest.TestCase):
+    """_fire_schedule is routed through sessions.build_tmux_command
+    (shared with /start, restart_session, resume_session), so a scheduled
+    run gets a pre-assigned UUID and native identity flags when the
+    installed claude supports them, and keeps RC_SCHEDULE_ID either way."""
+
+    def setUp(self):
+        self.fake = FakeRun()
+        self._saved = _patch_scheduler(self.fake)
+        self.history = []
+        scheduler.add_history_entry = lambda sid, status, msg, **kw: self.history.append((sid, status, msg))
+
+    def tearDown(self):
+        _restore_scheduler(self._saved)
+
+    def test_rc_schedule_id_env_is_set_regardless_of_caps(self):
+        scheduler._fire_schedule({"id": "s1", "name": "My Task", "cron": "0 9 * * *",
+                                   "workdir": "/tmp", "prompt": "hi"})
+        name = self.fake.new_session_names()[0]
+        self.assertEqual(self.fake.env[name].get("RC_SCHEDULE_ID"), "s1")
+
+    def test_native_caps_use_title_as_name_and_remote_control(self):
+        compat.get_caps = lambda: dict(_NATIVE_CAPS)
+        scheduler._fire_schedule({"id": "s1", "name": "My Task", "cron": "0 9 * * *",
+                                   "workdir": "/tmp", "prompt": "hi"})
+        name = self.fake.new_session_names()[0]
+        new_session_call = next(
+            c for c in self.fake.calls
+            if isinstance(c, list) and c[:2] == ["tmux", "new-session"] and c[c.index("-s") + 1] == name
+        )
+        joined = " ".join(new_session_call)
+        self.assertIn("--name My-Task", joined)
+        self.assertIn("--remote-control My-Task", joined)
+        self.assertIn("--session-id", joined)
+        self.assertEqual(self.fake.env[name].get("RC_TITLE"), "My-Task")
+        self.assertIn("RC_SESSION_ID", self.fake.env[name])
+
+    def test_legacy_caps_fall_back_to_rc_flags(self):
+        compat.get_caps = lambda: dict(_LEGACY_CAPS)
+        scheduler._fire_schedule({"id": "s1", "name": "My Task", "cron": "0 9 * * *",
+                                   "workdir": "/tmp", "prompt": "hi"})
+        name = self.fake.new_session_names()[0]
+        new_session_call = next(
+            c for c in self.fake.calls
+            if isinstance(c, list) and c[:2] == ["tmux", "new-session"] and c[c.index("-s") + 1] == name
+        )
+        joined = " ".join(new_session_call)
+        self.assertNotIn("--name", joined)
+        self.assertNotIn("--remote-control", joined)
+        self.assertNotIn("RC_SESSION_ID", self.fake.env[name])
+        self.assertIn("--dangerously-skip-permissions", joined)
 
 
 class ConcurrencyTest(unittest.TestCase):
@@ -418,6 +491,24 @@ class AdoptLiveSessionsTest(unittest.TestCase):
             scheduler._active_scheduled_sessions["s1"]["session_name"],
             "rc-sched-My-Task-20260101",
         )
+
+    def test_prefers_longest_matching_safe_name(self):
+        # Two schedules whose sanitized names are prefixes of one another.
+        # A legacy tmux session "rc-sched-deploy-prod-0906-1200" must adopt
+        # into "deploy-prod", not "deploy" (the shorter, earlier-seen match).
+        self.fake.alive.add("rc-sched-deploy-prod-0906-1200")
+        schedules = [
+            {"id": "short-id", "name": "deploy", "cron": "0 9 * * *",
+             "workdir": "/tmp", "prompt": "hi"},
+            {"id": "long-id", "name": "deploy-prod", "cron": "0 9 * * *",
+             "workdir": "/tmp", "prompt": "hi"},
+        ]
+
+        adopted = scheduler._adopt_live_sessions(schedules)
+
+        self.assertEqual(adopted, 1)
+        self.assertIn("long-id", scheduler._active_scheduled_sessions)
+        self.assertNotIn("short-id", scheduler._active_scheduled_sessions)
 
     def test_fire_schedule_skips_after_adoption(self):
         self.fake.alive.add("rc-run-abcdef012345")

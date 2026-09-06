@@ -11,7 +11,7 @@ HOST = os.environ.get("RC_HOST", "0.0.0.0")
 PORT = int(os.environ.get("RC_PORT", "8200"))
 SESSION_PREFIX = os.environ.get("RC_PREFIX", "rc-")
 WORKING_DIR = os.environ.get("RC_WORKING_DIR", ".")
-CLAUDE_BIN = os.environ.get("RC_CLAUDE_BIN", "claude")
+CLAUDE_BIN = os.path.expanduser(os.environ.get("RC_CLAUDE_BIN", "claude"))
 AUTH_USER = os.environ.get("RC_AUTH_USER", "")
 AUTH_PASS = os.environ.get("RC_AUTH_PASS", "")
 SHELL_BIN = os.environ.get("RC_SHELL_BIN") or os.environ.get("SHELL") or "/bin/bash"
@@ -39,6 +39,23 @@ RC_FLAGS = {
     "ci": "--dangerously-skip-permissions --teammate-mode in-process --verbose",
     "safe": "--verbose",
     SHELL_MODE: "",
+}
+
+# Permission mode per launch, replacing the RC_FLAGS strings as the source
+# of truth for what sessions.build_tmux_command actually passes. RC_FLAGS
+# itself stays defined above, unchanged, for any external caller still
+# reading it as a flag string during a rolling upgrade.
+PERMISSION_MODE = {
+    "c": "bypassPermissions",
+    "ci": "bypassPermissions",
+    "safe": "acceptEdits",
+}
+
+# Extra argv tokens per mode beyond --permission-mode, in the same style
+# tmux command lists use everywhere else in this codebase (no shell
+# quoting needed - these become individual argv entries).
+EXTRA_FLAGS = {
+    "ci": ["--teammate-mode", "in-process"],
 }
 
 def resolve_claude_mode(mode):

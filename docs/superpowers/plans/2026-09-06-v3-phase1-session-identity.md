@@ -2456,6 +2456,1016 @@ git commit -m "feat(frontend): session rows show derived state pill and external
 
 ---
 
+### Task 21: `configreport.py` — device-side config parity report
+
+**Files:**
+- Create: `configreport.py`
+- Test: `tests/test_configreport.py` (new)
+
+**Interfaces:**
+- Produces:
+  - `configreport.collect_config_report(home=None, run=subprocess.run) -> dict` — pure-ish, `home` defaults to `os.path.expanduser("~")` (injectable for tests), `run` defaults to `subprocess.run` (injectable, every call `timeout=10`, argv list, never `shell=True`). Returns:
+
+    ```python
+    {
+      "claude_version": Optional[str],   # from compat.claude_version()
+      "claude_config": {
+        "path": str,                      # "<home>/claude-config"
+        "head": Optional[str],            # full commit sha
+        "short_head": Optional[str],      # short sha
+        "dirty": bool,                    # True iff a tracked file OTHER THAN config/settings.json is dirty
+        "dirty_files": list[str],         # every file `git status --porcelain` reports, name only
+        "behind_remote": Optional[int],   # int or None; see Step 3 for how "no fetch" is honored
+        "last_commit_date": Optional[str],
+      },
+      "skills": {
+        "count": int,
+        "names": list[str],
+        "dangling": list[str],            # symlinks broken for a reason OTHER than missing external/ deps
+        "deps_missing": list[str],        # symlinks into the gitignored external/ dir that are broken
+                                           # ("deps/install.sh not run here")
+        "device_only": list[str],         # names matching a `/skills/<name>/` line in .gitignore
+      },
+      "agents": list[str],
+      "rules": {"shared": list[str], "local": list[str]},   # empty lists are normal, not an error
+      "plugins": {
+        "declared": list[str],
+        "installed": list[str],           # excludes any entry whose marketplace is "skills-dir"
+        "missing": list[str],
+        "extra": list[str],               # never includes a "skills-dir" entry
+      },
+      "marketplaces": list[str],
+      "settings": {
+        "hooks_present": bool,
+        "remote_control_at_startup": Optional[bool],
+        "symlinked": bool,
+        "sha256": Optional[str],
+      },
+      "effective_model": Optional[str],   # $ANTHROPIC_MODEL, falling back to settings.json's "model" key
+      "claude_local_md": bool,
+      "generated_at": int,                # epoch seconds, int(time.time())
+      "errors": list[str],
+    }
+    ```
+  - Never raises. Every subprocess call and every filesystem access that isn't a plain `os.path.exists`/`os.path.isdir` check is wrapped so a failure appends a short string to `errors[]` and degrades the corresponding field to `None`/`[]`/`False` rather than propagating.
+  - **Never reads the contents of any file under `skills/`** (one device-only skill holds a live secret) — only `os.listdir`/`os.walk` for names and `os.path.islink`/`os.path.exists` for link health. This applies to every skill, not just device-only ones.
+  - Plugin-provided skills live under `~/.claude/plugins/cache/`, not under `<claude-config>/skills/` — `collect_config_report` never looks there; the `skills` block only ever reflects `<claude-config>/skills/`.
+  - A plugin row from `claude plugin list` is dropped entirely (from `installed`, and therefore from both `missing` and `extra`) when its marketplace segment (the part after `@`) is exactly `skills-dir` — that marketplace is synthetic, created for `~/.claude/skills` entries that ship commands/hooks, and every device has these installed-but-undeclared by design.
+  - A symlink under `skills/<name>` (at any depth) that resolves into the gitignored `<claude-config>/external/` directory (by literal path prefix `<claude-config>/external/`, checked via `os.path.realpath`'s parent chain — no need to resolve the symlink first if `os.readlink` already starts with that prefix, absolute or relative-and-then-joined) and is currently broken is `deps_missing`, not `dangling`. Any other broken symlink under `skills/` is `dangling`. A given skill name appears in at most one of the two lists (first classification wins if multiple broken links exist under one skill directory: `deps_missing` if any broken link targets `external/`, else `dangling`).
+  - `device_only` names come from parsing `.gitignore` for lines matching `^/skills/([^/]+)/?$` (anchored at the repo root, one path segment) — not from asking git per-name via `check-ignore` (git-ignore semantics for a *tracked* vs *never-tracked* directory differ, and the spec is explicit that today's real `.gitignore` uses the `/skills/<name>/` form). A name found this way is `device_only` even if the directory doesn't currently exist on this device.
+- Consumes: `compat.claude_version()` (Task 1).
+
+- [ ] **Step 1: Write the test fixtures and failing tests**
+
+Create `tests/test_configreport.py`:
+
+```python
+"""configreport.py: per-device config parity report (git state, skills,
+plugins, rules, settings) — read-only, stdlib only, never raises, never
+reads skill file contents (one device-only skill can hold a live secret)."""
+import hashlib
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import configreport
+
+
+def _run(cmd, **kw):
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=kw.get("timeout", 10))
+
+
+def _git(cwd, *args):
+    subprocess.run(["git", "-C", cwd] + list(args), check=True,
+                    capture_output=True, text=True)
+
+
+class CollectConfigReportTest(unittest.TestCase):
+    def setUp(self):
+        self.home = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.home, ignore_errors=True)
+        self.cfg = os.path.join(self.home, "claude-config")
+        os.makedirs(os.path.join(self.cfg, "skills"))
+        os.makedirs(os.path.join(self.cfg, "agents"))
+        os.makedirs(os.path.join(self.cfg, "rules", "local"))
+        os.makedirs(os.path.join(self.cfg, "config"))
+        os.makedirs(os.path.join(self.cfg, "external", "watch"))
+
+        # A normal skill: real dir with a SKILL.md.
+        os.makedirs(os.path.join(self.cfg, "skills", "plain"))
+        with open(os.path.join(self.cfg, "skills", "plain", "SKILL.md"), "w") as f:
+            f.write("# plain\n")
+
+        # A deps-installed skill: symlink into external/, currently intact.
+        os.symlink(os.path.join(self.cfg, "external", "watch"),
+                    os.path.join(self.cfg, "skills", "watch"))
+
+        # A deps-missing skill: symlink into external/ that's broken
+        # (as if deps/install.sh was never run on this device).
+        os.symlink(os.path.join(self.cfg, "external", "never-cloned"),
+                    os.path.join(self.cfg, "skills", "uninstalled-dep"))
+
+        # A dangling-for-another-reason skill: broken symlink NOT into external/.
+        os.symlink("/nonexistent-target-xyz",
+                    os.path.join(self.cfg, "skills", "truly-broken"))
+
+        with open(os.path.join(self.cfg, "agents", "claude.md"), "w") as f:
+            f.write("# claude agent\n")
+        with open(os.path.join(self.cfg, "rules", "local", ".gitkeep"), "w") as f:
+            f.write("")
+        with open(os.path.join(self.cfg, "plugins.txt"), "w") as f:
+            f.write("watch@official\nghost@official\n")
+        with open(os.path.join(self.cfg, "marketplaces.txt"), "w") as f:
+            f.write("official https://example.com/official\n")
+        settings = {"hooks": {"Stop": []}, "remoteControlAtStartup": True, "model": "claude-opus"}
+        with open(os.path.join(self.cfg, "config", "settings.json"), "w") as f:
+            json.dump(settings, f)
+
+        # Device-only skill: gitignored, secret content that must never be
+        # read (only its NAME may appear anywhere in the report).
+        os.makedirs(os.path.join(self.cfg, "skills", "google-workspace"))
+        with open(os.path.join(self.cfg, "skills", "google-workspace", "SKILL.md"), "w") as f:
+            f.write("super-secret-token-do-not-read\n")
+
+        with open(os.path.join(self.cfg, ".gitignore"), "w") as f:
+            f.write("/external/\n/skills/google-workspace/\n")
+
+        _git(self.cfg, "init", "-q")
+        _git(self.cfg, "config", "user.email", "test@example.com")
+        _git(self.cfg, "config", "user.name", "test")
+        _git(self.cfg, "add", "-A")
+        _git(self.cfg, "commit", "-q", "-m", "init")
+        os.makedirs(os.path.join(self.home, ".claude"), exist_ok=True)
+        os.symlink(os.path.join(self.cfg, "skills"), os.path.join(self.home, ".claude", "skills"))
+
+    def _fake_run_with_plugins(self, plugin_lines):
+        def fake_run(cmd, **kw):
+            class R:
+                pass
+            r = R()
+            if cmd[:2] == ["claude", "plugin"]:
+                r.returncode, r.stdout, r.stderr = 0, "\n".join(plugin_lines) + "\n", ""
+                return r
+            return _run(cmd, **kw)
+        return fake_run
+
+    def test_reports_git_state(self):
+        report = configreport.collect_config_report(home=self.home, run=_run)
+        self.assertTrue(report["claude_config"]["head"])
+        self.assertEqual(len(report["claude_config"]["short_head"]), 7)
+        self.assertFalse(report["claude_config"]["dirty"])
+        self.assertIsInstance(report["errors"], list)
+
+    def test_dirty_true_when_non_settings_file_dirty(self):
+        with open(os.path.join(self.cfg, "agents", "claude.md"), "a") as f:
+            f.write("more\n")
+        report = configreport.collect_config_report(home=self.home, run=_run)
+        self.assertTrue(report["claude_config"]["dirty"])
+        self.assertIn("agents/claude.md", report["claude_config"]["dirty_files"])
+
+    def test_dirty_false_when_only_settings_json_dirty(self):
+        with open(os.path.join(self.cfg, "config", "settings.json"), "a") as f:
+            f.write("\n")
+        report = configreport.collect_config_report(home=self.home, run=_run)
+        self.assertFalse(report["claude_config"]["dirty"])
+        self.assertIn("config/settings.json", report["claude_config"]["dirty_files"])
+
+    def test_deps_missing_vs_dangling_split(self):
+        report = configreport.collect_config_report(home=self.home, run=_run)
+        self.assertIn("uninstalled-dep", report["skills"]["deps_missing"])
+        self.assertIn("truly-broken", report["skills"]["dangling"])
+        self.assertNotIn("uninstalled-dep", report["skills"]["dangling"])
+        self.assertNotIn("truly-broken", report["skills"]["deps_missing"])
+        self.assertNotIn("watch", report["skills"]["deps_missing"])
+        self.assertNotIn("watch", report["skills"]["dangling"])
+
+    def test_device_only_skill_from_gitignore_never_reads_contents(self):
+        report = configreport.collect_config_report(home=self.home, run=_run)
+        self.assertIn("google-workspace", report["skills"]["device_only"])
+        dumped = json.dumps(report)
+        self.assertNotIn("super-secret-token-do-not-read", dumped)
+
+    def test_agents_and_rules_empty_local_not_error(self):
+        report = configreport.collect_config_report(home=self.home, run=_run)
+        self.assertIn("claude", report["agents"])
+        self.assertEqual(report["rules"]["shared"], [])
+        self.assertEqual(report["rules"]["local"], [])
+        self.assertEqual(report["errors"], [])
+
+    def test_plugins_declared_vs_installed_ignores_skills_dir_marketplace(self):
+        fake_run = self._fake_run_with_plugins([
+            "watch@official  v1.0",
+            "extra-plugin@official  v2.0",
+            "google-workspace@skills-dir  v0.0",
+        ])
+        report = configreport.collect_config_report(home=self.home, run=fake_run)
+        self.assertIn("watch@official", report["plugins"]["declared"])
+        self.assertIn("ghost@official", report["plugins"]["missing"])
+        self.assertIn("extra-plugin@official", report["plugins"]["extra"])
+        self.assertNotIn("google-workspace@skills-dir", report["plugins"]["installed"])
+        self.assertNotIn("google-workspace@skills-dir", report["plugins"]["extra"])
+
+    def test_settings_hooks_symlink_and_sha256(self):
+        report = configreport.collect_config_report(home=self.home, run=_run)
+        self.assertTrue(report["settings"]["hooks_present"])
+        self.assertTrue(report["settings"]["remote_control_at_startup"])
+        self.assertTrue(report["settings"]["symlinked"])
+        expected = hashlib.sha256(
+            open(os.path.join(self.cfg, "config", "settings.json"), "rb").read()
+        ).hexdigest()
+        self.assertEqual(report["settings"]["sha256"], expected)
+
+    def test_effective_model_from_env_overrides_settings(self):
+        old = os.environ.get("ANTHROPIC_MODEL")
+        os.environ["ANTHROPIC_MODEL"] = "claude-sonnet-env"
+        try:
+            report = configreport.collect_config_report(home=self.home, run=_run)
+            self.assertEqual(report["effective_model"], "claude-sonnet-env")
+        finally:
+            if old is None:
+                os.environ.pop("ANTHROPIC_MODEL", None)
+            else:
+                os.environ["ANTHROPIC_MODEL"] = old
+
+    def test_effective_model_falls_back_to_settings_json(self):
+        os.environ.pop("ANTHROPIC_MODEL", None)
+        report = configreport.collect_config_report(home=self.home, run=_run)
+        self.assertEqual(report["effective_model"], "claude-opus")
+
+    def test_claude_local_md_detected(self):
+        with open(os.path.join(self.home, ".claude", "CLAUDE.local.md"), "w") as f:
+            f.write("local notes\n")
+        report = configreport.collect_config_report(home=self.home, run=_run)
+        self.assertTrue(report["claude_local_md"])
+
+    def test_never_raises_on_missing_repo(self):
+        empty_home = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, empty_home, ignore_errors=True)
+        report = configreport.collect_config_report(home=empty_home, run=_run)
+        self.assertIsNone(report["claude_config"]["head"])
+        self.assertEqual(report["skills"]["names"], [])
+        self.assertGreater(len(report["errors"]), 0)
+
+    def test_generated_at_is_int_epoch(self):
+        report = configreport.collect_config_report(home=self.home, run=_run)
+        self.assertIsInstance(report["generated_at"], int)
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `python3 -m unittest tests.test_configreport -v`
+Expected: FAIL — `ModuleNotFoundError: No module named 'configreport'`
+
+- [ ] **Step 3: Implement**
+
+Create `configreport.py`:
+
+```python
+"""Per-device config parity report: git state of ~/claude-config, skills,
+agents, rules, plugins, marketplaces, and settings.json — read-only,
+stdlib only, degrades to None/[]/False on any failure, never raises.
+
+Never reads the CONTENTS of any file under skills/ (only names, and
+symlink health) — a device-only skill can hold a live secret."""
+import hashlib
+import json
+import os
+import re
+import subprocess
+import time
+from typing import Optional
+
+import compat
+
+
+def _run_ok(run, cmd, cwd=None, timeout=10):
+    """Returns (ok, stdout_or_None). Never raises."""
+    try:
+        r = run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired):
+        return False, None
+    if r.returncode != 0:
+        return False, None
+    return True, r.stdout
+
+
+def _dir_names(path):
+    try:
+        return sorted(
+            n for n in os.listdir(path)
+            if os.path.isdir(os.path.join(path, n)) or os.path.islink(os.path.join(path, n))
+        )
+    except OSError:
+        return []
+
+
+def _file_stems(path, suffix=".md"):
+    try:
+        return sorted(n[: -len(suffix)] for n in os.listdir(path) if n.endswith(suffix))
+    except OSError:
+        return []
+
+
+def _git_state(cfg_dir, run, errors):
+    state = {"path": cfg_dir, "head": None, "short_head": None, "dirty": False,
+              "dirty_files": [], "behind_remote": None, "last_commit_date": None}
+    if not os.path.isdir(os.path.join(cfg_dir, ".git")):
+        errors.append("claude-config: not a git repo")
+        return state
+    ok, out = _run_ok(run, ["git", "rev-parse", "HEAD"], cwd=cfg_dir)
+    if ok:
+        state["head"] = out.strip()
+    else:
+        errors.append("claude-config: git rev-parse HEAD failed")
+    ok, out = _run_ok(run, ["git", "rev-parse", "--short", "HEAD"], cwd=cfg_dir)
+    if ok:
+        state["short_head"] = out.strip()
+    ok, out = _run_ok(run, ["git", "status", "--porcelain"], cwd=cfg_dir)
+    if ok:
+        # "XY path" or "XY old -> new" for renames — the path (or new name)
+        # is everything after the two-char status + one space.
+        dirty_files = []
+        for line in out.splitlines():
+            if not line.strip():
+                continue
+            name = line[3:].strip()
+            if " -> " in name:
+                name = name.split(" -> ", 1)[1]
+            dirty_files.append(name)
+        state["dirty_files"] = dirty_files
+        # A dirty config/settings.json alone is install-ordering, not drift
+        # (plugin installs rewrite it) — only flag `dirty` when something
+        # else changed too.
+        state["dirty"] = any(f != "config/settings.json" for f in dirty_files)
+    else:
+        errors.append("claude-config: git status failed")
+    ok, out = _run_ok(run, ["git", "rev-list", "--count", "HEAD..@{u}"], cwd=cfg_dir)
+    if ok and out.strip().isdigit():
+        state["behind_remote"] = int(out.strip())
+    ok, out = _run_ok(run, ["git", "log", "-1", "--format=%cI"], cwd=cfg_dir)
+    if ok:
+        state["last_commit_date"] = out.strip() or None
+    return state
+
+
+def _device_only_names_from_gitignore(cfg_dir, errors):
+    path = os.path.join(cfg_dir, ".gitignore")
+    if not os.path.isfile(path):
+        return []
+    try:
+        with open(path) as f:
+            lines = f.readlines()
+    except OSError:
+        errors.append(".gitignore: read failed")
+        return []
+    names = []
+    pattern = re.compile(r"^/skills/([^/]+)/?$")
+    for line in lines:
+        m = pattern.match(line.strip())
+        if m:
+            names.append(m.group(1))
+    return sorted(set(names))
+
+
+def _broken_link_targets_external(cfg_dir, link_path):
+    external_prefix = os.path.join(cfg_dir, "external") + os.sep
+    try:
+        target = os.readlink(link_path)
+    except OSError:
+        return False
+    if not os.path.isabs(target):
+        target = os.path.normpath(os.path.join(os.path.dirname(link_path), target))
+    return (target + os.sep).startswith(external_prefix) or target == os.path.join(cfg_dir, "external")
+
+
+def _skills_report(cfg_dir, home, errors):
+    skills_dir = os.path.join(cfg_dir, "skills")
+    names = _dir_names(skills_dir)
+    device_only = set(_device_only_names_from_gitignore(cfg_dir, errors))
+    dangling, deps_missing = [], []
+    for n in names:
+        entry = os.path.join(skills_dir, n)
+        broken_links = []
+        if os.path.islink(entry):
+            if not os.path.exists(entry):
+                broken_links.append(entry)
+        else:
+            for root, _dirs, files in os.walk(entry, followlinks=True):
+                for f in files:
+                    full = os.path.join(root, f)
+                    if os.path.islink(full) and not os.path.exists(full):
+                        broken_links.append(full)
+        if not broken_links:
+            continue
+        if any(_broken_link_targets_external(cfg_dir, lk) for lk in broken_links):
+            deps_missing.append(n)
+        else:
+            dangling.append(n)
+    return {
+        "count": len(names), "names": names,
+        "dangling": sorted(set(dangling)),
+        "deps_missing": sorted(set(deps_missing)),
+        "device_only": sorted(device_only),
+    }
+
+
+def _plugins_report(cfg_dir, run, errors):
+    declared = []
+    plugins_txt = os.path.join(cfg_dir, "plugins.txt")
+    if os.path.isfile(plugins_txt):
+        try:
+            with open(plugins_txt) as f:
+                declared = [ln.strip() for ln in f if ln.strip() and not ln.startswith("#")]
+        except OSError:
+            errors.append("plugins.txt: read failed")
+    installed = []
+    ok, out = _run_ok(run, ["claude", "plugin", "list"])
+    if ok:
+        for line in out.splitlines():
+            line = line.strip()
+            if "@" not in line:
+                continue
+            entry = line.split()[0]
+            marketplace = entry.split("@", 1)[1] if "@" in entry else ""
+            if marketplace == "skills-dir":
+                continue  # synthetic marketplace for ~/.claude/skills entries; always undeclared by design
+            installed.append(entry)
+    else:
+        errors.append("claude plugin list: failed")
+    declared_set, installed_set = set(declared), set(installed)
+    return {
+        "declared": declared, "installed": installed,
+        "missing": sorted(declared_set - installed_set),
+        "extra": sorted(installed_set - declared_set),
+    }
+
+
+def _marketplaces(cfg_dir, errors):
+    path = os.path.join(cfg_dir, "marketplaces.txt")
+    if not os.path.isfile(path):
+        return []
+    try:
+        with open(path) as f:
+            return [ln.split()[0] for ln in f if ln.strip() and not ln.startswith("#")]
+    except OSError:
+        errors.append("marketplaces.txt: read failed")
+        return []
+
+
+def _settings_report(cfg_dir, home, errors):
+    path = os.path.join(cfg_dir, "config", "settings.json")
+    result = {"hooks_present": False, "remote_control_at_startup": None,
+              "symlinked": False, "sha256": None}
+    settings_data = {}
+    if os.path.isfile(path):
+        try:
+            with open(path, "rb") as f:
+                raw = f.read()
+            result["sha256"] = hashlib.sha256(raw).hexdigest()
+            settings_data = json.loads(raw)
+            result["hooks_present"] = bool(settings_data.get("hooks"))
+            result["remote_control_at_startup"] = settings_data.get("remoteControlAtStartup")
+        except (OSError, ValueError) as e:
+            errors.append(f"settings.json: {e}")
+    live = os.path.join(home, ".claude", "settings.json")
+    result["symlinked"] = os.path.islink(live)
+    return result, settings_data
+
+
+def _effective_model(settings_data):
+    env_model = os.environ.get("ANTHROPIC_MODEL")
+    if env_model:
+        return env_model
+    return settings_data.get("model")
+
+
+def collect_config_report(home=None, run=subprocess.run):
+    home = home or os.path.expanduser("~")
+    cfg_dir = os.path.join(home, "claude-config")
+    errors = []
+
+    claude_version = None
+    try:
+        claude_version = compat.claude_version()
+    except Exception:
+        errors.append("compat.claude_version() failed")
+
+    settings_report, settings_data = _settings_report(cfg_dir, home, errors)
+
+    return {
+        "claude_version": claude_version,
+        "claude_config": _git_state(cfg_dir, run, errors),
+        "skills": _skills_report(cfg_dir, home, errors),
+        "agents": _file_stems(os.path.join(cfg_dir, "agents")),
+        "rules": {
+            "shared": _file_stems(os.path.join(cfg_dir, "rules")),
+            "local": _file_stems(os.path.join(cfg_dir, "rules", "local")),
+        },
+        "plugins": _plugins_report(cfg_dir, run, errors),
+        "marketplaces": _marketplaces(cfg_dir, errors),
+        "settings": settings_report,
+        "effective_model": _effective_model(settings_data),
+        "claude_local_md": os.path.isfile(os.path.join(home, ".claude", "CLAUDE.local.md")),
+        "generated_at": int(time.time()),
+        "errors": errors,
+    }
+```
+
+Note: `_file_stems(os.path.join(cfg_dir, "rules"))` only lists direct `*.md` children of `rules/` (not a walk), so it never descends into `rules/local/` — an empty result for either list (the real `rules/` currently holds only `.gitkeep`) is normal and must not be treated as an error or as skew in Task 22.
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `python3 -m unittest discover tests`
+Expected: full suite green, 13 new tests pass (adjust count comment to match whatever the running total is at this point in the branch).
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add configreport.py tests/test_configreport.py
+git commit -m "feat: configreport.py collects per-device config parity report (git state, skills, plugins, rules, settings)"
+```
+
+---
+
+### Task 22: `GET /config-report` (device) and `GET /api/config-matrix` (hub)
+
+**Files:**
+- Modify: `server.py` (add a `GET /config-report` branch near the other read-only endpoints, e.g. next to `/stats`)
+- Modify: `overview.py` (add `fetch_config_report` and `build_config_matrix`)
+- Test: `tests/test_server_helpers.py` (device-side caching helper), `tests/test_overview.py` (`build_config_matrix` skew derivation)
+
+**Interfaces:**
+- Produces:
+  - `server._get_cached_config_report(now_fn=time.time) -> dict` — calls `configreport.collect_config_report()` and caches the result in-process for 60s (module-level cache, mirrors `agents.py`'s `CACHE_TTL_SECONDS` pattern from Task 11 but with a 60s TTL local to `server.py`). `GET /config-report` calls this and returns the dict as JSON.
+  - `overview.fetch_config_report(device) -> Optional[dict]` — like `fetch_remote_card`, `GET`s `<base_url>/rc/config-report` via `_fetch` (reusing the existing helper and its `auth_user`/`auth_pass`/timeout handling), returns `None` on any failure.
+  - `overview.build_config_matrix(hub_report, devices, fetch=fetch_config_report) -> dict` — pure given `fetch` injected. For the hub's own report, callers pass `hub_report` directly (already computed device-side, no network hop) under key `"local"`; for each entry in `devices` (same shape as `build_overview`'s `remote_devices`), calls `fetch(device)` — parallelized via `ThreadPoolExecutor(max_workers=min(8, len(devices)))` exactly like `build_overview` — and stores the result (or an `{"error": "unreachable"}` marker dict on `None`) under `device["id"]`. Returns:
+
+    ```python
+    {
+      "devices": {"<device_id>": report_or_error_dict, ...},
+      "hub_head": hub_report.get("claude_config", {}).get("head"),
+      "skew": {"<device_id>": ["<reason>", ...], ...},
+    }
+    ```
+    `skew` is computed by `overview._derive_skew(report, hub_head, hub_version) -> list[str]`, a pure helper called once per device (including `"local"`, which is always skew-free against itself). Reasons, checked independently (a device can accumulate more than one), each appended only when true:
+    - `"head differs from hub"` — `report["claude_config"]["head"]` is truthy, `hub_head` is truthy, and they differ.
+    - `"dirty"` — `report["claude_config"]["dirty"]` is `True` (Task 21 already excludes a lone dirty `config/settings.json` from this flag — that's install ordering, not drift).
+    - `"settings uncommitted"` — `report["claude_config"]["dirty"]` is `False` (i.e. nothing *else* is dirty) but `"config/settings.json"` is present in `report["claude_config"]["dirty_files"]`. This is a distinct, lower-severity reason from `"dirty"` — the frontend (Task 23) renders it amber/yellow rather than red, and it is never combined with `"dirty"` for the same device since the two conditions are mutually exclusive by construction.
+    - `"external skills not installed (run bootstrap)"` — `report["skills"]["deps_missing"]` is non-empty. (Ordinary `dangling` entries, i.e. broken symlinks that do *not* point into `external/`, deliberately have no dedicated skew reason in this task — they're rare enough on today's box that `"external skills not installed (run bootstrap)"` covers the actionable case; a future pass can add one if it turns out to matter.)
+    - `"missing plugins"` — `report["plugins"]["missing"]` is non-empty. (`report["plugins"]["extra"]` never includes `skills-dir`-marketplace entries per Task 21, so no separate filtering is needed here.)
+    - `"no hooks"` — `report["settings"]["hooks_present"]` is `False`.
+    - `"claude version differs"` — `report["claude_version"]` is truthy, `hub_version` is truthy, and they differ.
+    Explicitly NOT skew, and never appended for any device: an empty `rules.shared`/`rules.local` (today's real `rules/` holds only `.gitkeep`), any `skills.device_only` entry (gitignored by design, not drift), a differing `effective_model` (can legitimately differ per-device via `$ANTHROPIC_MODEL`), and a `deps_missing`/`dangling` split with only `dangling` populated (see above).
+    A device whose report is an error marker (`{"error": ...}`) or `None` gets `skew[id] = ["unreachable"]` and no other reasons are evaluated.
+- Consumes: `configreport.collect_config_report` (Task 21), `overview._fetch`/`ThreadPoolExecutor` pattern (existing, `overview.py:39` / `overview.py:63`), the `/rc/*` proxy allowlist in `server.py`'s `log_message` and request-forwarding branch (Task 21's endpoint needs adding to both the same way every other `/rc/*` path already is — see Step 3).
+
+- [ ] **Step 1: Write the failing tests**
+
+Add to `tests/test_overview.py`:
+
+```python
+class BuildConfigMatrixTest(unittest.TestCase):
+    def _report(self, head="abc123", dirty=False, dirty_files=None, deps_missing=None,
+                missing=None, hooks=True, version="2.1.263"):
+        return {
+            "claude_version": version,
+            "claude_config": {"head": head, "dirty": dirty, "dirty_files": dirty_files or []},
+            "skills": {"deps_missing": deps_missing or [], "dangling": [], "device_only": []},
+            "plugins": {"missing": missing or [], "extra": []},
+            "settings": {"hooks_present": hooks},
+            "rules": {"shared": [], "local": []},
+        }
+
+    def test_local_device_has_no_skew_against_itself(self):
+        hub = self._report()
+        matrix = overview.build_config_matrix(hub, [], fetch=lambda d: None)
+        self.assertEqual(matrix["skew"]["local"], [])
+        self.assertEqual(matrix["hub_head"], "abc123")
+
+    def test_head_mismatch_flagged(self):
+        hub = self._report(head="abc123")
+        other = self._report(head="def456")
+        matrix = overview.build_config_matrix(
+            hub, [{"id": "dev2", "base_url": "http://x"}], fetch=lambda d: other)
+        self.assertIn("head differs from hub", matrix["skew"]["dev2"])
+
+    def test_dirty_deps_missing_missing_plugins_no_hooks_and_version(self):
+        hub = self._report()
+        other = self._report(head="abc123", dirty=True, dirty_files=["agents/claude.md"],
+                              deps_missing=["watch"], missing=["ghost@official"],
+                              hooks=False, version="2.0.0")
+        matrix = overview.build_config_matrix(
+            hub, [{"id": "dev2", "base_url": "http://x"}], fetch=lambda d: other)
+        reasons = matrix["skew"]["dev2"]
+        for expected in ("dirty", "external skills not installed (run bootstrap)",
+                          "missing plugins", "no hooks", "claude version differs"):
+            self.assertIn(expected, reasons)
+        self.assertNotIn("head differs from hub", reasons)
+        self.assertNotIn("settings uncommitted", reasons)
+
+    def test_settings_only_dirty_is_separate_reason_not_dirty(self):
+        hub = self._report()
+        other = self._report(head="abc123", dirty=False, dirty_files=["config/settings.json"])
+        matrix = overview.build_config_matrix(
+            hub, [{"id": "dev2", "base_url": "http://x"}], fetch=lambda d: other)
+        reasons = matrix["skew"]["dev2"]
+        self.assertIn("settings uncommitted", reasons)
+        self.assertNotIn("dirty", reasons)
+
+    def test_unreachable_device_marked(self):
+        hub = self._report()
+        matrix = overview.build_config_matrix(
+            hub, [{"id": "dev2", "base_url": "http://x"}], fetch=lambda d: None)
+        self.assertEqual(matrix["skew"]["dev2"], ["unreachable"])
+        self.assertEqual(matrix["devices"]["dev2"], {"error": "unreachable"})
+
+    def test_matching_device_has_no_skew(self):
+        hub = self._report()
+        matrix = overview.build_config_matrix(
+            hub, [{"id": "dev2", "base_url": "http://x"}], fetch=lambda d: self._report())
+        self.assertEqual(matrix["skew"]["dev2"], [])
+
+    def test_empty_rules_and_device_only_skills_are_never_skew(self):
+        hub = self._report()
+        other = self._report(head="abc123")
+        other["skills"]["device_only"] = ["google-workspace"]
+        matrix = overview.build_config_matrix(
+            hub, [{"id": "dev2", "base_url": "http://x"}], fetch=lambda d: other)
+        self.assertEqual(matrix["skew"]["dev2"], [])
+```
+
+Add to `tests/test_server_helpers.py`:
+
+```python
+class GetCachedConfigReportTest(unittest.TestCase):
+    def test_caches_for_60_seconds(self):
+        calls = {"n": 0}
+
+        def fake_collect(**kw):
+            calls["n"] += 1
+            return {"generated_at": calls["n"]}
+
+        orig = server.configreport.collect_config_report
+        server.configreport.collect_config_report = fake_collect
+        try:
+            clock = {"t": 1000.0}
+            r1 = server._get_cached_config_report(now_fn=lambda: clock["t"])
+            clock["t"] += 10
+            r2 = server._get_cached_config_report(now_fn=lambda: clock["t"])
+            self.assertEqual(r1, r2)
+            clock["t"] += 60
+            r3 = server._get_cached_config_report(now_fn=lambda: clock["t"])
+            self.assertNotEqual(r1, r3)
+        finally:
+            server.configreport.collect_config_report = orig
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `python3 -m unittest tests.test_overview.BuildConfigMatrixTest tests.test_server_helpers.GetCachedConfigReportTest -v`
+Expected: FAIL — `AttributeError: module 'overview' has no attribute 'build_config_matrix'` / `module 'server' has no attribute '_get_cached_config_report'`.
+
+- [ ] **Step 3: Implement**
+
+In `overview.py`, add:
+
+```python
+def fetch_config_report(device):
+    try:
+        return _fetch(device["base_url"], "/rc/config-report",
+                       device.get("auth_user", ""), device.get("auth_pass", ""))
+    except Exception:
+        return None
+
+
+def _derive_skew(report, hub_head, hub_version):
+    if report is None or "error" in report:
+        return ["unreachable"]
+    reasons = []
+    cfg = report.get("claude_config") or {}
+    head = cfg.get("head")
+    if head and hub_head and head != hub_head:
+        reasons.append("head differs from hub")
+    if cfg.get("dirty"):
+        reasons.append("dirty")
+    elif "config/settings.json" in (cfg.get("dirty_files") or []):
+        reasons.append("settings uncommitted")
+    if (report.get("skills") or {}).get("deps_missing"):
+        reasons.append("external skills not installed (run bootstrap)")
+    if (report.get("plugins") or {}).get("missing"):
+        reasons.append("missing plugins")
+    if not (report.get("settings") or {}).get("hooks_present", True):
+        reasons.append("no hooks")
+    version = report.get("claude_version")
+    if version and hub_version and version != hub_version:
+        reasons.append("claude version differs")
+    return reasons
+
+
+def build_config_matrix(hub_report, devices, fetch=fetch_config_report):
+    hub_head = (hub_report.get("claude_config") or {}).get("head")
+    hub_version = hub_report.get("claude_version")
+    reports = {"local": hub_report}
+    if devices:
+        with ThreadPoolExecutor(max_workers=min(8, len(devices))) as ex:
+            fetched = list(ex.map(fetch, devices))
+        for device, rpt in zip(devices, fetched):
+            reports[device["id"]] = rpt if rpt is not None else {"error": "unreachable"}
+    skew = {dev_id: _derive_skew(rpt, hub_head, hub_version) for dev_id, rpt in reports.items()}
+    return {"devices": reports, "hub_head": hub_head, "skew": skew}
+```
+
+In `server.py`, add near the top-level imports (alongside the existing `import overview` / `import compat`):
+
+```python
+import configreport
+```
+
+Add the caching helper near `_get_caps` or other module-level cache helpers (grep first: `grep -n "^import time\|^_cache" server.py` to confirm `time` is already imported and to place this near any existing similar cache):
+
+```python
+_config_report_cache = {"report": None, "at": 0.0}
+_CONFIG_REPORT_TTL_SECONDS = 60
+
+
+def _get_cached_config_report(now_fn=time.time):
+    now = now_fn()
+    if _config_report_cache["report"] is not None and now - _config_report_cache["at"] < _CONFIG_REPORT_TTL_SECONDS:
+        return _config_report_cache["report"]
+    report = configreport.collect_config_report()
+    _config_report_cache["report"], _config_report_cache["at"] = report, now
+    return report
+```
+
+Add the `GET /config-report` branch next to `/stats` in the GET dispatch:
+
+```python
+        elif path == "/config-report":
+            self._json(_get_cached_config_report())
+```
+
+Add `GET /api/config-matrix` next to `/overview`:
+
+```python
+        elif path == "/api/config-matrix":
+            hub_report = _get_cached_config_report()
+            matrix = overview.build_config_matrix(hub_report, load_devices())
+            self._json(matrix)
+```
+
+Add `/rc/config-report` to the two `/rc/*` allowlists Step 1 flagged: the `log_message` tuple (`"/rc/config-report"` alongside `"/rc/stats"`) and whatever proxy/forwarding branch routes `/rc/<name>` to the corresponding local `/<name>` handler (confirm the exact mechanism by reading the code around `server.py`'s existing `/rc/stats` handling — likely a shared prefix-strip dispatch, not a literal per-path list; add `/config-report` to that same set if it's a literal list, or confirm no change is needed if it's a generic `/rc/<anything>` passthrough).
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `python3 -m unittest discover tests`
+Expected: full suite green.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add server.py overview.py tests/test_server_helpers.py tests/test_overview.py
+git commit -m "feat: GET /config-report (device, 60s cache) and GET /api/config-matrix (hub fan-out + skew derivation)"
+```
+
+---
+
+### Task 23: Frontend — Settings > Config parity matrix and desktop "Config" tab
+
+**Files:**
+- Modify: `frontend/src/api.ts` (config-report/matrix types + fetch helper)
+- Modify: `frontend/src/components/DeviceSettings.tsx` (new "Config" section)
+- Modify: `frontend/src/App.tsx` (desktop tab strip from Task 15 gains a fourth "Config" tab)
+- Create: `frontend/src/components/ConfigMatrix.tsx`
+- Test: none (no frontend test runner in this repo; verified by `npm run build`, matching Tasks 15-19's verification style)
+
+**Interfaces:**
+- Produces:
+  - `frontend/src/api.ts` gains `ConfigReport` and `ConfigMatrix` TypeScript interfaces mirroring Task 22's JSON shapes exactly (`ConfigReport` fields: `claude_version`, `claude_config` (`path`, `head`, `short_head`, `dirty`, `dirty_files: string[]`, `behind_remote`, `last_commit_date`), `skills` (`count`, `names`, `dangling`, `deps_missing`, `device_only`), `agents: string[]`, `rules` (`shared`, `local`), `plugins` (`declared`, `installed`, `missing`, `extra`), `marketplaces: string[]`, `settings` (`hooks_present`, `remote_control_at_startup`, `symlinked`, `sha256`), `effective_model: string | null`, `claude_local_md: boolean`, `generated_at: number`, `errors: string[]`; `ConfigMatrix`: `{ devices: Record<string, ConfigReport | { error: string }>; hub_head: string | null; skew: Record<string, string[]> }`), plus `async function fetchConfigMatrix(): Promise<ConfigMatrix>` that `GET`s `/api/config-matrix` (mirror the existing fetch helper for `/overview` in the same file — same base path, same JSON-parse-and-throw-on-non-2xx pattern; grep `api.ts` for its `/overview` fetch to copy the exact style).
+  - `ConfigMatrix.tsx` exports `function ConfigMatrixView({ cards }: { cards: DeviceCard[] })`: on mount, calls `fetchConfigMatrix()` into local state, renders a table — rows are devices (`cards` order, using each card's `name`/`id`), columns are Claude version, config commit (`short_head`), dirty (yes/no), skills (`count`/`deps_missing.length` as `"n / d deps missing"`), plugins (`"m missing / e extra"` from `missing.length`/`extra.length`), rules (`shared.length` shared, `local.length` local), hooks (`hooks_present` yes/no), RC at startup (`remote_control_at_startup` yes/no). Any cell whose device has a matching skew reason in `matrix.skew[device.id]` (per the mapping: commit column → `"head differs from hub"` (red) — the commit cell also gets an amber tint, distinct from red, when only `"settings uncommitted"` is present for that device; dirty column → `"dirty"` (red); skills column → `"external skills not installed (run bootstrap)"` (amber — actionable via the same copy-command button, not really "wrong" the way a code diff is); plugins column → `"missing plugins"` (red); hooks column → `"no hooks"` (red); version column → `"claude version differs"` (red)) is rendered tinted — `RT.red` at low opacity for red reasons, `RT.amber` at low opacity for amber reasons — via inline `backgroundColor` with alpha, matching the existing skew-highlight convention from Task 16 (`RT.amber` for version mismatch) rather than inventing a new token. `device_only` skills and empty `rules` lists are never highlighted (Task 22 never includes them in `skew`). Each device row is expandable (click toggles local `expanded: Set<string>` state) to show `skills.names`, `skills.device_only`, `plugins.declared`/`installed`, `rules.shared`/`rules.local`, and `effective_model` as comma-joined lists / plain text. A "Copy update command" button per row calls `navigator.clipboard.writeText('git -C ~/claude-config pull --ff-only && ~/claude-config/bootstrap.sh')` wrapped in try/catch exactly like the existing copy-to-clipboard call in `frontend/src/components/AllSessions.tsx:168` (`try { await navigator.clipboard.writeText(copyValue); } catch { /* ignore */ }`).
+  - `DeviceSettings.tsx` gains a "Config" section (below the existing sections — read the file first to match its existing section-heading style) that renders `<ConfigMatrixView cards={cards} />` scoped to just that one open device's row (or the full matrix component reused as-is; either is acceptable since the table already renders every device, and `DeviceSettings` already receives `cards` as a prop — confirm via `grep -n "cards" frontend/src/components/DeviceSettings.tsx`).
+  - `App.tsx`'s desktop tab strip (from Task 15, `desktopView: 'devices' | 'tasks' | 'sessions'`) becomes `'devices' | 'tasks' | 'sessions' | 'config'`, with a fourth tab button "Config" rendering `<ConfigMatrixView cards={cards} />` in the same `desktopView === 'config' && (...)` pattern as the other three branches.
+- Consumes: `overview.build_config_matrix` (Task 22, via `GET /api/config-matrix`), `DeviceCard` (existing, `frontend/src/types.ts`), `RT`/`FONT_SANS`/`FONT_MONO` tokens (existing, imported the same way every other component in this list already imports them).
+
+- [ ] **Step 1: Read the existing `/overview` fetch helper and `DeviceSettings.tsx`'s section layout**
+
+Run: `grep -n "overview\|fetch(" frontend/src/api.ts | head -20` and read `frontend/src/components/DeviceSettings.tsx` in full to match its existing section heading style (font, spacing, `RT` tokens) before adding a new one.
+
+- [ ] **Step 2: Add the TypeScript types and fetch helper**
+
+In `frontend/src/api.ts`, add:
+
+```typescript
+export interface ConfigReport {
+  claude_version: string | null;
+  claude_config: {
+    path: string;
+    head: string | null;
+    short_head: string | null;
+    dirty: boolean;
+    dirty_files: string[];
+    behind_remote: number | null;
+    last_commit_date: string | null;
+  };
+  skills: { count: number; names: string[]; dangling: string[]; deps_missing: string[]; device_only: string[] };
+  agents: string[];
+  rules: { shared: string[]; local: string[] };
+  plugins: { declared: string[]; installed: string[]; missing: string[]; extra: string[] };
+  marketplaces: string[];
+  settings: {
+    hooks_present: boolean;
+    remote_control_at_startup: boolean | null;
+    symlinked: boolean;
+    sha256: string | null;
+  };
+  effective_model: string | null;
+  claude_local_md: boolean;
+  generated_at: number;
+  errors: string[];
+}
+
+export interface ConfigMatrix {
+  devices: Record<string, ConfigReport | { error: string }>;
+  hub_head: string | null;
+  skew: Record<string, string[]>;
+}
+
+export async function fetchConfigMatrix(): Promise<ConfigMatrix> {
+  const res = await fetch('/api/config-matrix');
+  if (!res.ok) throw new Error(`config-matrix fetch failed: ${res.status}`);
+  return res.json();
+}
+```
+
+(Match the exact `fetch(...)`/error-throwing style of the existing `/overview` helper found in Step 1 — adjust the base path prefix if that helper uses one, e.g. a shared `API_BASE` constant.)
+
+- [ ] **Step 3: Create `ConfigMatrix.tsx`**
+
+Create `frontend/src/components/ConfigMatrix.tsx`:
+
+```tsx
+import { useEffect, useState } from 'react';
+import { RT, FONT_SANS, FONT_MONO } from '../theme';
+import { fetchConfigMatrix, ConfigMatrix as ConfigMatrixData, ConfigReport } from '../api';
+import type { DeviceCard } from '../types';
+
+const UPDATE_CMD = 'git -C ~/claude-config pull --ff-only && ~/claude-config/bootstrap.sh';
+
+function isReport(v: ConfigReport | { error: string } | undefined): v is ConfigReport {
+  return !!v && !('error' in v);
+}
+
+export function ConfigMatrixView({ cards }: { cards: DeviceCard[] }) {
+  const [matrix, setMatrix] = useState<ConfigMatrixData | null>(null);
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+
+  useEffect(() => {
+    fetchConfigMatrix().then(setMatrix).catch(() => setMatrix(null));
+  }, []);
+
+  if (!matrix) {
+    return (
+      <div style={{ padding: 24, color: RT.textLow, fontFamily: FONT_MONO, fontSize: 12 }}>
+        Loading config matrix…
+      </div>
+    );
+  }
+
+  const toggle = (id: string) => {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
+  };
+
+  const cellStyle = (skewed: boolean, tone: 'red' | 'amber' = 'red'): React.CSSProperties => ({
+    padding: '6px 10px',
+    background: skewed ? `${tone === 'red' ? RT.red : RT.amber}33` : 'transparent',
+    fontFamily: FONT_MONO,
+    fontSize: 11,
+  });
+
+  const copy = async (id: string) => {
+    try { await navigator.clipboard.writeText(UPDATE_CMD); } catch { /* ignore */ }
+  };
+
+  return (
+    <div style={{ flex: 1, overflow: 'auto', padding: 16 }}>
+      <table style={{ borderCollapse: 'collapse', width: '100%', fontFamily: FONT_SANS }}>
+        <thead>
+          <tr style={{ borderBottom: `1px solid ${RT.border}` }}>
+            {['Device', 'Claude', 'Commit', 'Dirty', 'Skills', 'Plugins', 'Rules', 'Hooks', 'RC@startup', ''].map((h) => (
+              <th key={h} style={{ textAlign: 'left', padding: '6px 10px', color: RT.textLow, fontSize: 10, textTransform: 'uppercase' }}>{h}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {cards.map((c) => {
+            const entry = matrix.devices[c.id];
+            const reasons = matrix.skew[c.id] || [];
+            const has = (r: string) => reasons.includes(r);
+            const report = isReport(entry) ? entry : null;
+            return (
+              <>
+                <tr key={c.id} style={{ borderBottom: `1px solid ${RT.border}`, cursor: 'pointer' }} onClick={() => toggle(c.id)}>
+                  <td style={{ padding: '6px 10px', fontFamily: FONT_SANS, fontSize: 12 }}>{c.name}</td>
+                  <td style={cellStyle(has('claude version differs'))}>{report?.claude_version ?? '—'}</td>
+                  <td style={cellStyle(has('head differs from hub') || has('settings uncommitted'), has('head differs from hub') ? 'red' : 'amber')}>{report?.claude_config.short_head ?? '—'}</td>
+                  <td style={cellStyle(has('dirty'))}>{report ? (report.claude_config.dirty ? 'yes' : 'no') : '—'}</td>
+                  <td style={cellStyle(has('external skills not installed (run bootstrap)'), 'amber')}>{report ? `${report.skills.count} / ${report.skills.deps_missing.length} deps missing` : '—'}</td>
+                  <td style={cellStyle(has('missing plugins'))}>{report ? `${report.plugins.missing.length} missing / ${report.plugins.extra.length} extra` : '—'}</td>
+                  <td style={{ padding: '6px 10px', fontFamily: FONT_MONO, fontSize: 11 }}>{report ? `${report.rules.shared.length} shared / ${report.rules.local.length} local` : '—'}</td>
+                  <td style={cellStyle(has('no hooks'))}>{report ? (report.settings.hooks_present ? 'yes' : 'no') : '—'}</td>
+                  <td style={{ padding: '6px 10px', fontFamily: FONT_MONO, fontSize: 11 }}>{report ? (report.settings.remote_control_at_startup ? 'yes' : 'no') : '—'}</td>
+                  <td style={{ padding: '6px 10px' }}>
+                    <button onClick={(e) => { e.stopPropagation(); copy(c.id); }} style={{ fontFamily: FONT_MONO, fontSize: 10, background: 'transparent', border: `1px solid ${RT.border}`, borderRadius: 4, padding: '2px 6px', color: RT.textLow, cursor: 'pointer' }}>
+                      Copy update command
+                    </button>
+                  </td>
+                </tr>
+                {expanded.has(c.id) && report && (
+                  <tr key={`${c.id}-detail`} style={{ borderBottom: `1px solid ${RT.border}` }}>
+                    <td colSpan={9} style={{ padding: '6px 10px', fontFamily: FONT_MONO, fontSize: 10, color: RT.textLow }}>
+                      skills: {report.skills.names.join(', ') || '—'}<br />
+                      device-only skills: {report.skills.device_only.join(', ') || '—'}<br />
+                      plugins declared: {report.plugins.declared.join(', ') || '—'}<br />
+                      plugins installed: {report.plugins.installed.join(', ') || '—'}<br />
+                      rules shared: {report.rules.shared.join(', ') || '—'}<br />
+                      rules local: {report.rules.local.join(', ') || '—'}<br />
+                      effective model: {report.effective_model || '—'}
+                    </td>
+                  </tr>
+                )}
+              </>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+```
+
+(Import `RT`/`FONT_SANS`/`FONT_MONO` from whichever module `App.tsx` actually imports them from — confirm the path with `grep -n "^import.*RT" frontend/src/App.tsx` and match it exactly; the `'../theme'` path above is a placeholder if the real module lives elsewhere, e.g. co-located in `App.tsx` itself, in which case re-export or inline the tokens instead.)
+
+- [ ] **Step 4: Wire into `DeviceSettings.tsx`**
+
+Read `frontend/src/components/DeviceSettings.tsx` fully, then add a new section near the bottom (after the existing sections) following its established heading pattern:
+
+```tsx
+<ConfigMatrixView cards={cards} />
+```
+
+Add the import: `import { ConfigMatrixView } from './ConfigMatrix';`. Confirm `DeviceSettings` already receives `cards` as a prop (Step 1); if it doesn't, thread it through from `DeviceDetail.tsx`'s existing `cards` prop the same way Task 16 Step 7 threaded `cards` into `BigCard`.
+
+- [ ] **Step 5: Add the fourth desktop tab**
+
+In `frontend/src/App.tsx`, widen the `desktopView` union from Task 15:
+
+```typescript
+  const [desktopView, setDesktopView] = useState<'devices' | 'tasks' | 'sessions' | 'config'>('devices');
+```
+
+Add `'config'` to the tab-strip array and its label:
+
+```tsx
+                {(['devices', 'tasks', 'sessions', 'config'] as const).map((v) => (
+```
+
+and extend the label ternary (or switch to a small lookup object if the ternary from Task 15 is already getting unwieldy):
+
+```tsx
+                  >{v === 'devices' ? 'Devices' : v === 'tasks' ? 'Tasks' : v === 'sessions' ? 'Sessions' : 'Config'}</button>
+```
+
+Add the fourth branch alongside the other three:
+
+```tsx
+                {desktopView === 'config' && <ConfigMatrixView cards={cards} />}
+```
+
+Add the import: `import { ConfigMatrixView } from './components/ConfigMatrix';`.
+
+- [ ] **Step 6: Build and verify**
+
+Run: `cd frontend && npm run build`
+Expected: builds cleanly with no TypeScript errors. (Do not rebuild `static/dist`'s committed output yet — Task 19, immediately following this task, does the final rebuild for the whole phase.)
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add frontend/src/api.ts frontend/src/components/ConfigMatrix.tsx frontend/src/components/DeviceSettings.tsx frontend/src/App.tsx
+git commit -m "feat(frontend): config parity matrix in Settings and a desktop Config tab"
+```
+
+---
+
 ### Task 19: Frontend — show `claude_version` in the device header, rebuild `static/dist`
 
 **Files:**
@@ -2466,6 +3476,8 @@ git commit -m "feat(frontend): session rows show derived state pill and external
 **Interfaces:**
 - Produces: the device header shows `Claude Code <claude_version>` (e.g. `"Claude Code 2.1.263"`) next to (or below) the existing launcher `VERSION` string, reading it from the `/version` or `/stats` response field added in Task 1. If `claude_version` is `null`/absent (older backend, or `claude` isn't installed), the extra text is simply omitted — no "unknown" placeholder, no layout shift beyond the missing text.
 - Consumes: `GET /version` / `GET /stats` response now including `claude_version` (Task 1).
+
+This task's Step 5 `npm run build` is also the single rebuild of `static/dist` for the frontend work added in Tasks 21-23 (config parity matrix and desktop "Config" tab) — those tasks deliberately stop short of rebuilding/committing `static/dist` themselves, so this is the first and only `static/dist` commit that includes their output.
 
 - [ ] **Step 1: Find where the launcher's own `VERSION` is currently displayed**
 

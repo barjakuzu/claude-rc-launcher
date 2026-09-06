@@ -5,12 +5,15 @@ import glob
 import json
 import os
 import re
+import shlex
 import subprocess
 import time
 import threading
 
+import agents
+import compat
 from config import (SESSION_PREFIX, CLAUDE_BIN, RC_FLAGS, MODEL_MAP,
-                    SHELL_BIN, SHELL_MODE)
+                    SHELL_BIN, SHELL_MODE, PERMISSION_MODE, EXTRA_FLAGS)
 
 # Stores error messages for sessions that failed to start.
 # Key: session name, Value: (error string, timestamp).
@@ -26,14 +29,45 @@ def is_shell_session(session_name):
 
 
 def build_tmux_command(name, session_dir, mode, model=None, sandbox=False,
-                       resume=False, resume_id=None, resume_search=None):
+                       resume=False, resume_id=None, resume_search=None,
+                       session_id=None, title=None, extra_env=None):
     """Build the `tmux new-session` argv for a session.
 
-    Shared by /start and restart_session so both paths stay identical.
-    In SHELL_MODE the pane runs a login shell directly; every other mode
-    wraps Claude Code in bash so a startup failure leaves its message on
-    screen long enough for setup_session to read it.
+    Shared by /start, restart_session, resume_session and the scheduler so
+    every launch path stays identical. In SHELL_MODE the pane runs a login
+    shell directly; every other mode wraps Claude Code in bash so a startup
+    failure leaves its message on screen long enough for setup_session to
+    read it.
+
+    When session_id is given and the installed claude supports the full v3
+    identity flag set (compat.native_launch), the session's identity and
+    Remote Control activation are established natively at launch:
+    --name <name> and --remote-control <name> replace the /rename and
+    /remote-control keystroke dance that setup_session otherwise has to do,
+    and --session-id <session_id> pins the conversation UUID (skipped on a
+    resume launch - see below). RC_SESSION_ID and RC_TITLE are written into
+    the tmux environment at creation time whenever native_launch is true, so
+    later lookups (get_transcript, restart_session, resume_session, and
+    setup_session's own early-return check) never have to scan JSONL titles
+    for a session launched this way.
+
+    A resume launch (resume=True) never combines --session-id with
+    --resume - the two are mutually exclusive as claude flags, and
+    --resume <uuid> alone already pins the conversation. RC_SESSION_ID/
+    RC_TITLE are still written (identity tracking doesn't depend on which
+    flag established it), and --name/--remote-control are still used when
+    native_launch is true.
+
+    title, when given, overrides the display name derived from `name`
+    (stripping SESSION_PREFIX) - used by callers whose tmux session name
+    isn't the human-friendly title (e.g. the scheduler's `rc-run-<hex>`
+    sessions, which want the schedule's own name as the title).
     """
+    caps = compat.get_caps()
+    native = compat.native_launch(caps)
+    display_name = title if title else (
+        name[len(SESSION_PREFIX):] if name.startswith(SESSION_PREFIX) else name)
+
     env_flags = [
         "-e", f"RC_MODE={mode}",
         "-e", f"RC_WORKDIR={session_dir}",
@@ -45,12 +79,32 @@ def build_tmux_command(name, session_dir, mode, model=None, sandbox=False,
         env_flags[4:4] = ["-e", f"RC_RESUME_SEARCH={resume_search}"]
     if sandbox or os.geteuid() == 0:
         env_flags.extend(["-e", "IS_SANDBOX=1"])
+    if session_id and mode != SHELL_MODE and native:
+        env_flags.extend(["-e", f"RC_SESSION_ID={session_id}"])
+        env_flags.extend(["-e", f"RC_TITLE={display_name}"])
+    if extra_env:
+        env_flags.extend(extra_env)
 
     if mode == SHELL_MODE:
         # A shell takes no Claude flags: model and resume do not apply.
         payload = [SHELL_BIN, "-l"]
     else:
-        claude_args = RC_FLAGS.get(mode, RC_FLAGS["c"]).split()
+        if caps.get("permission_mode_flag"):
+            claude_args = ["--permission-mode", PERMISSION_MODE.get(mode, "bypassPermissions")]
+            claude_args.extend(EXTRA_FLAGS.get(mode, []))
+            # RC_FLAGS always carried --verbose; pane parsing (setup_session's
+            # prompt/status-bar detection) may depend on its output shape.
+            claude_args.append("--verbose")
+        else:
+            claude_args = RC_FLAGS.get(mode, RC_FLAGS["c"]).split()
+        # --session-id and --resume are mutually exclusive: on a resume
+        # launch, --resume <uuid> alone pins the conversation.
+        if session_id and not resume and native:
+            claude_args.extend(["--session-id", session_id])
+        if native:
+            # Long form: compat.py's NAME_RE detects "--name", not "-n".
+            claude_args.extend(["--name", display_name])
+            claude_args.extend(["--remote-control", display_name])
         if resume:
             claude_args.append("--resume")
             if resume_id:
@@ -58,7 +112,11 @@ def build_tmux_command(name, session_dir, mode, model=None, sandbox=False,
         model_flag = MODEL_MAP.get(model) if model else None
         if model_flag:
             claude_args.extend(["--model", model_flag])
-        claude_cmd = " ".join([f"CLAUDECODE= {CLAUDE_BIN}"] + claude_args)
+        # shlex.quote every interpolated token (display name, session id,
+        # model, etc.) so a value containing shell metacharacters can't
+        # break out of the bash -c script.
+        quoted_args = " ".join(shlex.quote(a) for a in claude_args)
+        claude_cmd = f"CLAUDECODE= {shlex.quote(CLAUDE_BIN)} {quoted_args}"
         payload = ["bash", "-c", f'{claude_cmd} 2>&1 || {{ echo ""; sleep 30; }}']
 
     return [
@@ -86,32 +144,53 @@ def _store_session_error(name, error):
 
 
 def list_rc_sessions():
-    """Return list of rc-* tmux sessions with name, mode, URL, workdir, and status."""
+    """Return rc-* tmux sessions (name, mode, URL, workdir, status) plus
+    any Claude Code session `claude agents --json` knows about that this
+    launcher didn't start — those get kind: "external", no terminal."""
     r = subprocess.run(
         ["tmux", "list-sessions", "-F", "#{session_name}"],
         capture_output=True, text=True,
     )
-    if r.returncode != 0:
-        return []
-
     sessions = []
-    for line in r.stdout.strip().splitlines():
-        name = line.strip()
-        if not name.startswith(SESSION_PREFIX):
+    known_session_ids = set()
+    if r.returncode == 0:
+        for line in r.stdout.strip().splitlines():
+            name = line.strip()
+            if not name.startswith(SESSION_PREFIX):
+                continue
+            mode = get_session_env(name, "RC_MODE") or "c"
+            workdir = get_session_env(name, "RC_WORKDIR")
+            is_sh = mode == SHELL_MODE
+            url = None if is_sh else get_url(name)
+            status = get_session_status(name)
+            tokens = None if is_sh else get_tokens(name)
+            rc_session_id = get_session_env(name, "RC_SESSION_ID")
+            if rc_session_id:
+                known_session_ids.add(rc_session_id)
+            s = {"name": name, "mode": mode, "url": url, "status": status}
+            if tokens is not None:
+                s["tokens"] = tokens
+            if workdir:
+                s["workdir"] = workdir
+                s["project"] = os.path.basename(workdir.rstrip("/"))
+            sessions.append(s)
+
+    for row in agents.list_claude_sessions():
+        if row["session_id"] in known_session_ids:
             continue
-        mode = get_session_env(name, "RC_MODE") or "c"
-        workdir = get_session_env(name, "RC_WORKDIR")
-        is_sh = mode == SHELL_MODE
-        url = None if is_sh else get_url(name)
-        status = get_session_status(name)
-        tokens = None if is_sh else get_tokens(name)
-        s = {"name": name, "mode": mode, "url": url, "status": status}
-        if tokens is not None:
-            s["tokens"] = tokens
-        if workdir:
-            s["workdir"] = workdir
-            s["project"] = os.path.basename(workdir.rstrip("/"))
-        sessions.append(s)
+        sessions.append({
+            "name": row["name"] or f"external-{row['session_id'][:8]}",
+            "mode": None,
+            "url": None,
+            "status": row["status"] or "unknown",
+            "kind": "external",
+            "external": True,
+            "session_id": row["session_id"],
+            "cwd": row["cwd"],
+            "pid": row["pid"],
+            "waiting_for": row["waiting_for"],
+        })
+
     return sessions
 
 
@@ -176,66 +255,108 @@ def get_active_rc_session():
     return None
 
 
+_OSC8_OPEN_RE = re.compile(r'\x1b\]8;[^;]*;([^\x1b\s]*)\x1b\\')
+_OSC8_OPEN_BEL_RE = re.compile(r'\x1b\]8;[^;]*;([^\x1b\s]*)\x07')
+_OSC8_OPEN_ANY_RE = re.compile(r'\x1b\]8;[^;]*;([^\x1b\s]*)(?:\x1b\\|\x07)')
+_OSC8_CLOSE_RE = re.compile(r'\x1b\]8;;\x1b\\')
+_OSC8_CLOSE_BEL_RE = re.compile(r'\x1b\]8;;\x07')
+_SESSION_URL_RE = re.compile(r'https://claude\.ai/code/session_[^\s\x1b]+')
+
+
+def _osc8_targets(text):
+    """Return every OSC 8 hyperlink target in text, in document order
+    (including empty-string targets from close sequences, which callers
+    filter out via the session-URL pattern). Used so get_url can prefer a
+    URL that is the *target* of a link over one that merely appears as
+    plain/pasted text in the pane (e.g. a git log attribution line)."""
+    return [m.group(1) for m in _OSC8_OPEN_ANY_RE.finditer(text)]
+
+
+def _strip_osc8(text):
+    """Strip OSC 8 hyperlink escape sequences, replacing an *open* sequence
+    with the URL it targets (so a link whose visible label is just '/rc'
+    still yields the real claude.ai URL as plain matchable text) and
+    dropping *close* sequences entirely. Must run before both the ANSI
+    CSI-sequence strip and the claude.ai URL regex match — the status bar
+    since Claude Code ~2.1 renders the RC indicator as a hyperlink whose
+    label never contains the URL, only its target does.
+    """
+    text = _OSC8_CLOSE_RE.sub('', text)
+    text = _OSC8_CLOSE_BEL_RE.sub('', text)
+    text = _OSC8_OPEN_RE.sub(r'\1 ', text)
+    text = _OSC8_OPEN_BEL_RE.sub(r'\1 ', text)
+    return text
+
+
 def get_url(session_name):
     """Extract the claude.ai URL from a tmux session's pane output.
-    Only returns a URL if remote-control is actually active (not connecting/failed).
-    Shell sessions have no URL."""
-    if is_shell_session(session_name):
-        return None
-    # First check if remote-control is in a healthy state
-    # If it's "connecting", "reconnecting", or "failed", URL is not usable
-    if not _is_rc_active(session_name):
-        # Still store/return URL for internal use (setup_session needs it)
-        # but mark it via env var so callers know it's not confirmed
-        return None
+    Shell sessions have no URL.
 
-    # Scan pane output for the most recent URL (check recent first, then deeper)
+    Thin wrapper over get_url_with_source for callers that don't need
+    provenance (most of them) — just the URL."""
+    url, _source = get_url_with_source(session_name)
+    return url
+
+
+def get_url_with_source(session_name):
+    """Extract the claude.ai URL from a tmux session's pane output, along
+    with where it came from: (url, source) where source is one of
+    "osc8" (an OSC 8 hyperlink target — authoritative), "text" (a plain/
+    pasted-text match, not persist-worthy), or None (fell back to a
+    previously cached RC_URL, or found nothing).
+
+    An OSC 8 hyperlink *target* is the authoritative source: the status
+    bar's RC indicator is the only thing that renders the session URL as a
+    link target, so a matching target is trustworthy evidence Remote
+    Control produced it, and it is persisted into the RC_URL env var. A
+    claude.ai/code/session_... URL appearing only as plain/pasted text
+    (e.g. a git log attribution line, a copy-pasted message) is NOT
+    trustworthy in the same way — it is returned transiently (so a caller
+    can still use it) but never written to RC_URL, and only considered at
+    all when the pane has no OSC 8 targets whatsoever.
+
+    Falls back to a previously cached RC_URL when nothing can be found in
+    the current pane — a session that has never shown the URL yet, or
+    whose Remote Control never activated, correctly returns (None, None).
+
+    Uses `capture-pane -e` so ANSI/OSC escape sequences (and thus the
+    OSC 8 hyperlink target) survive the capture — without -e, tmux strips
+    escapes and the OSC 8 branch can never fire."""
+    if is_shell_session(session_name):
+        return None, None
     for history_lines in ("-50", "-500"):
         try:
             r = subprocess.run(
-                ["tmux", "capture-pane", "-t", session_name, "-p", "-S", history_lines, "-J"],
+                ["tmux", "capture-pane", "-t", session_name, "-e", "-p", "-S", history_lines, "-J"],
                 capture_output=True, text=True, timeout=5,
             )
-            text = r.stdout.replace("\n", " ")
-            # Find ALL URLs and return the last (most recent) one
-            matches = re.findall(r'(https://claude\.ai/code/session_[^\s]+)', text)
-            if matches:
-                url = matches[-1]
-                # Update stored env var if it changed
+            raw = r.stdout
+            targets = _osc8_targets(raw)
+            session_targets = [t for t in targets if _SESSION_URL_RE.match(t)]
+            if session_targets:
+                url = session_targets[-1]
                 stored = get_session_env(session_name, "RC_URL")
                 if stored != url:
                     subprocess.run(
                         ["tmux", "set-environment", "-t", session_name, "RC_URL", url],
                         capture_output=True,
                     )
-                return url
-        except Exception:
-            pass
-    # Fall back to stored env var (survives scrollback overflow)
-    stored = get_session_env(session_name, "RC_URL")
-    if stored and stored.startswith("https://claude.ai/code/session_"):
-        return stored
-    return None
-
-
-def _get_url_internal(session_name):
-    """Like get_url but skips the active check — for internal setup_session use."""
-    for history_lines in ("-50", "-500"):
-        try:
-            r = subprocess.run(
-                ["tmux", "capture-pane", "-t", session_name, "-p", "-S", history_lines, "-J"],
-                capture_output=True, text=True, timeout=5,
-            )
-            text = r.stdout.replace("\n", " ")
-            matches = re.findall(r'(https://claude\.ai/code/session_[^\s]+)', text)
-            if matches:
-                return matches[-1]
+                return url, "osc8"
+            if not targets:
+                # No OSC 8 links in this pane at all — fall back to a plain-
+                # text scan, but never persist it: an unlinked URL is just
+                # displayed text (could be pasted, quoted, or attribution),
+                # not evidence Remote Control is actually pointed at it.
+                text = _strip_osc8(raw).replace("\n", " ")
+                matches = _SESSION_URL_RE.findall(text)
+                if matches:
+                    return matches[-1], "text"
         except Exception:
             pass
     stored = get_session_env(session_name, "RC_URL")
     if stored and stored.startswith("https://claude.ai/code/session_"):
-        return stored
-    return None
+        return stored, None
+    return None, None
 
 
 def get_tokens(session_name):
@@ -485,6 +606,19 @@ def setup_session(session_name, display_name, mode):
     print(f"  {session_name}: prompt found, waiting for CLI to fully initialize...")
     time.sleep(10)
 
+    # If build_tmux_command already used --name/--remote-control (and, off
+    # a resume, --session-id), RC_SESSION_ID is set on the session from
+    # creation AND the installed claude still supports the full native
+    # flag set: identity and RC activation are already done natively, so
+    # there's nothing left for the keystroke dance below to accomplish.
+    # Sending /remote-control again would just toggle it off. Both checks
+    # matter: RC_SESSION_ID alone doesn't prove --remote-control/--name
+    # were actually used (a claude that lost remote_control_flag between
+    # launch and here, for instance), so gate on compat.native_launch too.
+    if get_session_env(session_name, "RC_SESSION_ID") and compat.native_launch(compat.get_caps()):
+        print(f"  {session_name}: native session identity in use, skipping /remote-control and /rename")
+        return
+
     # Check if remote-control is already active (status bar shows "Remote Control active")
     try:
         r = subprocess.run(
@@ -493,13 +627,14 @@ def setup_session(session_name, display_name, mode):
         )
         clean = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', r.stdout)
         if any(m in clean for m in _RC_ACTIVE_MARKERS):
-            url = _get_url_internal(session_name)
+            url, url_source = get_url_with_source(session_name)
             if url:
                 print(f"  {session_name}: remote-control already active → {url}")
-                subprocess.run(
-                    ["tmux", "set-environment", "-t", session_name, "RC_URL", url],
-                    capture_output=True,
-                )
+                if url_source == "osc8":
+                    subprocess.run(
+                        ["tmux", "set-environment", "-t", session_name, "RC_URL", url],
+                        capture_output=True,
+                    )
                 time.sleep(1)
                 _send_rename(session_name, display_name)
                 return
@@ -514,14 +649,14 @@ def setup_session(session_name, display_name, mode):
 
     def _wait_for_rc_active(sname, timeout=60):
         """Poll until 'Remote Control active' appears in status bar.
-        Returns the URL if successful, None if timed out/failed.
-        Handles menus and failures along the way."""
+        Returns (url, source) if successful, (None, None) if timed
+        out/failed. Handles menus and failures along the way."""
         rc_menu_handled = False
         for _ in range(timeout // 2):
             time.sleep(2)
             if not session_exists(sname):
                 print(f"  {sname}: session died while waiting for URL")
-                return None
+                return None, None
             pane = _capture_pane_text(sname)
             # Handle "Enable Remote Control" menu (first-time setup)
             if not rc_menu_handled and "Enable Remote Control" in pane:
@@ -537,15 +672,15 @@ def setup_session(session_name, display_name, mode):
                 time.sleep(1)
                 # Check if it's already active
                 if _is_rc_active(sname):
-                    url = _get_url_internal(sname)
+                    url, url_source = get_url_with_source(sname)
                     if url:
-                        return url
+                        return url, url_source
                 continue
             # Check status bar for definitive state
             if _is_rc_active(sname):
-                url = _get_url_internal(sname)
+                url, url_source = get_url_with_source(sname)
                 if url:
-                    return url
+                    return url, url_source
             # Check for failure — return None to trigger retry
             try:
                 sr = subprocess.run(
@@ -555,23 +690,24 @@ def setup_session(session_name, display_name, mode):
                 clean = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', sr.stdout)
                 if "Remote Control failed" in clean:
                     print(f"  {sname}: remote-control failed")
-                    return None
+                    return None, None
             except Exception:
                 pass
-        return None
+        return None, None
 
     # Try /remote-control up to 3 times
     url = None
     for attempt in range(3):
         print(f"  {session_name}: sending /remote-control (attempt {attempt + 1}/3)")
         _send_rc(session_name)
-        url = _wait_for_rc_active(session_name, timeout=30)
+        url, url_source = _wait_for_rc_active(session_name, timeout=30)
         if url:
             print(f"  {session_name}: remote-control active → {url}")
-            subprocess.run(
-                ["tmux", "set-environment", "-t", session_name, "RC_URL", url],
-                capture_output=True,
-            )
+            if url_source == "osc8":
+                subprocess.run(
+                    ["tmux", "set-environment", "-t", session_name, "RC_URL", url],
+                    capture_output=True,
+                )
             break
         # Wait before retry
         print(f"  {session_name}: attempt {attempt + 1} failed, waiting before retry...")
@@ -638,6 +774,40 @@ def stop_session(name):
     subprocess.run(["tmux", "kill-session", "-t", name], capture_output=True)
 
 
+_SESSION_ID_RE = re.compile(r'^[0-9A-Za-z_-]{1,64}$')
+
+
+def _encode_project_dir(workdir):
+    """Claude Code's ~/.claude/projects/<encoded> directory name for a
+    project cwd — both '/' and '.' become '-' (verified against this
+    box's real ~/.claude/projects listing). Shared by transcript_path and
+    _find_session_uuid so the two stay in sync."""
+    return (workdir or "").replace("/", "-").replace(".", "-")
+
+
+def transcript_path(workdir, session_id):
+    """The JSONL transcript path Claude Code writes for (workdir, session_id).
+
+    Pure/no I/O — callers check existence themselves. Claude Code encodes a
+    project's cwd into its ~/.claude/projects/<encoded> directory name by
+    replacing both '/' and '.' with '-' (verified directly against this
+    box's ~/.claude/projects listing, not from documentation — the
+    transcript path format is explicitly undocumented and unstable).
+
+    session_id must look like a real Claude session id (uuid-shaped:
+    letters/digits/underscore/hyphen, 1-64 chars) — raises ValueError
+    otherwise. session_id can come from RC_SESSION_ID, a tmux env var an
+    attacker with shell access to the box could set; without this check a
+    value like "../../etc/passwd" would let transcript_path build a path
+    outside ~/.claude/projects. Callers that consume RC_SESSION_ID treat
+    ValueError the same as "no native id" and fall back to the title scan.
+    """
+    if not _SESSION_ID_RE.match(session_id):
+        raise ValueError(f"invalid session_id: {session_id!r}")
+    encoded = _encode_project_dir(workdir)
+    return os.path.expanduser(os.path.join("~/.claude/projects", encoded, session_id + ".jsonl"))
+
+
 def _find_session_uuid(tmux_name, workdir):
     """Find the Claude session UUID for a tmux session by matching the
     session title (set via /rename) in the project's JSONL files."""
@@ -658,8 +828,9 @@ def _find_session_uuid(tmux_name, workdir):
     # Build ordered list of project dirs — prefer ones matching the workdir
     all_proj_dirs = sorted(glob.glob(os.path.join(claude_projects, "*")),
                            key=os.path.getmtime, reverse=True)
-    # Claude encodes workdir as project dir name (e.g. /root → -root)
-    workdir_encoded = workdir.replace("/", "-") if workdir else ""
+    # Claude encodes workdir as project dir name (e.g. /root → -root,
+    # ~/.claude-rc → -root--claude-rc); shared with transcript_path.
+    workdir_encoded = _encode_project_dir(workdir)
     matching = [d for d in all_proj_dirs if os.path.basename(d) == workdir_encoded]
     other = [d for d in all_proj_dirs if os.path.basename(d) != workdir_encoded]
     proj_dirs = matching + other
@@ -715,20 +886,38 @@ def get_transcript(tmux_name, limit=300):
     ~/.claude/projects/<dir>/<uuid>.jsonl — serve it for a natively
     scrollable history view. Returns None if the session can't be mapped —
     including shell sessions, which write no JSONL at all.
+
+    Prefers RC_SESSION_ID (set at launch by build_tmux_command for
+    sessions using native identity) over the title-scan fallback
+    (_find_session_uuid), which stays for pre-v3 sessions and for a stale
+    RC_SESSION_ID whose file no longer exists.
     """
     if is_shell_session(tmux_name):
         return None
     workdir = get_session_env(tmux_name, "RC_WORKDIR") or ""
-    uuid = _find_session_uuid(tmux_name, workdir)
+    uuid = None
+    path = None
+    rc_session_id = get_session_env(tmux_name, "RC_SESSION_ID")
+    if rc_session_id:
+        try:
+            candidate = transcript_path(workdir, rc_session_id)
+        except ValueError:
+            candidate = None
+        if candidate and os.path.isfile(candidate):
+            uuid = rc_session_id
+            path = candidate
     if not uuid:
-        return None
-    paths = glob.glob(os.path.expanduser(
-        os.path.join("~/.claude/projects", "*", uuid + ".jsonl")))
-    if not paths:
-        return None
+        uuid = _find_session_uuid(tmux_name, workdir)
+        if not uuid:
+            return None
+        paths = glob.glob(os.path.expanduser(
+            os.path.join("~/.claude/projects", "*", uuid + ".jsonl")))
+        if not paths:
+            return None
+        path = paths[0]
     messages = []
     try:
-        with open(paths[0]) as fh:
+        with open(path) as fh:
             for line in fh:
                 try:
                     d = json.loads(line)
@@ -785,11 +974,18 @@ def restart_session(name, mode=None, workdir=None, model=None, sandbox=False,
     if mode == SHELL_MODE:
         resume = False
 
-    # Find the Claude session UUID BEFORE killing (so JSONL is still fresh)
+    # Find the Claude session UUID BEFORE killing (so JSONL is still fresh).
+    # RC_SESSION_ID (set at launch by build_tmux_command for natively-
+    # identified sessions) is authoritative and skips the title scan
+    # entirely; _find_session_uuid is the pre-v3 fallback.
     resume_id = None
     if resume:
-        resume_id = _find_session_uuid(name, session_dir)
-        print(f"  {name}: UUID lookup → {resume_id[:8] if resume_id else 'not found'}")
+        resume_id = get_session_env(name, "RC_SESSION_ID")
+        if resume_id:
+            print(f"  {name}: reusing RC_SESSION_ID {resume_id[:8]}")
+        else:
+            resume_id = _find_session_uuid(name, session_dir)
+            print(f"  {name}: UUID lookup → {resume_id[:8] if resume_id else 'not found'}")
 
     # Kill the old session
     if session_exists(name):
@@ -797,10 +993,13 @@ def restart_session(name, mode=None, workdir=None, model=None, sandbox=False,
         # Brief wait for tmux cleanup
         time.sleep(0.5)
 
-    # Use the display name to search in the picker if no exact UUID found
+    # Use the display name to search in the picker if no exact UUID found.
+    # Pass the resolved UUID as session_id too (when found) so a restart
+    # keeps the same identity for RC_SESSION_ID/RC_TITLE tracking and for
+    # --name/--remote-control when native, same as resume_session.
     cmd = build_tmux_command(
         name, session_dir, mode, model=model, sandbox=sandbox,
-        resume=resume, resume_id=resume_id,
+        resume=resume, resume_id=resume_id, session_id=resume_id,
         resume_search=name.replace(SESSION_PREFIX, ""),
     )
     print(f"  Restarting session: {name} (mode={mode}, resume={resume}, dir={session_dir})")
@@ -918,7 +1117,7 @@ def list_resumable_sessions():
 def resume_session(session_name, session_title, project_dir, mode="c"):
     """Launch a new tmux session with claude --resume, select the target session
     in the picker by searching for its title, and set up remote control."""
-    from config import CLAUDE_BIN, RC_FLAGS, MODEL_MAP, SESSION_PREFIX
+    from config import RC_FLAGS, SESSION_PREFIX
 
     if mode not in RC_FLAGS:
         mode = "c"
@@ -963,28 +1162,15 @@ def resume_session(session_name, session_title, project_dir, mode="c"):
     if not session_dir or not os.path.isdir(session_dir):
         session_dir = os.path.expanduser("~")
 
-    claude_flags = RC_FLAGS[mode]
-    # Pass session UUID directly to --resume to skip the picker
-    claude_args = claude_flags.split() + ["--resume", session_name]
-
-    env_flags = [
-        "-e", f"RC_MODE={mode}",
-        "-e", f"RC_WORKDIR={session_dir}",
-        "-e", "DISPLAY=:1",
-        "-e", "TERM=xterm-256color",
-    ]
-    if os.geteuid() == 0:
-        env_flags.extend(["-e", "IS_SANDBOX=1"])
-
-    claude_cmd = " ".join([f"CLAUDECODE= {CLAUDE_BIN}"] + claude_args)
-    wrapper = f'{claude_cmd} 2>&1 || {{ echo ""; sleep 30; }}'
-    cmd = [
-        "tmux", "new-session", "-d", "-s", tmux_name,
-        "-c", session_dir,
-        "-x", "200", "-y", "50",
-        *env_flags,
-        "bash", "-c", wrapper,
-    ]
+    # Pass session UUID directly to --resume to skip the picker. The UUID
+    # being resumed is already known (it's session_name), so no new one is
+    # generated - session_id=session_name reuses it for RC_SESSION_ID/
+    # RC_TITLE tracking and for --name/--remote-control when native
+    # (build_tmux_command never combines --session-id with --resume itself).
+    cmd = build_tmux_command(
+        tmux_name, session_dir, mode, model=None, sandbox=(os.geteuid() == 0),
+        resume=True, resume_id=session_name, session_id=session_name,
+    )
 
     print(f"  Resume: starting session {tmux_name} (resume={session_name[:8]}, dir={session_dir})")
     result = subprocess.run(cmd, capture_output=True, text=True)
