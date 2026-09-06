@@ -20,7 +20,7 @@ from config import (
     VERSION, HOST, PORT, SESSION_PREFIX, WORKING_DIR, CLAUDE_BIN,
     AUTH_USER, AUTH_PASS, RC_FLAGS, MODEL_MAP, SHELL_BIN, SHELL_MODE,
     resolve_claude_mode,
-    BROWSE_ROOTS,
+    BROWSE_ROOTS, RC_TRUSTED_PROXIES,
 )
 from sessions import (
     list_rc_sessions, session_exists, setup_session, stop_session,
@@ -420,6 +420,21 @@ def _valid_session_name(name):
     no path traversal or separators, and carries our 'rc-' prefix so a
     logged-in browser can only reach sessions the launcher itself created."""
     return bool(name) and ".." not in name and "/" not in name and name.startswith(SESSION_PREFIX)
+
+
+def _resolve_client_ip(peer_ip, real_ip_header, forwarded_for_header, trusted_proxies):
+    """Return the IP to use for login rate limiting.
+
+    X-Real-IP / X-Forwarded-For are attacker-controlled unless the request
+    actually came through a proxy we trust (nginx on the same box, by
+    default) - otherwise anyone can spoof them to dodge the lockout."""
+    if peer_ip not in trusted_proxies:
+        return peer_ip
+    if real_ip_header:
+        return real_ip_header
+    if forwarded_for_header:
+        return forwarded_for_header.split(",")[0].strip()
+    return peer_ip
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -849,7 +864,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
         # Login route — no auth required
         raw_path = self.path.split('?')[0]
         if raw_path in ("/login", "/rc/login"):
-            client_ip = self.headers.get("X-Real-IP", self.client_address[0])
+            client_ip = _resolve_client_ip(
+                self.client_address[0],
+                self.headers.get("X-Real-IP", ""),
+                self.headers.get("X-Forwarded-For", ""),
+                RC_TRUSTED_PROXIES,
+            )
             # Rate limiting
             if _is_rate_limited(client_ip):
                 self.send_response(302)
