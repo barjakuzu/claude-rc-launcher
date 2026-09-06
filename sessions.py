@@ -9,8 +9,9 @@ import subprocess
 import time
 import threading
 
+import compat
 from config import (SESSION_PREFIX, CLAUDE_BIN, RC_FLAGS, MODEL_MAP,
-                    SHELL_BIN, SHELL_MODE)
+                    SHELL_BIN, SHELL_MODE, PERMISSION_MODE, EXTRA_FLAGS)
 
 # Stores error messages for sessions that failed to start.
 # Key: session name, Value: (error string, timestamp).
@@ -26,14 +27,26 @@ def is_shell_session(session_name):
 
 
 def build_tmux_command(name, session_dir, mode, model=None, sandbox=False,
-                       resume=False, resume_id=None, resume_search=None):
+                       resume=False, resume_id=None, resume_search=None,
+                       session_id=None):
     """Build the `tmux new-session` argv for a session.
 
     Shared by /start and restart_session so both paths stay identical.
     In SHELL_MODE the pane runs a login shell directly; every other mode
     wraps Claude Code in bash so a startup failure leaves its message on
     screen long enough for setup_session to read it.
+
+    When session_id is given and the installed claude supports it
+    (compat.CAPS), the session's identity and Remote Control activation
+    are established natively at launch: --session-id, -n <name>, and
+    --remote-control <name> replace the /rename and /remote-control
+    keystroke dance that setup_session otherwise has to do. RC_SESSION_ID
+    and RC_TITLE are written into the tmux environment at creation time so
+    later lookups (get_transcript, restart_session, resume_session) never
+    have to scan JSONL titles for a session launched this way.
     """
+    display_name = name[len(SESSION_PREFIX):] if name.startswith(SESSION_PREFIX) else name
+
     env_flags = [
         "-e", f"RC_MODE={mode}",
         "-e", f"RC_WORKDIR={session_dir}",
@@ -45,12 +58,25 @@ def build_tmux_command(name, session_dir, mode, model=None, sandbox=False,
         env_flags[4:4] = ["-e", f"RC_RESUME_SEARCH={resume_search}"]
     if sandbox or os.geteuid() == 0:
         env_flags.extend(["-e", "IS_SANDBOX=1"])
+    if session_id and mode != SHELL_MODE and compat.CAPS.get("session_id_flag"):
+        env_flags.extend(["-e", f"RC_SESSION_ID={session_id}"])
+        env_flags.extend(["-e", f"RC_TITLE={display_name}"])
 
     if mode == SHELL_MODE:
         # A shell takes no Claude flags: model and resume do not apply.
         payload = [SHELL_BIN, "-l"]
     else:
-        claude_args = RC_FLAGS.get(mode, RC_FLAGS["c"]).split()
+        if compat.CAPS.get("permission_mode_flag"):
+            claude_args = ["--permission-mode", PERMISSION_MODE.get(mode, "bypassPermissions")]
+            claude_args.extend(EXTRA_FLAGS.get(mode, []))
+        else:
+            claude_args = RC_FLAGS.get(mode, RC_FLAGS["c"]).split()
+        if session_id and compat.CAPS.get("session_id_flag"):
+            claude_args.extend(["--session-id", session_id])
+        if compat.CAPS.get("name_flag"):
+            claude_args.extend(["-n", display_name])
+        if compat.CAPS.get("remote_control_flag"):
+            claude_args.extend(["--remote-control", display_name])
         if resume:
             claude_args.append("--resume")
             if resume_id:

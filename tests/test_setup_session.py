@@ -93,5 +93,101 @@ class SetupSessionRenameTest(unittest.TestCase):
         self.assertFalse(sessions.is_shell_session("rc-portugal"))
 
 
+class BuildTmuxCommandNativeFlagsTest(unittest.TestCase):
+    """build_tmux_command adds --session-id/-n/--remote-control/
+    --permission-mode only when compat.CAPS says the installed claude
+    supports them, and always falls back to config.RC_FLAGS otherwise."""
+
+    def setUp(self):
+        import compat
+        self._orig_caps = dict(compat.CAPS)
+
+    def tearDown(self):
+        import compat
+        compat.CAPS = self._orig_caps
+
+    def test_new_claude_gets_native_flags(self):
+        import compat
+        compat.CAPS = {
+            "session_id_flag": True, "name_flag": True,
+            "remote_control_flag": True, "permission_mode_flag": True,
+            "agents_json": True, "version": "2.1.263",
+        }
+        cmd = sessions.build_tmux_command(
+            "rc-portugal", "/home/user/project", "c",
+            session_id="0d3b8b1a-1111-4a2b-9c3d-abcdef012345")
+        # The claude invocation itself is wrapped in a single `bash -c
+        # "<script>"` argv element (same shape the pre-existing baseline
+        # tests assert on via cmd[-1]/cmd[-3:-1]), so native flags land as
+        # substrings of that joined script rather than as standalone argv
+        # items — check the joined command line instead of raw membership.
+        joined = " ".join(cmd)
+        self.assertIn("--session-id 0d3b8b1a-1111-4a2b-9c3d-abcdef012345", joined)
+        self.assertIn("-n portugal", joined)
+        self.assertIn("--remote-control portugal", joined)
+        self.assertIn("--permission-mode bypassPermissions", joined)
+        # env vars set at creation (these ARE standalone argv items)
+        self.assertIn("-e", cmd)
+        self.assertIn("RC_SESSION_ID=0d3b8b1a-1111-4a2b-9c3d-abcdef012345", cmd)
+        self.assertIn("RC_TITLE=portugal", cmd)
+
+    def test_old_claude_falls_back_to_rc_flags_and_no_env(self):
+        import compat
+        compat.CAPS = {
+            "session_id_flag": False, "name_flag": False,
+            "remote_control_flag": False, "permission_mode_flag": False,
+            "agents_json": False, "version": "1.9.0",
+        }
+        cmd = sessions.build_tmux_command(
+            "rc-portugal", "/home/user/project", "c",
+            session_id="0d3b8b1a-1111-4a2b-9c3d-abcdef012345")
+        joined = " ".join(cmd)
+        self.assertNotIn("--session-id", joined)
+        self.assertNotIn("--remote-control", joined)
+        self.assertNotIn("RC_SESSION_ID=0d3b8b1a-1111-4a2b-9c3d-abcdef012345", cmd)
+        # The RC_FLAGS string still ends up in the joined claude_cmd (bash -c argv)
+        self.assertIn("--dangerously-skip-permissions", joined)
+
+    def test_ci_mode_native_flags_carry_teammate_mode(self):
+        import compat
+        compat.CAPS = {
+            "session_id_flag": True, "name_flag": True,
+            "remote_control_flag": True, "permission_mode_flag": True,
+            "agents_json": True, "version": "2.1.263",
+        }
+        cmd = sessions.build_tmux_command(
+            "rc-ci-job", "/home/user/project", "ci",
+            session_id="0d3b8b1a-1111-4a2b-9c3d-abcdef012345")
+        joined = " ".join(cmd)
+        self.assertIn("--permission-mode bypassPermissions", joined)
+        self.assertIn("--teammate-mode in-process", joined)
+
+    def test_shell_mode_never_gets_native_flags_even_with_full_caps(self):
+        import compat
+        compat.CAPS = {
+            "session_id_flag": True, "name_flag": True,
+            "remote_control_flag": True, "permission_mode_flag": True,
+            "agents_json": True, "version": "2.1.263",
+        }
+        cmd = sessions.build_tmux_command(
+            "rc-portugal", "/home/user/project", "sh",
+            session_id="0d3b8b1a-1111-4a2b-9c3d-abcdef012345")
+        joined = " ".join(cmd)
+        self.assertNotIn("--session-id", joined)
+        self.assertNotIn("--remote-control", joined)
+        self.assertNotIn("-n portugal", joined)
+
+    def test_no_session_id_means_no_rc_env_vars(self):
+        import compat
+        compat.CAPS = {
+            "session_id_flag": True, "name_flag": True,
+            "remote_control_flag": True, "permission_mode_flag": True,
+            "agents_json": True, "version": "2.1.263",
+        }
+        cmd = sessions.build_tmux_command(
+            "rc-portugal", "/home/user/project", "c")  # no session_id passed
+        self.assertFalse(any(str(x).startswith("RC_SESSION_ID=") for x in cmd))
+
+
 if __name__ == "__main__":
     unittest.main()
