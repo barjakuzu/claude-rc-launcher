@@ -1500,6 +1500,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not session_exists(name):
                 self._json({"ok": False, "message": "Session not found"}, 404)
                 return
+            # First touch of an adopted (foreign) session's window: remember
+            # its size before this resize ever changes it. /resize can be
+            # the very first request for a session (before any /preview or
+            # /ws poll), so this capture can't be left to those paths alone.
+            if not name.startswith(SESSION_PREFIX):
+                capture_adopted_window_size(name)
             r = subprocess.run(
                 ["tmux", "resize-window", "-t", name, "-x", str(cols), "-y", str(rows)],
                 capture_output=True, text=True, timeout=5,

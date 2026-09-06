@@ -1020,6 +1020,46 @@ class WsServeTerminalKeysTargetTest(unittest.TestCase):
                        inspect.getsource(ws.serve_terminal))
 
 
+class ResizeCapturesAdoptedWindowSizeTest(unittest.TestCase):
+    """POST /sessions/<name>/resize must capture an adopted session's
+    pre-adoption window size before ever resizing it, even when /resize is
+    the very first request for that session (no prior /preview or /ws)."""
+
+    def test_resize_route_captures_before_resizing(self):
+        import inspect
+        src = inspect.getsource(server.Handler.do_POST)
+        block = src.split('endswith("/resize"):', 1)[1]
+        block = block[:block.index('elif path.startswith("/sessions/") and path.endswith("/keys")')]
+        capture_idx = block.index("capture_adopted_window_size(name)")
+        resize_idx = block.index('"tmux", "resize-window"')
+        self.assertLess(capture_idx, resize_idx)
+        self.assertIn("if not name.startswith(SESSION_PREFIX):", block)
+
+    def test_first_resize_on_adopted_name_captures_size_before_resize_window(self):
+        import sessions
+        sessions._adopted_window_size_cache.clear()
+        calls = []
+
+        def fake_run(cmd, **kw):
+            calls.append(cmd)
+            if cmd[:3] == ["tmux", "display", "-p"]:
+                return mock.Mock(returncode=0, stdout="132x44\n", stderr="")
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        # Simulate exactly what the /resize handler now does: capture
+        # first (guarded by the SESSION_PREFIX check), then resize.
+        name = "mysession"
+        if not name.startswith(server.SESSION_PREFIX):
+            sessions.capture_adopted_window_size(name, run=fake_run)
+        fake_run(["tmux", "resize-window", "-t", name, "-x", "100", "-y", "40"])
+
+        self.assertEqual(calls[0], ["tmux", "display", "-p", "-t", "mysession",
+                                     "#{window_width}x#{window_height}"])
+        self.assertEqual(sessions._adopted_window_size_cache.get("mysession"), (132, 44))
+        # A later restore (e.g. when the last viewer disconnects) now
+        # returns the size captured before /resize ever touched the window.
+        self.assertEqual(sessions.restore_window_size("mysession"), (132, 44))
+
 
 if __name__ == "__main__":
     unittest.main()
