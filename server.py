@@ -1064,6 +1064,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif path == "/overview":
             local_sess = list_rc_sessions()
             local_stats = {**stats.system_stats(), "token_history": stats.token_history()}
+            local_stats["version"] = VERSION
+            local_stats["claude_version"] = compat.get_caps().get("version")
             local_card = {"id": "local", "name": get_local_name(), "base_url": ""}
             cards = overview.build_overview(local_card, local_sess, local_stats, load_devices())
             self._json({"devices": cards})

@@ -585,6 +585,20 @@ class StatsSessionsCountTest(unittest.TestCase):
         self.assertIn('s["version"] = VERSION', stats_block)
 
 
+class OverviewLocalCardTest(unittest.TestCase):
+    def test_local_card_carries_version_and_claude_version(self):
+        """GET /overview's local card must include this device's own
+        launcher version and claude_version, same as a remote card does
+        (via fetch_remote_card -> full /rc/stats) — regression test for the
+        bug where local_stats was built from bare stats.system_stats()
+        without VERSION/claude_version added."""
+        import inspect
+        src = inspect.getsource(server.Handler.do_GET)
+        overview_block = src.split('elif path == "/overview":', 1)[1].split('elif path ==', 1)[0]
+        self.assertIn('local_stats["version"] = VERSION', overview_block)
+        self.assertIn('local_stats["claude_version"]', overview_block)
+
+
 class GetCachedConfigReportTest(unittest.TestCase):
     def test_caches_for_60_seconds(self):
         calls = {"n": 0}
