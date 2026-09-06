@@ -1,0 +1,25 @@
+#!/bin/bash
+# Fake `claude` for compat.py tests: supports --session-id, -n/--name,
+# --remote-control, --permission-mode, and `claude agents --json`.
+if [ "$1" = "--help" ]; then
+  cat <<'HELP'
+Usage: claude [options] [command] [prompt]
+Options:
+  -n, --name <name>                     Set a display name for this session
+  --permission-mode <mode>              Permission mode to use for the session
+  --remote-control [name]               Start an interactive session with Remote
+                                        Control enabled (optionally named)
+  --session-id <uuid>                   Use a specific session ID for the
+                                        conversation (must be a valid UUID)
+HELP
+  exit 0
+fi
+if [ "$1" = "agents" ] && [ "$2" = "--json" ]; then
+  echo '[]'
+  exit 0
+fi
+if [ "$1" = "--version" ]; then
+  echo "2.1.263 (Claude Code)"
+  exit 0
+fi
+exit 0

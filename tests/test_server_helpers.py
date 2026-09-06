@@ -277,5 +277,14 @@ class DetectAndRestartTest(unittest.TestCase):
         self.assertEqual(server._detect_and_restart(), "Restart manually to apply the update.")
 
 
+class VersionResponseTest(unittest.TestCase):
+    def test_includes_claude_version_and_caps(self):
+        import compat
+        body = server._version_response()
+        self.assertEqual(body["version"], server.VERSION)
+        self.assertIn("claude_version", body)
+        self.assertEqual(body["caps"], compat.CAPS)
+
+
 if __name__ == "__main__":
     unittest.main()

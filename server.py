@@ -1,6 +1,7 @@
 """HTTP handler and routing."""
 
 import base64
+import compat
 import hmac
 import http.server
 import ipaddress
@@ -486,6 +487,14 @@ def _do_git_update_phase(app_dir, confirm, run=subprocess.run):
         return 500, {"ok": False, "message": f"git failed: {e}"}, None
 
 
+def _version_response():
+    """Body for GET /version - the launcher version plus the detected
+    capabilities of the installed `claude` binary, extracted so it's
+    testable without a live socket."""
+    return {"version": VERSION, "claude_version": compat.claude_version(),
+            "caps": compat.CAPS}
+
+
 def _pick_restart_command(system_unit_active, user_unit_active, is_macos, uid):
     """Pick the command to restart the launcher, in priority order: an
     active system unit, then a user unit, then macOS launchd. Returns None
@@ -897,7 +906,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._json(get_tunnel_status(AUTH_USER, AUTH_PASS))
 
         elif path == "/version":
-            self._json({"version": VERSION})
+            self._json(_version_response())
 
         elif path == "/stats":
             sess = list_rc_sessions()
@@ -906,6 +915,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             s["tokens_now"] = sum(x.get("tokens", 0) for x in sess)
             s["sessions"] = len(sess)
             s["max_sessions"] = RC_MAX_SESSIONS
+            s["claude_version"] = compat.claude_version()
+            s["caps"] = compat.CAPS
             self._json(s)
 
         elif path == "/overview":
