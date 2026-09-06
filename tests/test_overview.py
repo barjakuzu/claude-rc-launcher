@@ -47,6 +47,15 @@ class OverviewTest(unittest.TestCase):
         )
         self.assertEqual(card["loadPct"], 100)
 
+    def test_sessions_count_excludes_external_rows(self):
+        card = overview.card_from_parts(
+            device={"id": "x", "name": "X", "base_url": "http://x:8200"},
+            sessions=[{"tokens": 100}, {"tokens": 50, "external": True}],
+            stats=None, online=True,
+        )
+        self.assertEqual(card["sessions"], 1)
+        self.assertEqual(card["tokens"], 150)
+
 
 class CardFromPartsClaudeVersionTest(unittest.TestCase):
     def test_claude_version_read_from_stats(self):

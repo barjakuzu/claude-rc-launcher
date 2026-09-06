@@ -494,6 +494,19 @@ class CountLauncherSessionsCapTest(unittest.TestCase):
         self.assertEqual(sessions.count_launcher_sessions([]), 0)
 
 
+class StatsSessionsCountTest(unittest.TestCase):
+    def test_stats_endpoint_uses_count_launcher_sessions_not_raw_len(self):
+        """/stats must report the launcher-owned session count (excluding
+        external rows), consistent with count_launcher_sessions and the
+        RC_MAX_SESSIONS cap — not a raw len(sess) that also counts
+        external/informational rows."""
+        import inspect
+        src = inspect.getsource(server.Handler.do_GET)
+        stats_block = src.split('elif path == "/stats":', 1)[1].split('elif path ==', 1)[0]
+        self.assertIn("count_launcher_sessions(sess)", stats_block)
+        self.assertNotIn("len(sess)", stats_block)
+
+
 class GetCachedConfigReportTest(unittest.TestCase):
     def test_caches_for_60_seconds(self):
         calls = {"n": 0}

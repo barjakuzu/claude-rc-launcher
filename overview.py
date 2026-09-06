@@ -14,6 +14,7 @@ def card_from_parts(device, sessions, stats, online=None):
     if online is None:
         online = stats is not None
     sess = sessions or []
+    launcher_sess = [s for s in sess if not s.get("external")]
     tokens = sum(int(s.get("tokens", 0)) for s in sess)
     load_pct = 0
     os_name, spark = "", []
@@ -30,7 +31,7 @@ def card_from_parts(device, sessions, stats, online=None):
     return {
         "id": device["id"], "name": device.get("name", device["id"]),
         "online": online, "hostname": host,
-        "sessions": len(sess), "tokens": tokens,
+        "sessions": len(launcher_sess), "tokens": tokens,
         "loadPct": load_pct, "os": os_name, "spark": spark,
         "user": user, "home_dir": home_dir,
         "claude_version": (stats or {}).get("claude_version"),

@@ -1041,7 +1041,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             s = stats.system_stats()
             s["token_history"] = stats.token_history()
             s["tokens_now"] = sum(x.get("tokens", 0) for x in sess)
-            s["sessions"] = len(sess)
+            s["sessions"] = count_launcher_sessions(sess)
             s["max_sessions"] = RC_MAX_SESSIONS
             caps = compat.get_caps()
             s["claude_version"] = caps.get("version")
