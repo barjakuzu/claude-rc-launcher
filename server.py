@@ -560,6 +560,23 @@ def _session_cap_message(current_count, max_sessions):
     return None
 
 
+def _derive_session_state(session_row):
+    """One of starting|busy|idle|needs_attention|ended from a session row
+    (either shape list_rc_sessions returns: a launcher rc-* row with
+    status running|dead|unknown, or an external row with status from
+    claude agents --json: idle|busy|ended)."""
+    if session_row.get("waiting_for"):
+        return "needs_attention"
+    status = session_row.get("status")
+    if status == "dead" or status == "ended":
+        return "ended"
+    if status == "busy":
+        return "busy"
+    if status in ("unknown", None) and session_row.get("kind") != "external":
+        return "starting"
+    return "idle"
+
+
 def _cookie_secure_flag(behind_tls, forwarded_proto):
     """True if the Secure cookie attribute should be set: either the
     operator has explicitly said we sit behind TLS termination, or the
@@ -770,6 +787,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         elif path == "/sessions":
             sessions = list_rc_sessions()
+            for s in sessions:
+                s["state"] = _derive_session_state(s)
             errors = get_all_session_errors()
             resp = {"sessions": sessions}
             if errors:

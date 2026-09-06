@@ -307,5 +307,43 @@ class NewSessionIdTest(unittest.TestCase):
         uuid.UUID(sid)
 
 
+class DeriveSessionStateTest(unittest.TestCase):
+    def test_waiting_for_wins_over_everything(self):
+        row = {"status": "busy", "waiting_for": "permission_prompt"}
+        self.assertEqual(server._derive_session_state(row), "needs_attention")
+
+    def test_dead_launcher_session_is_ended(self):
+        row = {"status": "dead"}
+        self.assertEqual(server._derive_session_state(row), "ended")
+
+    def test_busy_status_is_busy(self):
+        row = {"status": "busy", "kind": "external"}
+        self.assertEqual(server._derive_session_state(row), "busy")
+
+    def test_unknown_status_non_external_is_starting(self):
+        row = {"status": "unknown"}
+        self.assertEqual(server._derive_session_state(row), "starting")
+
+    def test_none_status_non_external_is_starting(self):
+        row = {"status": None}
+        self.assertEqual(server._derive_session_state(row), "starting")
+
+    def test_unknown_status_external_is_not_starting(self):
+        row = {"status": "unknown", "kind": "external"}
+        self.assertEqual(server._derive_session_state(row), "idle")
+
+    def test_running_launcher_session_is_idle(self):
+        row = {"status": "running"}
+        self.assertEqual(server._derive_session_state(row), "idle")
+
+    def test_idle_external_session_is_idle(self):
+        row = {"status": "idle", "kind": "external"}
+        self.assertEqual(server._derive_session_state(row), "idle")
+
+    def test_ended_external_session(self):
+        row = {"status": "ended", "kind": "external"}
+        self.assertEqual(server._derive_session_state(row), "ended")
+
+
 if __name__ == "__main__":
     unittest.main()
