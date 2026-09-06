@@ -13,6 +13,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import config
 import configreport
 
 
@@ -28,7 +29,7 @@ def _stub_run(cmd, **kw):
     `claude` binary and never needs one on PATH."""
     if cmd and cmd[0] == "git":
         return subprocess.run(cmd, capture_output=True, text=True, timeout=kw.get("timeout", 10))
-    if cmd[:2] == ["claude", "plugin"]:
+    if cmd[:2] == [config.CLAUDE_BIN, "plugin"]:
         return _FakePluginResult(0, "watch@official  v1.0\n")
     raise AssertionError("unexpected command in test stub: %r" % (cmd,))
 
@@ -100,7 +101,7 @@ class CollectConfigReportTest(unittest.TestCase):
 
     def _fake_run_with_plugins(self, plugin_lines):
         def fake_run(cmd, **kw):
-            if cmd[:2] == ["claude", "plugin"]:
+            if cmd[:2] == [config.CLAUDE_BIN, "plugin"]:
                 return _FakePluginResult(0, "\n".join(plugin_lines) + "\n")
             return _stub_run(cmd, **kw)
         return fake_run
@@ -215,3 +216,21 @@ class CollectConfigReportTest(unittest.TestCase):
         report = configreport.collect_config_report(home=self.home, run=_stub_run)
         self.assertLess(time.monotonic() - start, 5)
         self.assertIn("loopy", report["skills"]["names"])
+
+    def test_plugins_report_uses_configured_claude_bin(self):
+        seen = []
+
+        def fake_run(cmd, **kw):
+            seen.append(cmd)
+            if cmd[:2] == ["/opt/custom/claude", "plugin"]:
+                return _FakePluginResult(0, "watch@official  v1.0\n")
+            return _stub_run(cmd, **kw)
+
+        old = config.CLAUDE_BIN
+        config.CLAUDE_BIN = "/opt/custom/claude"
+        try:
+            configreport.collect_config_report(home=self.home, run=fake_run)
+        finally:
+            config.CLAUDE_BIN = old
+
+        self.assertTrue(any(cmd[:2] == ["/opt/custom/claude", "plugin"] for cmd in seen))

@@ -12,6 +12,7 @@ import subprocess
 import time
 
 import compat
+import config
 
 
 def _run_ok(run, cmd, timeout=10):
@@ -178,7 +179,7 @@ def _plugins_report(cfg_dir, run, errors):
             errors.append("plugins.txt: read failed")
     installed = []
     plugin_entry_re = re.compile(r"^[\w.-]+@[\w.-]+$")
-    ok, out = _run_ok(run, ["claude", "plugin", "list"])
+    ok, out = _run_ok(run, [config.CLAUDE_BIN, "plugin", "list"])
     if ok:
         for line in out.splitlines():
             line = line.strip()
