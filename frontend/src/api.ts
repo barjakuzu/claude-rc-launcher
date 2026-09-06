@@ -5,6 +5,43 @@ export interface UpdateResult {
   pending_commits?: string[];
 }
 
+// Per-device config parity report (configreport.py's collect_config_report).
+export interface ConfigReport {
+  claude_version: string | null;
+  claude_config: {
+    path: string;
+    head: string | null;
+    short_head: string | null;
+    dirty: boolean;
+    dirty_files: string[];
+    behind_remote: number | null;
+    last_commit_date: string | null;
+  };
+  skills: { count: number; names: string[]; dangling: string[]; deps_missing: string[]; device_only: string[] };
+  agents: string[];
+  rules: { shared: string[]; local: string[] };
+  plugins: { declared: string[]; installed: string[]; missing: string[]; extra: string[] };
+  marketplaces: string[];
+  settings: {
+    hooks_present: boolean;
+    remote_control_at_startup: boolean | null;
+    settings_symlinked: boolean;
+    skills_symlinked: boolean;
+    sha256: string | null;
+  };
+  effective_model: string | null;
+  claude_local_md: boolean;
+  generated_at: number;
+  errors: string[];
+}
+
+// Hub fan-out across all devices, plus computed skew reasons per device id.
+export interface ConfigMatrix {
+  devices: Record<string, ConfigReport | { error: string }>;
+  hub_head: string | null;
+  skew: Record<string, string[]>;
+}
+
 async function req(method: string, path: string, device?: string, body?: unknown) {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (device && device !== 'local') headers['X-RC-Device'] = device;
@@ -13,6 +50,11 @@ async function req(method: string, path: string, device?: string, body?: unknown
   const r = await fetch('/rc' + path, opts);
   if (r.status === 401) { window.location.href = '/login'; throw new Error('auth'); }
   return r.json();
+}
+
+// Mirrors api.overview()'s fetch style — hub-only, never proxied to a device.
+export async function fetchConfigMatrix(): Promise<ConfigMatrix> {
+  return req('GET', '/api/config-matrix') as Promise<ConfigMatrix>;
 }
 export const api = {
   overview: () => req('GET', '/overview'),

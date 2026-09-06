@@ -14,6 +14,7 @@ import { MobileNav } from './components/MobileNav';
 import { MobileMoreSheet } from './components/MobileMoreSheet';
 import { AllSessions } from './components/AllSessions';
 import { AllScheduled } from './components/AllScheduled';
+import { ConfigMatrixView } from './components/ConfigMatrix';
 import { Activity } from './components/Activity';
 import { ShareTunnel } from './components/ShareTunnel';
 import type { PanelTab } from './components/PanelTabs';
@@ -33,7 +34,7 @@ export function App() {
   );
   const [moreOpen, setMoreOpen] = useState(false);
   const [shareOpen, setShareOpen] = useState(false);
-  const [desktopView, setDesktopView] = useState<'devices' | 'tasks' | 'sessions'>('devices');
+  const [desktopView, setDesktopView] = useState<'devices' | 'tasks' | 'sessions' | 'config'>('devices');
 
   const pickMTab = (t: MTab) => {
     setMTab(t);
@@ -135,13 +136,13 @@ export function App() {
               onOpen={handleOpen}
             />
           ) : (
-            // Desktop "All devices" overview: Devices / Tasks / Sessions.
+            // Desktop "All devices" overview: Devices / Tasks / Sessions / Config.
             <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minWidth: 0 }}>
               <div style={{
                 flex: 'none', display: 'flex', gap: 4, padding: '10px 24px 0',
                 borderBottom: `1px solid ${RT.border}`,
               }}>
-                {(['devices', 'tasks', 'sessions'] as const).map((v) => (
+                {(['devices', 'tasks', 'sessions', 'config'] as const).map((v) => (
                   <button
                     key={v}
                     onClick={() => setDesktopView(v)}
@@ -152,7 +153,7 @@ export function App() {
                       borderBottom: `2px solid ${desktopView === v ? RT.text : 'transparent'}`,
                       textTransform: 'capitalize',
                     }}
-                  >{v === 'devices' ? 'Devices' : v === 'tasks' ? 'Tasks' : 'Sessions'}</button>
+                  >{v === 'devices' ? 'Devices' : v === 'tasks' ? 'Tasks' : v === 'sessions' ? 'Sessions' : 'Config'}</button>
                 ))}
               </div>
               <div style={{ flex: 1, overflow: 'hidden', display: 'flex', minHeight: 0 }}>
@@ -163,6 +164,7 @@ export function App() {
                 {desktopView === 'sessions' && (
                   <AllSessions cards={cards} onOpenDevice={handleOpenDevice} />
                 )}
+                {desktopView === 'config' && <ConfigMatrixView cards={cards} />}
               </div>
             </div>
           )}

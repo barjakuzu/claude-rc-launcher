@@ -4,13 +4,15 @@ import { RT, FONT_MONO } from '../tokens';
 import { Icons } from './primitives';
 import { api } from '../api';
 import type { DeviceCard } from '../types';
+import { ConfigMatrixView } from './ConfigMatrix';
 
 export interface DeviceSettingsProps {
   device: DeviceCard;
+  cards: DeviceCard[];
   mobile?: boolean;
 }
 
-export function DeviceSettings({ device, mobile = false }: DeviceSettingsProps) {
+export function DeviceSettings({ device, cards, mobile = false }: DeviceSettingsProps) {
   const [name, setName] = useState(device.name);
   const [pending, setPending] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -98,6 +100,19 @@ export function DeviceSettings({ device, mobile = false }: DeviceSettingsProps) 
       {error && (
         <div style={{ fontSize: 11, color: RT.red, fontFamily: FONT_MONO }}>{error}</div>
       )}
+
+      {/* Config parity */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+        <div style={{
+          fontSize: 10, color: RT.textLow, letterSpacing: '.14em',
+          textTransform: 'uppercase', fontFamily: FONT_MONO,
+        }}>
+          Config
+        </div>
+        <div style={{ margin: '0 -18px' }}>
+          <ConfigMatrixView cards={cards} />
+        </div>
+      </div>
     </div>
   );
 }
