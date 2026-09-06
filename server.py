@@ -10,6 +10,7 @@ import re
 import secrets
 import stats
 import subprocess
+import sys
 import threading
 import time
 import urllib.error
@@ -435,6 +436,49 @@ def _valid_session_name(name):
     no path traversal or separators, and carries our 'rc-' prefix so a
     logged-in browser can only reach sessions the launcher itself created."""
     return bool(name) and ".." not in name and "/" not in name and name.startswith(SESSION_PREFIX)
+
+
+def _update_confirmed(confirm, remote_sha):
+    """True if the client explicitly confirmed the exact commit to update
+    to. Prevents a single stray POST /update from silently deploying
+    whatever happens to be on origin/main at that instant."""
+    return bool(remote_sha) and confirm == remote_sha
+
+
+def _pick_restart_command(system_unit_active, user_unit_active, is_macos, uid):
+    """Pick the command to restart the launcher, in priority order: an
+    active system unit, then a user unit, then macOS launchd. Returns None
+    if none apply - the operator restarts manually."""
+    if system_unit_active:
+        return ["systemctl", "restart", "claude-rc-launcher"]
+    if user_unit_active:
+        return ["systemctl", "--user", "restart", "claude-rc"]
+    if is_macos:
+        return ["launchctl", "kickstart", "-k", f"gui/{uid}/com.claude-rc.launcher"]
+    return None
+
+
+def _detect_and_restart():
+    """Restart the launcher via whichever install mechanism is active, and
+    return a human-readable status message."""
+    system_active = subprocess.run(
+        ["systemctl", "is-active", "--quiet", "claude-rc-launcher"],
+        capture_output=True,
+    ).returncode == 0
+    user_active = subprocess.run(
+        ["systemctl", "--user", "is-active", "--quiet", "claude-rc"],
+        capture_output=True,
+    ).returncode == 0
+    cmd = _pick_restart_command(system_active, user_active, sys.platform == "darwin", os.getuid())
+    if cmd is None:
+        return "Restart manually to apply the update."
+
+    def _run_delayed():
+        time.sleep(1)
+        subprocess.run(cmd, capture_output=True)
+
+    threading.Thread(target=_run_delayed, daemon=True).start()
+    return f"Restarting ({' '.join(cmd)})..."
 
 
 def _cookie_secure_flag(behind_tls, forwarded_proto):
@@ -1186,23 +1230,45 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._json({"ok": False, "message": "Schedule not found"}, 404)
 
         elif path == "/update":
-            # Pull latest code from git and restart the service
             app_dir = os.path.dirname(os.path.abspath(__file__))
             git_dir = os.path.join(app_dir, ".git")
             if not os.path.isdir(git_dir):
                 self._json({"ok": False, "message": "Not a git install. Re-run the install script."}, 400)
                 return
-            # Get old version
-            old_ver = VERSION
-            # Git pull
-            result = subprocess.run(
-                ["git", "-C", app_dir, "pull", "--ff-only"],
+            fetch = subprocess.run(
+                ["git", "-C", app_dir, "fetch", "origin", "main"],
                 capture_output=True, text=True, timeout=30,
             )
-            if result.returncode != 0:
-                self._json({"ok": False, "message": f"git pull failed: {result.stderr.strip()}"}, 500)
+            if fetch.returncode != 0:
+                self._json({"ok": False, "message": f"git fetch failed: {fetch.stderr.strip()}"}, 500)
                 return
-            # Read new version
+            head = subprocess.run(
+                ["git", "-C", app_dir, "rev-parse", "origin/main"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if head.returncode != 0:
+                self._json({"ok": False, "message": f"git rev-parse failed: {head.stderr.strip()}"}, 500)
+                return
+            remote_sha = head.stdout.strip()
+            body = self._read_body()
+            if not _update_confirmed(body.get("confirm", ""), remote_sha):
+                log = subprocess.run(
+                    ["git", "-C", app_dir, "log", "--oneline", f"HEAD..{remote_sha}"],
+                    capture_output=True, text=True, timeout=10,
+                )
+                pending = log.stdout.strip().splitlines() if log.returncode == 0 else []
+                self._json({"ok": False,
+                             "message": "Confirm the exact commit to update to (see remote_sha / pending_commits).",
+                             "remote_sha": remote_sha, "pending_commits": pending}, 409)
+                return
+            old_ver = VERSION
+            merge = subprocess.run(
+                ["git", "-C", app_dir, "merge", "--ff-only", remote_sha],
+                capture_output=True, text=True, timeout=30,
+            )
+            if merge.returncode != 0:
+                self._json({"ok": False, "message": f"git merge failed: {merge.stderr.strip()}"}, 500)
+                return
             new_ver = old_ver
             try:
                 cfg_path = os.path.join(app_dir, "config.py")
@@ -1213,13 +1279,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                             break
             except Exception:
                 pass
+            restart_msg = _detect_and_restart()
             self._json({"ok": True, "old": old_ver, "new": new_ver,
-                         "message": f"Updated {old_ver} → {new_ver}. Restarting..."})
-            # Schedule restart in background so the response gets sent first
-            def _restart():
-                time.sleep(1)
-                os.execv("/usr/bin/systemctl", ["systemctl", "restart", "claude-rc-launcher"])
-            threading.Thread(target=_restart, daemon=True).start()
+                         "message": f"Updated {old_ver} → {new_ver}. {restart_msg}"})
 
         elif path == "/schedules/fire":
             body = self._read_body()

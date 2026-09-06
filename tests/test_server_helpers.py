@@ -121,5 +121,36 @@ class RecordFailedLoginLogTest(unittest.TestCase):
         self.assertEqual(len(user_part), 64)
 
 
+class UpdateConfirmedTest(unittest.TestCase):
+    def test_matching_sha_confirms(self):
+        self.assertTrue(server._update_confirmed("abc123", "abc123"))
+
+    def test_missing_confirm_does_not_confirm(self):
+        self.assertFalse(server._update_confirmed("", "abc123"))
+
+    def test_wrong_sha_does_not_confirm(self):
+        self.assertFalse(server._update_confirmed("wrong", "abc123"))
+
+    def test_empty_remote_sha_never_confirms(self):
+        self.assertFalse(server._update_confirmed("", ""))
+
+
+class PickRestartCommandTest(unittest.TestCase):
+    def test_prefers_active_system_unit(self):
+        cmd = server._pick_restart_command(True, True, True, 501)
+        self.assertEqual(cmd, ["systemctl", "restart", "claude-rc-launcher"])
+
+    def test_falls_back_to_user_unit(self):
+        cmd = server._pick_restart_command(False, True, True, 501)
+        self.assertEqual(cmd, ["systemctl", "--user", "restart", "claude-rc"])
+
+    def test_falls_back_to_launchd_on_macos(self):
+        cmd = server._pick_restart_command(False, False, True, 501)
+        self.assertEqual(cmd, ["launchctl", "kickstart", "-k", "gui/501/com.claude-rc.launcher"])
+
+    def test_none_when_nothing_detected(self):
+        self.assertIsNone(server._pick_restart_command(False, False, False, 501))
+
+
 if __name__ == "__main__":
     unittest.main()
