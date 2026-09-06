@@ -5,7 +5,15 @@ on:
     branches: [main]
 
 jobs:
+  # Reuses ci.yml's `test` job (Python tests, frontend build, Gitleaks, and
+  # the personal-identifier grep) so main gets the exact same gate as PRs.
+  checks:
+    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+    uses: ./.github/workflows/ci.yml
+    secrets: inherit
+
   release:
+    needs: checks
     runs-on: ubuntu-latest
     # Skip if the commit was made by this workflow (prevent infinite loop)
     if: "!contains(github.event.head_commit.message, '[skip ci]')"
