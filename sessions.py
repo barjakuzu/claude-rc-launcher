@@ -884,11 +884,18 @@ def restart_session(name, mode=None, workdir=None, model=None, sandbox=False,
     if mode == SHELL_MODE:
         resume = False
 
-    # Find the Claude session UUID BEFORE killing (so JSONL is still fresh)
+    # Find the Claude session UUID BEFORE killing (so JSONL is still fresh).
+    # RC_SESSION_ID (set at launch by build_tmux_command for natively-
+    # identified sessions) is authoritative and skips the title scan
+    # entirely; _find_session_uuid is the pre-v3 fallback.
     resume_id = None
     if resume:
-        resume_id = _find_session_uuid(name, session_dir)
-        print(f"  {name}: UUID lookup → {resume_id[:8] if resume_id else 'not found'}")
+        resume_id = get_session_env(name, "RC_SESSION_ID")
+        if resume_id:
+            print(f"  {name}: reusing RC_SESSION_ID {resume_id[:8]}")
+        else:
+            resume_id = _find_session_uuid(name, session_dir)
+            print(f"  {name}: UUID lookup → {resume_id[:8] if resume_id else 'not found'}")
 
     # Kill the old session
     if session_exists(name):

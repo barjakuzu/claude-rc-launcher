@@ -349,6 +349,59 @@ class RestartSessionPassesSessionIdTest(unittest.TestCase):
         self.assertEqual(self.captured_kwargs.get("resume_id"), "resolved-uuid-1234")
 
 
+class RestartSessionPrefersRcSessionIdTest(unittest.TestCase):
+    """restart_session must reuse RC_SESSION_ID as both the resume target
+    and the new session's --session-id, without ever calling
+    _find_session_uuid, when the env var is present."""
+
+    def setUp(self):
+        self.fake = FakeRun()
+        self._patched = {
+            "run": sessions.subprocess.run,
+            "sleep": sessions.time.sleep,
+            "exists": sessions.session_exists,
+            "env": sessions.get_session_env,
+            "find_uuid": sessions._find_session_uuid,
+            "setup": sessions.setup_session,
+        }
+        self.find_uuid_calls = []
+        sessions.subprocess.run = self.fake
+        sessions.time.sleep = lambda *_: None
+        sessions.session_exists = lambda name: True
+        sessions.get_session_env = lambda name, var: {
+            "RC_MODE": "c", "RC_WORKDIR": "/home/user/project",
+            "RC_SESSION_ID": "0d3b8b1a-1111-4a2b-9c3d-abcdef012345",
+        }.get(var)
+        sessions._find_session_uuid = lambda *a, **kw: (
+            self.find_uuid_calls.append((a, kw)) or None
+        )
+        sessions.setup_session = lambda *a, **kw: None
+
+    def tearDown(self):
+        sessions.subprocess.run = self._patched["run"]
+        sessions.time.sleep = self._patched["sleep"]
+        sessions.session_exists = self._patched["exists"]
+        sessions.get_session_env = self._patched["env"]
+        sessions._find_session_uuid = self._patched["find_uuid"]
+        sessions.setup_session = self._patched["setup"]
+
+    def test_reuses_rc_session_id_without_title_scan(self):
+        ok, msg = sessions.restart_session("rc-portugal")
+        self.assertTrue(ok)
+        self.assertEqual(self.find_uuid_calls, [])
+        # The new-session tmux command must carry the reused UUID both as
+        # --resume target and as --session-id.
+        new_session_calls = [c for c in self.fake.calls
+                              if isinstance(c, list) and "new-session" in c]
+        self.assertEqual(len(new_session_calls), 1)
+        cmd = new_session_calls[0]
+        # The UUID lands both as a standalone -e RC_SESSION_ID=<uuid> argv
+        # item and embedded in the bash -c claude invocation (--resume
+        # <uuid> and --session-id <uuid>), so check the joined command
+        # line rather than list membership.
+        self.assertIn("0d3b8b1a-1111-4a2b-9c3d-abcdef012345", " ".join(cmd))
+
+
 class StripOsc8Test(unittest.TestCase):
     def test_strips_close_sequence(self):
         raw = "hello\x1b]8;;\x1b\\world"
