@@ -229,12 +229,18 @@ function VersionChip() {
 
   const [info, setInfo] = useState<UpdateInfo | null>(null);
   const [updating, setUpdating] = useState(false);
+  // The hub's own `claude` binary version (GET /version's claude_version).
+  // Absent on older backends or when claude isn't installed there.
+  const [claudeVersion, setClaudeVersion] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     api.updateCheck().then((data) => {
       if (!cancelled && mounted.current) setInfo(data as UpdateInfo);
     }).catch(() => {/* ignore */});
+    api.version().then((data) => {
+      if (!cancelled && mounted.current) setClaudeVersion(data?.claude_version ?? null);
+    }).catch(() => {/* ignore — tolerate older devices with no /version or no claude_version field */});
     return () => { cancelled = true; };
   }, []);
 
@@ -243,39 +249,51 @@ function VersionChip() {
     runUpdateFlow(() => setUpdating(false));
   };
 
-  if (!info) return null;
+  const claudeLabel = claudeVersion ? (
+    <span style={{ fontFamily: FONT_MONO, fontSize: 11, color: RT.textLow, letterSpacing: '.06em' }}>
+      Claude {claudeVersion}
+    </span>
+  ) : null;
+
+  if (!info) return claudeLabel;
 
   const vLabel = info.current ? `v${info.current}` : (info.latest ? `v${info.latest}` : null);
 
   if (info.update_available) {
     return (
-      <button
-        onClick={handleUpdate}
-        disabled={updating}
-        style={{
-          background: 'oklch(0.72 0.09 78 / 0.15)',
-          border: `1px solid oklch(0.72 0.09 78 / 0.40)`,
-          borderRadius: 6,
-          padding: '4px 9px',
-          cursor: updating ? 'wait' : 'pointer',
-          color: RT.amber,
-          fontFamily: FONT_MONO,
-          fontSize: 11,
-          fontWeight: 600,
-          whiteSpace: 'nowrap',
-          opacity: updating ? 0.7 : 1,
-        }}
-      >
-        {updating ? 'updating…' : `v${info.latest} · Update`}
-      </button>
+      <>
+        <button
+          onClick={handleUpdate}
+          disabled={updating}
+          style={{
+            background: 'oklch(0.72 0.09 78 / 0.15)',
+            border: `1px solid oklch(0.72 0.09 78 / 0.40)`,
+            borderRadius: 6,
+            padding: '4px 9px',
+            cursor: updating ? 'wait' : 'pointer',
+            color: RT.amber,
+            fontFamily: FONT_MONO,
+            fontSize: 11,
+            fontWeight: 600,
+            whiteSpace: 'nowrap',
+            opacity: updating ? 0.7 : 1,
+          }}
+        >
+          {updating ? 'updating…' : `v${info.latest} · Update`}
+        </button>
+        {claudeLabel}
+      </>
     );
   }
 
   return vLabel ? (
-    <span style={{ fontFamily: FONT_MONO, fontSize: 11, color: RT.textLow, letterSpacing: '.06em' }}>
-      {vLabel}
-    </span>
-  ) : null;
+    <>
+      <span style={{ fontFamily: FONT_MONO, fontSize: 11, color: RT.textLow, letterSpacing: '.06em' }}>
+        {vLabel}
+      </span>
+      {claudeLabel}
+    </>
+  ) : claudeLabel;
 }
 
 // ─── GlobalMenu ─────────────────────────────────────────────────────────────

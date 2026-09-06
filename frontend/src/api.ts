@@ -90,6 +90,10 @@ export const api = {
   tunnelStart: () => req('POST', '/tunnel/start'),
   tunnelStop: () => req('POST', '/tunnel/stop'),
   updateCheck: () => req('GET', '/update-check'),
+  // Hub's own launcher version + the claude_version its `claude` binary
+  // reports (may be null/absent on an older backend or when claude isn't
+  // installed) — shown next to the version badge in the header.
+  version: (): Promise<{ version: string; claude_version: string | null }> => req('GET', '/version'),
   update: (body?: { confirm?: string }): Promise<UpdateResult> => req('POST', '/update', undefined, body ?? {}),
   // Device registry lives on the hub — never proxied, so no device arg.
   deviceRename: (id: string, name: string) => req('POST', '/devices/rename', undefined, { id, name }),
