@@ -100,6 +100,12 @@ export function DeviceDetail({ device, cards, tab, setTab, onClose, layout }: De
           </>
         )}
 
+        {tab === 'running' && mobile && (
+          <div style={{ fontFamily: FONT_MONO, fontSize: 11.5, color: RT.textLow, padding: '4px 2px' }}>
+            See the Sessions tab for this device's sessions.
+          </div>
+        )}
+
         {tab === 'scheduled' && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
             {/* New schedule button */}

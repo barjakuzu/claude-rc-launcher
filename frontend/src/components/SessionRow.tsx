@@ -98,7 +98,7 @@ export function SessionRow({ s, hue, deviceId, mobile = false, onChanged, onPrev
   };
 
   const handleLink = () => {
-    if (s.url) window.open(s.url, '_blank');
+    if (s.url) window.open(s.url, '_blank', 'noopener,noreferrer');
   };
 
   const handleRefresh = async () => {
@@ -121,20 +121,43 @@ export function SessionRow({ s, hue, deviceId, mobile = false, onChanged, onPrev
   const previewTarget = isAdopted ? s.tmux!.session_name : s.name;
 
   const [enablingRc, setEnablingRc] = useState(false);
-  const [rcUrl, setRcUrl] = useState<string | null | undefined>(s.rc_url);
+  const [localRcUrl, setLocalRcUrl] = useState<string | null>(null);
+  const [rcError, setRcError] = useState<string | null>(null);
+  // The server's rc_url always wins when present; localRcUrl only bridges
+  // the gap between a successful enable-rc call and the next poll picking
+  // up s.rc_url. If a later poll reports s.rc_url as null (RC was
+  // disabled/reset server-side), drop the stale local value too.
+  useEffect(() => {
+    if (s.rc_url === null) setLocalRcUrl(null);
+  }, [s.rc_url]);
+  const rcUrl = s.rc_url ?? localRcUrl;
 
   const handleEnableRc = async () => {
     if (!isAdopted) return;
     setEnablingRc(true);
+    setRcError(null);
     try {
       const result = await api.enableRc(deviceId, s.tmux!.session_name);
-      if (result.ok && result.url) setRcUrl(result.url);
-    } catch { /* ignore */ }
-    finally { setEnablingRc(false); }
+      if (result.ok && result.url) {
+        setLocalRcUrl(result.url);
+      } else {
+        setRcError(result.message || 'Failed to enable Remote Control');
+      }
+    } catch (err) {
+      setRcError(err instanceof Error ? err.message : 'Failed to enable Remote Control');
+    } finally {
+      setEnablingRc(false);
+    }
   };
 
+  useEffect(() => {
+    if (!rcError) return;
+    const t = setTimeout(() => setRcError(null), 6000);
+    return () => clearTimeout(t);
+  }, [rcError]);
+
   const handleOpenRcUrl = () => {
-    if (rcUrl) window.open(rcUrl, '_blank');
+    if (rcUrl) window.open(rcUrl, '_blank', 'noopener,noreferrer');
   };
 
   const handleStop = async () => {
@@ -165,6 +188,7 @@ export function SessionRow({ s, hue, deviceId, mobile = false, onChanged, onPrev
   };
 
   return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
     <div
       onClick={canOpenTerminal ? () => onPreview(previewTarget) : undefined}
       onMouseEnter={(e) => { e.currentTarget.style.borderColor = RT.borderHi; }}
@@ -344,6 +368,15 @@ export function SessionRow({ s, hue, deviceId, mobile = false, onChanged, onPrev
         </div>
         )}
       </div>
+    </div>
+    {rcError && (
+      <div style={{
+        fontFamily: FONT_MONO, fontSize: 11, color: RT.red,
+        padding: '2px 4px', textAlign: mobile ? 'left' : 'right',
+      }}>
+        {rcError}
+      </div>
+    )}
     </div>
   );
 }
