@@ -71,6 +71,17 @@ class NullSafeCronTest(unittest.TestCase):
     def test_validate_cron_still_accepts_good_strings(self):
         self.assertIsNone(scheduler.validate_cron("0 9 * * *"))
 
+    def test_validate_cron_empty_string_gets_pick_a_preset_message(self):
+        # An empty string is what the UI sends when the preset is left at
+        # its blank default (as opposed to explicit None for Manual).
+        self.assertEqual(scheduler.validate_cron(""),
+                          "Pick a schedule preset, enter a 5-field cron, or choose Manual")
+        self.assertEqual(scheduler.validate_cron("   "),
+                          "Pick a schedule preset, enter a 5-field cron, or choose Manual")
+
+    def test_validate_cron_wrong_nonzero_field_count_keeps_generic_message(self):
+        self.assertEqual(scheduler.validate_cron("0 9 * *"), "Expected 5 fields, got 4")
+
 
 class FakeRun:
     """Records every subprocess.run call scheduler.py makes and answers

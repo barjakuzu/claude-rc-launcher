@@ -9,6 +9,13 @@ import type { Schedule } from '../types';
 // ── Cron presets ──────────────────────────────────────────────────────────────
 const MANUAL_PRESET = '__manual__';
 
+// A schedule must send a 5-field cron or an explicit Manual (cron: null) —
+// an empty/blank cron string 400s server-side. Cheap client-side check
+// (field count only; the server still validates each field's contents).
+export function isValidCronString(value: string): boolean {
+  return value.trim().split(/\s+/).filter(Boolean).length === 5;
+}
+
 const CRON_PRESETS: { label: string; value: string }[] = [
   { label: 'Choose a preset…', value: '' },
   { label: 'Manual (run on demand)', value: MANUAL_PRESET },
@@ -87,6 +94,10 @@ export function ScheduleModal({ deviceId, initial, onClose, onSaved }: ScheduleM
   const [error,        setError]        = useState<string | null>(null);
   const [showBrowser,  setShowBrowser]  = useState(false);
 
+  // Manual always sends cron: null (valid). Otherwise a preset or a typed
+  // cron must resolve to a real 5-field expression before Save is allowed.
+  const cronOk = preset === MANUAL_PRESET || isValidCronString(cron);
+
   // Preset → fill cron input
   function handlePreset(value: string) {
     setPreset(value);
@@ -126,7 +137,7 @@ export function ScheduleModal({ deviceId, initial, onClose, onSaved }: ScheduleM
   }
 
   async function handleSave() {
-    if (pending) return;
+    if (pending || !cronOk) return;
     setError(null);
     setPending(true);
     try {
@@ -260,6 +271,11 @@ export function ScheduleModal({ deviceId, initial, onClose, onSaved }: ScheduleM
             {preset === MANUAL_PRESET && (
               <div style={{ fontSize: 11, color: RT.textLow, marginTop: 5, fontFamily: FONT_MONO }}>
                 Manual task - runs only when triggered with "Run now".
+              </div>
+            )}
+            {!cronOk && (
+              <div style={{ fontSize: 11, color: RT.red, marginTop: 5, fontFamily: FONT_MONO }}>
+                Pick a schedule preset, enter a 5-field cron, or choose Manual.
               </div>
             )}
           </div>
@@ -428,18 +444,19 @@ export function ScheduleModal({ deviceId, initial, onClose, onSaved }: ScheduleM
           </button>
           <button
             onClick={handleSave}
-            disabled={pending}
+            disabled={pending || !cronOk}
+            title={!cronOk ? 'Pick a schedule preset, enter a 5-field cron, or choose Manual' : undefined}
             style={{
               background: RT.text,
               border: 'none',
               borderRadius: 6,
               padding: '7px 16px',
-              cursor: pending ? 'wait' : 'pointer',
+              cursor: (pending || !cronOk) ? (pending ? 'wait' : 'not-allowed') : 'pointer',
               color: RT.bg,
               fontSize: 13,
               fontFamily: 'inherit',
               fontWeight: 600,
-              opacity: pending ? 0.6 : 1,
+              opacity: (pending || !cronOk) ? 0.6 : 1,
             }}
           >
             {pending ? 'Saving…' : 'Save'}

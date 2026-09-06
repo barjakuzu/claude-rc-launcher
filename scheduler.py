@@ -111,6 +111,11 @@ def validate_cron(expr):
     try:
         fields = expr.strip().split()
         if len(fields) != 5:
+            if len(fields) == 0:
+                # Empty/whitespace-only: the UI sends "" when a preset was
+                # never picked and no manual cron was typed. The generic
+                # "got 0" field-count message is confusing there.
+                return "Pick a schedule preset, enter a 5-field cron, or choose Manual"
             return f"Expected 5 fields, got {len(fields)}"
         _parse_cron_field(fields[0], 0, 59)
         _parse_cron_field(fields[1], 0, 23)
