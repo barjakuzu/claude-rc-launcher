@@ -32,6 +32,7 @@ from sessions import (
     restart_session, list_resumable_sessions, resume_session,
     get_all_session_errors, unstick_session, get_transcript,
     build_tmux_command, count_launcher_sessions, get_url_with_source,
+    invalidate_adopted_url_cache,
 )
 from tunnel import (
     cloudflared_available, start_tunnel, stop_tunnel, get_tunnel_status,
@@ -695,6 +696,11 @@ def _enable_rc_for_adopted(name, run=subprocess.run, sleep=time.sleep, now_fn=ti
              capture_output=True, text=True, timeout=5)
     if r2.returncode != 0:
         return {"ok": False, "message": "Could not send Enter to the pane"}
+    # This endpoint polls get_url_with_source directly (bypassing
+    # sessions._cached_adopted_url), but a stale cached miss for this
+    # session would otherwise still serve /sessions and /overview callers
+    # for up to ADOPTION_URL_CACHE_MISS_TTL seconds after RC activates.
+    invalidate_adopted_url_cache(name)
     deadline = now_fn() + ENABLE_RC_POLL_SECONDS
     while now_fn() < deadline:
         url, source = get_url_with_source(name)

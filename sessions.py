@@ -23,6 +23,49 @@ _session_errors = {}
 _session_errors_lock = threading.Lock()
 ERROR_TTL = 30
 
+# Per-tmux-session-name cache of the adoption path's (url, source) lookup
+# (list_rc_sessions' external-row loop). Key: tmux session name, value:
+# (url, source, expires_at). A found "osc8" URL is cached for
+# ADOPTION_URL_CACHE_TTL; a miss is retried sooner, after
+# ADOPTION_URL_CACHE_MISS_TTL — so a poll loop watching for RC to
+# activate on a freshly-adopted session doesn't wait a full minute. This
+# bounds each adopted row to at most one capture-pane per TTL window
+# instead of one per /overview or /sessions poll.
+_adoption_url_cache = {}
+_adoption_url_cache_lock = threading.Lock()
+ADOPTION_URL_CACHE_TTL = 60
+ADOPTION_URL_CACHE_MISS_TTL = 15
+
+
+def _cached_adopted_url(session_name, now_fn=None):
+    """Read-only, cached (url, source) lookup for an adopted external tmux
+    session — the only way list_rc_sessions may ever call
+    get_url_with_source, so it never runs `tmux set-environment` against a
+    session it does not own and never spawns more than one capture-pane
+    per session per cache window."""
+    now = now_fn() if now_fn is not None else time.time()
+    with _adoption_url_cache_lock:
+        cached = _adoption_url_cache.get(session_name)
+        if cached is not None and now < cached[2]:
+            return cached[0], cached[1]
+    url, source = get_url_with_source(session_name, persist=False)
+    ttl = ADOPTION_URL_CACHE_TTL if (source == "osc8" and url) else ADOPTION_URL_CACHE_MISS_TTL
+    with _adoption_url_cache_lock:
+        _adoption_url_cache[session_name] = (url, source, now + ttl)
+    return url, source
+
+
+def invalidate_adopted_url_cache(session_name):
+    """Drop any cached adoption lookup for `session_name` so the next
+    list_rc_sessions call re-checks the pane immediately, instead of
+    serving a stale cached miss for up to ADOPTION_URL_CACHE_MISS_TTL
+    seconds. Called by POST /sessions/<name>/enable-rc right after typing
+    /remote-control — that endpoint polls get_url_with_source directly
+    (bypassing this cache entirely) but other pollers of list_rc_sessions
+    should see the new state as soon as it exists."""
+    with _adoption_url_cache_lock:
+        _adoption_url_cache.pop(session_name, None)
+
 
 def is_shell_session(session_name):
     """True if the session runs a plain shell rather than Claude Code."""
@@ -228,7 +271,7 @@ def list_rc_sessions():
             pane = panes.pane_for_pid(pid)
             if pane and not pane["session_name"].startswith(SESSION_PREFIX):
                 entry["tmux"] = {"session_name": pane["session_name"], "pane_id": pane["pane_id"]}
-                url, source = get_url_with_source(pane["session_name"])
+                url, source = _cached_adopted_url(pane["session_name"])
                 if source == "osc8":
                     entry["rc_url"] = url
         sessions.append(entry)
@@ -349,7 +392,7 @@ def get_url(session_name):
     return url
 
 
-def get_url_with_source(session_name):
+def get_url_with_source(session_name, persist=True):
     """Extract the claude.ai URL from a tmux session's pane output, along
     with where it came from: (url, source) where source is one of
     "osc8" (an OSC 8 hyperlink target — authoritative), "text" (a plain/
@@ -370,10 +413,17 @@ def get_url_with_source(session_name):
     the current pane — a session that has never shown the URL yet, or
     whose Remote Control never activated, correctly returns (None, None).
 
+    `persist=False` makes this call read-only against a tmux session that
+    is not ours to write into (an adopted external session): it skips the
+    `is_shell_session` / RC_MODE env read (external rows are never our
+    launcher's shell sessions), never runs `tmux set-environment`, and
+    skips the trailing RC_URL env-read fallback (nothing we'd have written
+    there anyway). Used by the adoption path in list_rc_sessions.
+
     Uses `capture-pane -e` so ANSI/OSC escape sequences (and thus the
     OSC 8 hyperlink target) survive the capture — without -e, tmux strips
     escapes and the OSC 8 branch can never fire."""
-    if is_shell_session(session_name):
+    if persist and is_shell_session(session_name):
         return None, None
     for history_lines in ("-50", "-500"):
         try:
@@ -386,12 +436,13 @@ def get_url_with_source(session_name):
             session_targets = [t for t in targets if _SESSION_URL_RE.match(t)]
             if session_targets:
                 url = session_targets[-1]
-                stored = get_session_env(session_name, "RC_URL")
-                if stored != url:
-                    subprocess.run(
-                        ["tmux", "set-environment", "-t", session_name, "RC_URL", url],
-                        capture_output=True,
-                    )
+                if persist:
+                    stored = get_session_env(session_name, "RC_URL")
+                    if stored != url:
+                        subprocess.run(
+                            ["tmux", "set-environment", "-t", session_name, "RC_URL", url],
+                            capture_output=True,
+                        )
                 return url, "osc8"
             if not targets:
                 # No OSC 8 links in this pane at all — fall back to a plain-
@@ -404,6 +455,8 @@ def get_url_with_source(session_name):
                     return matches[-1], "text"
         except Exception:
             pass
+    if not persist:
+        return None, None
     stored = get_session_env(session_name, "RC_URL")
     if stored and stored.startswith("https://claude.ai/code/session_"):
         return stored, None
