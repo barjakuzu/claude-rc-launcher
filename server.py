@@ -31,6 +31,7 @@ from sessions import (
 from tunnel import (
     cloudflared_available, start_tunnel, stop_tunnel, get_tunnel_status,
 )
+import schedules
 from schedules import (
     load_schedules, create_schedule, update_schedule, delete_schedule,
 )
@@ -58,6 +59,17 @@ def _parse_projects():
             "exists": os.path.isdir(p),
         })
     return projects
+
+
+def _enrich_next_run(schedule):
+    """Return a copy of `schedule` with next_run computed. Disabled and
+    manual (cron: null) schedules always get next_run: None."""
+    s = dict(schedule)
+    if s.get("enabled") and s.get("cron"):
+        s["next_run"] = next_cron_run(s["cron"])
+    else:
+        s["next_run"] = None
+    return s
 
 
 # Login tokens persist across launcher restarts (frequent self-updates used
@@ -781,14 +793,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             })
 
         elif path == "/schedules":
-            schedules = load_schedules()
-            # Enrich with next_run
-            for s in schedules:
-                if s.get("enabled") and s.get("cron"):
-                    s["next_run"] = next_cron_run(s["cron"])
-                else:
-                    s["next_run"] = None
-            self._json({"schedules": schedules})
+            sched_list = [_enrich_next_run(s) for s in load_schedules()]
+            resp = {"schedules": sched_list}
+            if schedules.LAST_LOAD_ERROR:
+                resp["error"] = schedules.LAST_LOAD_ERROR
+            self._json(resp)
 
         elif path.startswith("/schedules/") and path.endswith("/instructions"):
             # Read the instructions_file content for a schedule on this device,
