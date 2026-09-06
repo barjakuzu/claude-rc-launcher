@@ -318,7 +318,7 @@ function GlobalMenu({ openId, onRefresh }: GlobalMenuProps) {
     try {
       const data = await api.updateCheck() as { update_available: boolean; current?: string; latest?: string };
       if (data.update_available) {
-        runUpdateFlow(() => {});
+        await runUpdateFlow(() => {});
       } else {
         window.alert(`Up to date (v${data.current ?? data.latest ?? '?'}).`);
       }

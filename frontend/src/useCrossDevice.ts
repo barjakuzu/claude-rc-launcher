@@ -16,12 +16,16 @@ export function useAllSessions(cards: DeviceCard[], active: boolean): SessionWit
   const mounted = useRef(true);
   useEffect(() => () => { mounted.current = false; }, []);
 
+  const cardsRef = useRef(cards);
+  cardsRef.current = cards;
+  const key = cards.map((c) => c.id + ':' + (c.online ? 1 : 0)).join(',');
+
   useEffect(() => {
     if (!active) return;
     let cancelled = false;
 
     const fetchAll = async () => {
-      const online = cards.filter((c) => c.online);
+      const online = cardsRef.current.filter((c) => c.online);
       const results = await Promise.allSettled(online.map((d) => api.sessions(d.id)));
       if (cancelled || !mounted.current) return;
       const flat: SessionWithDevice[] = [];
@@ -39,7 +43,7 @@ export function useAllSessions(cards: DeviceCard[], active: boolean): SessionWit
     fetchAll();
     const id = setInterval(fetchAll, 5000);
     return () => { cancelled = true; clearInterval(id); };
-  }, [active, cards]);
+  }, [active, key]);
 
   return items;
 }
@@ -55,12 +59,17 @@ export function useAllSchedules(cards: DeviceCard[], active: boolean): ScheduleW
   const mounted = useRef(true);
   useEffect(() => () => { mounted.current = false; }, []);
 
+  const cardsRef = useRef(cards);
+  cardsRef.current = cards;
+  const key = cards.map((c) => c.id + ':' + (c.online ? 1 : 0)).join(',');
+
   useEffect(() => {
     if (!active) return;
     let cancelled = false;
 
     const fetchAll = async () => {
-      const results = await Promise.allSettled(cards.map((d) => api.schedules(d.id)));
+      const current = cardsRef.current;
+      const results = await Promise.allSettled(current.map((d) => api.schedules(d.id)));
       if (cancelled || !mounted.current) return;
       const flat: ScheduleWithDevice[] = [];
       results.forEach((r, i) => {
@@ -68,7 +77,7 @@ export function useAllSchedules(cards: DeviceCard[], active: boolean): ScheduleW
           const ss = Array.isArray(r.value)
             ? r.value
             : ((r.value as { schedules?: Schedule[] })?.schedules ?? []);
-          for (const s of ss) flat.push({ device: cards[i], schedule: s });
+          for (const s of ss) flat.push({ device: current[i], schedule: s });
         }
       });
       setItems(flat);
@@ -77,7 +86,7 @@ export function useAllSchedules(cards: DeviceCard[], active: boolean): ScheduleW
     fetchAll();
     const id = setInterval(fetchAll, 8000);
     return () => { cancelled = true; clearInterval(id); };
-  }, [active, cards]);
+  }, [active, key]);
 
   return items;
 }
