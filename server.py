@@ -777,7 +777,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         p = self.path.split('?')[0]
         if p.startswith("/rc"):
             p = p[3:]
-        if p.startswith("/static/") or p == "/devices" or p == "/devices/rename":
+        if p.startswith("/static/") or p == "/devices" or p == "/devices/rename" or p == "/api/config-matrix":
             return False
         return True
 

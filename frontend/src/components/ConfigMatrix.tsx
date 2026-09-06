@@ -2,7 +2,7 @@
 // with red/amber skew highlighting, expandable rows, and a per-row
 // "copy update command" action. Renders only skill/plugin/rule NAMES,
 // never file contents.
-import { useEffect, useState } from 'react';
+import { Fragment, useEffect, useState } from 'react';
 import type { CSSProperties } from 'react';
 import { RT, FONT_SANS, FONT_MONO } from '../tokens';
 import { fetchConfigMatrix } from '../api';
@@ -113,9 +113,8 @@ export function ConfigMatrixView({ cards }: { cards: DeviceCard[] }) {
             const commitSkewed = has('head differs from hub') || has('settings uncommitted');
             const commitTone: 'red' | 'amber' = has('head differs from hub') ? 'red' : 'amber';
             return (
-              <>
+              <Fragment key={c.id}>
                 <tr
-                  key={c.id}
                   style={{ borderBottom: `1px solid ${RT.border}`, cursor: report ? 'pointer' : 'default' }}
                   onClick={() => report && toggle(c.id)}
                 >
@@ -172,7 +171,7 @@ export function ConfigMatrixView({ cards }: { cards: DeviceCard[] }) {
                     </td>
                   </tr>
                 )}
-              </>
+              </Fragment>
             );
           })}
         </tbody>
