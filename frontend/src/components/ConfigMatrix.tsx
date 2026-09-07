@@ -111,8 +111,11 @@ export function ConfigMatrixView({ cards }: { cards: DeviceCard[] }) {
             const report = isReport(entry) ? entry : null;
             const unreachable = isErrorEntry(entry);
             const isExpanded = expanded.has(c.id);
-            const commitSkewed = has('head differs from hub') || has('settings uncommitted');
-            const commitTone: 'red' | 'amber' = has('head differs from hub') ? 'red' : 'amber';
+            const commitSkewed = has('head differs from hub') || has('settings uncommitted')
+              || has('settings edited locally (blocks pull)');
+            const commitTone: 'red' | 'amber' =
+              has('head differs from hub') || has('settings edited locally (blocks pull)') ? 'red' : 'amber';
+            const drift = report?.settings.settings_drift;
             return (
               <Fragment key={c.id}>
                 <tr
@@ -182,6 +185,11 @@ export function ConfigMatrixView({ cards }: { cards: DeviceCard[] }) {
                       <div>rules (shared): {joinOrDash(report.rules.shared)}</div>
                       <div>rules (local): {joinOrDash(report.rules.local)}</div>
                       <div>effective model: {report.effective_model || '—'}</div>
+                      {drift && drift.kind && (
+                        <div style={{ color: drift.kind === 'local-edit' ? RT.red : RT.textLow }}>
+                          settings drift ({drift.kind}): {joinOrDash(drift.keys)}
+                        </div>
+                      )}
                     </td>
                   </tr>
                 )}

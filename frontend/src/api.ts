@@ -29,6 +29,7 @@ export interface ConfigReport {
     settings_symlinked: boolean;
     skills_symlinked: boolean;
     sha256: string | null;
+    settings_drift: { kind: 'ordering' | 'local-edit' | 'unknown' | null; keys: string[] };
   };
   effective_model: string | null;
   claude_local_md: boolean;
