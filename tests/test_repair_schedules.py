@@ -1,5 +1,7 @@
 """Tests for tools/repair_schedules.py. Never run this tool against a real
 schedules.json from a test - only against temp-directory fixtures."""
+import contextlib
+import io
 import json
 import os
 import shutil
@@ -13,6 +15,20 @@ sys.path.insert(0, _ROOT)
 sys.path.insert(0, os.path.join(_ROOT, "tools"))
 
 import repair_schedules
+
+# repair_schedules.py prints its recovery narration (parse failures,
+# backups, discarded data) — real signal for a human running the CLI tool,
+# but noise in a test run. Silence it for just this module's tests so the
+# suite's final tail stays legible.
+_stdout_guard = contextlib.redirect_stdout(io.StringIO())
+
+
+def setUpModule():
+    _stdout_guard.__enter__()
+
+
+def tearDownModule():
+    _stdout_guard.__exit__(None, None, None)
 
 
 class RepairSchedulesTest(unittest.TestCase):

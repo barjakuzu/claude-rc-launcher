@@ -237,31 +237,39 @@ def _settings_drift(cfg_dir, run, dirty_files, errors):
     install — resolves itself on the next commit from any device) vs
     `local-edit` (a genuine local change to model/permissions/hooks/etc that
     silently blocks this device's next `git pull`). Never includes VALUES
-    (settings.json can hold env values/tokens) — only top-level key names."""
+    (settings.json can hold env values/tokens) — only top-level key names.
+
+    Note: a genuine content edit that happens to land only on
+    enabledPlugins/extraKnownMarketplaces is still classified `ordering` —
+    it too blocks a pull until committed, but is expected to be superseded
+    by the next commit from any device rather than needing a human to
+    resolve it, same as the install-rewrite case this exists to catch.
+    """
     result = {"kind": None, "keys": []}
     if "config/settings.json" not in (dirty_files or []):
         return result
-    # Run the diff first (as a cheap dirty/availability probe that degrades
-    # to unknown on failure) even though the actual key comparison below
-    # uses the committed blob vs the working file, not the diff text.
-    ok, _out = _run_ok(run, _git_cmd(cfg_dir, "diff", "--", "config/settings.json"))
-    if not ok:
-        return {"kind": "unknown", "keys": []}
+    # git show HEAD:<path> both confirms git is reachable and gives us the
+    # committed blob to diff against, so a separate `git diff` probe first
+    # would be redundant.
     ok, committed_raw = _run_ok(run, _git_cmd(cfg_dir, "show", "HEAD:config/settings.json"))
     if not ok:
+        errors.append("settings_drift: git show HEAD:config/settings.json failed")
         return {"kind": "unknown", "keys": []}
     path = os.path.join(cfg_dir, "config", "settings.json")
     try:
-        with open(path, "r") as f:
+        with open(path, "rb") as f:
             working_raw = f.read()
     except OSError:
+        errors.append("settings_drift: could not read working settings.json")
         return {"kind": "unknown", "keys": []}
     try:
         committed = json.loads(committed_raw)
-        working = json.loads(working_raw)
-    except ValueError:
+        working = json.loads(working_raw.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        errors.append("settings_drift: could not parse settings.json as JSON")
         return {"kind": "unknown", "keys": []}
     if not isinstance(committed, dict) or not isinstance(working, dict):
+        errors.append("settings_drift: settings.json is not a JSON object")
         return {"kind": "unknown", "keys": []}
     keys = set()
     for key in set(committed) | set(working):

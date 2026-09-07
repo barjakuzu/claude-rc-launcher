@@ -322,17 +322,16 @@ class CollectConfigReportTest(unittest.TestCase):
         self.assertEqual(drift["kind"], "unknown")
         self.assertEqual(drift["keys"], [])
 
-    def test_settings_drift_unknown_on_diff_failure(self):
-        self._redirty_settings({"hooks": {"Stop": []}, "model": "opus2"})
-
-        def fake_run(cmd, **kw):
-            if cmd[:3] == ["git", "-C", self.cfg] and "diff" in cmd:
-                raise subprocess.TimeoutExpired(cmd, 10)
-            return _stub_run(cmd, **kw)
-
-        report = configreport.collect_config_report(home=self.home, run=fake_run)
+    def test_settings_drift_unknown_on_invalid_utf8_working_file(self):
+        # A mid-edit or binary-corrupted working file must degrade to
+        # unknown, not raise — collect_config_report's docstring promises
+        # it never raises.
+        with open(os.path.join(self.cfg, "config", "settings.json"), "wb") as f:
+            f.write(b'{"model": "opus", "bad": "\xff\xfe not valid utf-8"}')
+        report = configreport.collect_config_report(home=self.home, run=_stub_run)
         drift = report["settings"]["settings_drift"]
         self.assertEqual(drift["kind"], "unknown")
+        self.assertEqual(drift["keys"], [])
 
     def test_settings_drift_never_includes_values(self):
         self._redirty_settings({

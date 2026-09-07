@@ -1,10 +1,24 @@
 """setup_session must rename the session even when remote control never
 activates — the two are independent, and a session that fails to activate
 still needs the name the user gave it."""
-import os, re, sys, unittest
+import contextlib, io, os, re, sys, unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import sessions
+
+# sessions.setup_session() logs its progress via print() (rename retries,
+# prompt detection, etc.) — real signal for an operator watching the
+# launcher's stdout, but noise in a test run. Silence it for just this
+# module's tests so the suite's final tail stays legible.
+_stdout_guard = contextlib.redirect_stdout(io.StringIO())
+
+
+def setUpModule():
+    _stdout_guard.__enter__()
+
+
+def tearDownModule():
+    _stdout_guard.__exit__(None, None, None)
 
 # A status bar as the current Claude Code TUI renders it: the remote-control
 # indicator is an OSC 8 hyperlink whose visible label is just "/rc". It looks

@@ -1,4 +1,6 @@
 """Tests for scheduler.py."""
+import contextlib
+import io
 import os
 import sys
 import threading
@@ -10,6 +12,20 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import compat
 import scheduler
+
+# scheduler.py logs progress via print() (session adoption, firing,
+# skip/kill decisions) — real signal for an operator watching the
+# launcher's stdout, but noise in a test run. Silence it for just this
+# module's tests so the suite's final tail stays legible.
+_stdout_guard = contextlib.redirect_stdout(io.StringIO())
+
+
+def setUpModule():
+    _stdout_guard.__enter__()
+
+
+def tearDownModule():
+    _stdout_guard.__exit__(None, None, None)
 
 # _fire_schedule now routes through sessions.build_tmux_command, which calls
 # compat.get_caps() - pin it deterministically so scheduler tests don't
