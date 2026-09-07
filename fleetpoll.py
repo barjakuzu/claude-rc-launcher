@@ -8,6 +8,7 @@ import json
 import logging
 import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -31,6 +32,14 @@ BACKOFF_CEILING_SECONDS = 300
 MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 
 
+class FleetEndpointNotFound(Exception):
+    """Raised by http_get when a device answers 404/501 for /rc/fleet --
+    a pre-fleet device (e.g. 2.1.7) that doesn't expose that route yet.
+    Distinguished from a plain transport failure so the poller can fall
+    back to the legacy /rc/sessions + /rc/version endpoints instead of
+    marking the device offline."""
+
+
 def _default_http_get(base_url, path, auth_user="", auth_pass="", since=None, timeout=10):
     url = base_url.rstrip("/") + path
     if since:
@@ -39,12 +48,17 @@ def _default_http_get(base_url, path, auth_user="", auth_pass="", since=None, ti
     if auth_user or auth_pass:
         tok = base64.b64encode(f"{auth_user}:{auth_pass}".encode()).decode()
         req.add_header("Authorization", f"Basic {tok}")
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        data = r.read(MAX_RESPONSE_BYTES + 1)
-        if len(data) > MAX_RESPONSE_BYTES:
-            raise ValueError(
-                f"device response exceeded {MAX_RESPONSE_BYTES} bytes, rejected")
-        return json.loads(data)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            data = r.read(MAX_RESPONSE_BYTES + 1)
+    except urllib.error.HTTPError as e:
+        if e.code in (404, 501):
+            raise FleetEndpointNotFound(f"{path} -> HTTP {e.code}") from e
+        raise
+    if len(data) > MAX_RESPONSE_BYTES:
+        raise ValueError(
+            f"device response exceeded {MAX_RESPONSE_BYTES} bytes, rejected")
+    return json.loads(data)
 
 
 class FleetPoller:
@@ -59,6 +73,7 @@ class FleetPoller:
         self._backoff = {}       # device_id -> current backoff seconds
         self._stop = threading.Event()
         self._thread = None
+        self._legacy_logged = set()  # device_ids we've already logged the fallback for
 
     def _ingest(self, device_id, snapshot):
         import server  # lazy import, see note above
@@ -111,6 +126,17 @@ class FleetPoller:
                 device["base_url"], "/rc/fleet",
                 auth_user=device.get("auth_user", ""), auth_pass=device.get("auth_pass", ""),
                 since=self._cursors.get(device_id))
+        except FleetEndpointNotFound:
+            # Pre-fleet device (e.g. 2.1.7): fall back to /rc/sessions
+            # (+/rc/version for metadata) rather than treating this as a
+            # transport failure -- it must not go offline or back off.
+            if device_id not in self._legacy_logged:
+                _LOG.info(
+                    "fleetpoll: device %r has no /rc/fleet endpoint, "
+                    "falling back to /rc/sessions", device_id)
+                self._legacy_logged.add(device_id)
+            self._poll_remote_legacy(device, now)
+            return
         except Exception:
             # Transport failure (unreachable, timed out, oversized/garbage
             # response): back off and mark the device offline.
@@ -130,6 +156,54 @@ class FleetPoller:
             # will just retry ingest on schedule.
             _LOG.exception(
                 "fleetpoll: ingest failed for device %r (store error, not backing off)", device_id)
+
+    def _poll_remote_legacy(self, device, now):
+        """Synthesize a fleet snapshot for a pre-fleet device from its
+        legacy /rc/sessions (+ /rc/version) endpoints, with no events.
+        A transport failure fetching /rc/sessions itself is still a real
+        offline device and does back off; a missing/failing /rc/version
+        is not fatal since the fallback still has a device to report."""
+        device_id = device["id"]
+        auth_user = device.get("auth_user", "")
+        auth_pass = device.get("auth_pass", "")
+        try:
+            sessions_resp = self.http_get(
+                device["base_url"], "/rc/sessions",
+                auth_user=auth_user, auth_pass=auth_pass)
+        except Exception:
+            _LOG.warning("fleetpoll: device %r unreachable (legacy /rc/sessions)",
+                          device_id, exc_info=True)
+            backoff = min(self._backoff.get(device_id, self.interval) * 2, BACKOFF_CEILING_SECONDS)
+            self._backoff[device_id] = backoff
+            self._next_try_at[device_id] = now + backoff
+            self._mark_unreachable(device_id, device)
+            return
+
+        version_resp = {}
+        try:
+            version_resp = self.http_get(
+                device["base_url"], "/rc/version",
+                auth_user=auth_user, auth_pass=auth_pass) or {}
+        except Exception:
+            _LOG.info("fleetpoll: device %r legacy /rc/version fetch failed, "
+                       "continuing without it", device_id)
+
+        sessions = sessions_resp.get("sessions", []) if isinstance(sessions_resp, dict) else (sessions_resp or [])
+        snapshot = {
+            "device_name": device.get("name", device_id),
+            "role": version_resp.get("role", "full") if isinstance(version_resp, dict) else "full",
+            "version": version_resp.get("version") if isinstance(version_resp, dict) else None,
+            "claude_version": version_resp.get("claude_version") if isinstance(version_resp, dict) else None,
+            "sessions": sessions,
+            "events": [],
+            "cursor": None,
+        }
+        try:
+            self._ingest(device_id, snapshot)
+        except Exception:
+            _LOG.exception(
+                "fleetpoll: legacy ingest failed for device %r (store error, not backing off)",
+                device_id)
 
     def _mark_unreachable(self, device_id, device):
         """On a transport failure, mark the device offline without

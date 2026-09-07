@@ -1,6 +1,7 @@
 import os
 import tempfile
 import unittest
+import urllib.error
 from unittest.mock import patch, MagicMock
 
 import fleetpoll
@@ -79,10 +80,10 @@ class PollOnceTest(unittest.TestCase):
         build_fleet.return_value = {"device_name": "hub", "role": "full", "version": "1",
                                      "claude_version": "1", "sessions": [], "events": [],
                                      "cursor": None, "generated_at": 1.0, "errors": []}
-        device = {"id": "dev1", "name": "tba-lin", "base_url": "http://example.com:8200",
+        device = {"id": "dev1", "name": "example-device", "base_url": "http://example.com:8200",
                   "auth_user": "u", "auth_pass": "p"}
         load_devices.return_value = [device]
-        remote_resp = {"device_name": "tba-lin", "role": "full", "version": "2.1.7",
+        remote_resp = {"device_name": "example-device", "role": "full", "version": "2.1.7",
                        "claude_version": "2.1.263", "sessions": [{"session_id": "s2", "name": "rc-b"}],
                        "events": [], "cursor": "g.jsonl:1", "generated_at": 2.0, "errors": []}
         http_get = MagicMock(return_value=remote_resp)
@@ -195,11 +196,11 @@ class OfflinePreservesMetadataTest(unittest.TestCase):
         build_fleet.return_value = {"device_name": "hub", "role": "full", "version": "1",
                                      "claude_version": "1", "sessions": [], "events": [],
                                      "cursor": None, "generated_at": 1.0, "errors": []}
-        device = {"id": "dev1", "name": "tba-lin", "base_url": "http://example.com:8200"}
+        device = {"id": "dev1", "name": "example-device", "base_url": "http://example.com:8200"}
         load_devices.return_value = [device]
 
         # First poll succeeds: device gets real metadata in the store.
-        good_snapshot = {"device_name": "tba-lin", "role": "full", "version": "9.9.9",
+        good_snapshot = {"device_name": "example-device", "role": "full", "version": "9.9.9",
                           "claude_version": "2.1.263", "sessions": [], "events": [],
                           "cursor": None, "generated_at": 2.0, "errors": []}
         http_get = MagicMock(return_value=good_snapshot)
@@ -260,9 +261,9 @@ class IngestFailureDoesNotBackOffTest(unittest.TestCase):
         build_fleet.return_value = {"device_name": "hub", "role": "full", "version": "1",
                                      "claude_version": "1", "sessions": [], "events": [],
                                      "cursor": None, "generated_at": 1.0, "errors": []}
-        device = {"id": "dev1", "name": "tba-lin", "base_url": "http://example.com:8200"}
+        device = {"id": "dev1", "name": "example-device", "base_url": "http://example.com:8200"}
         load_devices.return_value = [device]
-        remote_resp = {"device_name": "tba-lin", "role": "full", "version": "1",
+        remote_resp = {"device_name": "example-device", "role": "full", "version": "1",
                        "claude_version": "1", "sessions": [], "events": [],
                        "cursor": None, "generated_at": 1.0, "errors": []}
         http_get = MagicMock(return_value=remote_resp)
@@ -308,6 +309,153 @@ class MaxResponseSizeTest(unittest.TestCase):
         with patch("fleetpoll.urllib.request.urlopen", return_value=FakeResponse()):
             result = fleetpoll._default_http_get("http://example.com", "/rc/fleet")
         self.assertEqual(result, {"ok": True})
+
+
+class LegacyFleetFallbackTest(unittest.TestCase):
+    """A device on 2.1.7 (or earlier) has no /rc/fleet route. On a 404/501
+    for it, the poller must fall back to /rc/sessions (+/rc/version) and
+    keep the device online with its sessions, not go offline."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = _fake_store(self.tmp.name)
+
+    def tearDown(self):
+        self.store.close()
+        self.tmp.cleanup()
+
+    @patch("fleetpoll.fleet.build_fleet")
+    @patch("fleetpoll.devices.load_devices")
+    @patch("fleetpoll.devices.get_local_name")
+    def test_device_404_on_fleet_still_appears_online_with_sessions(
+            self, get_name, load_devices, build_fleet):
+        get_name.return_value = "hub"
+        build_fleet.return_value = {"device_name": "hub", "role": "full", "version": "1",
+                                     "claude_version": "1", "sessions": [], "events": [],
+                                     "cursor": None, "generated_at": 1.0, "errors": []}
+        device = {"id": "dev1", "name": "example-device", "base_url": "http://example.com:8200"}
+        load_devices.return_value = [device]
+
+        def fake_http_get(base_url, path, auth_user="", auth_pass="", since=None, timeout=10):
+            if path == "/rc/fleet":
+                raise fleetpoll.FleetEndpointNotFound("404")
+            if path == "/rc/sessions":
+                return {"sessions": [{"session_id": "s1", "name": "rc-a"}]}
+            if path == "/rc/version":
+                return {"version": "2.1.7", "claude_version": "2.1.263"}
+            raise AssertionError(f"unexpected path {path!r}")
+
+        poller = fleetpoll.FleetPoller(self.store, http_get=fake_http_get)
+        poller.poll_once()
+
+        view = self.store.fleet_view()
+        row = [d for d in view["devices"] if d["id"] == "dev1"][0]
+        self.assertEqual(row["online"], 1)
+        self.assertEqual(row["version"], "2.1.7")
+        self.assertEqual(len(view["sessions"]), 1)
+        self.assertEqual(view["sessions"][0]["session_id"], "s1")
+
+    @patch("fleetpoll.fleet.build_fleet")
+    @patch("fleetpoll.devices.load_devices")
+    @patch("fleetpoll.devices.get_local_name")
+    def test_404_fallback_does_not_back_off(self, get_name, load_devices, build_fleet):
+        get_name.return_value = "hub"
+        build_fleet.return_value = {"device_name": "hub", "role": "full", "version": "1",
+                                     "claude_version": "1", "sessions": [], "events": [],
+                                     "cursor": None, "generated_at": 1.0, "errors": []}
+        device = {"id": "dev1", "name": "example-device", "base_url": "http://example.com:8200"}
+        load_devices.return_value = [device]
+
+        def fake_http_get(base_url, path, auth_user="", auth_pass="", since=None, timeout=10):
+            if path == "/rc/fleet":
+                raise fleetpoll.FleetEndpointNotFound("404")
+            if path == "/rc/sessions":
+                return {"sessions": []}
+            if path == "/rc/version":
+                return {"version": "2.1.7", "claude_version": "2.1.263"}
+            raise AssertionError(f"unexpected path {path!r}")
+
+        poller = fleetpoll.FleetPoller(self.store, http_get=fake_http_get)
+        poller.poll_once()
+        poller.poll_once()
+
+        self.assertIsNone(poller._backoff.get("dev1"))
+        self.assertIsNone(poller._next_try_at.get("dev1"))
+
+    @patch("fleetpoll.fleet.build_fleet")
+    @patch("fleetpoll.devices.load_devices")
+    @patch("fleetpoll.devices.get_local_name")
+    def test_501_also_triggers_fallback(self, get_name, load_devices, build_fleet):
+        get_name.return_value = "hub"
+        build_fleet.return_value = {"device_name": "hub", "role": "full", "version": "1",
+                                     "claude_version": "1", "sessions": [], "events": [],
+                                     "cursor": None, "generated_at": 1.0, "errors": []}
+        device = {"id": "dev1", "name": "example-device", "base_url": "http://example.com:8200"}
+        load_devices.return_value = [device]
+
+        def fake_http_get(base_url, path, auth_user="", auth_pass="", since=None, timeout=10):
+            if path == "/rc/fleet":
+                raise fleetpoll.FleetEndpointNotFound("501")
+            if path == "/rc/sessions":
+                return {"sessions": []}
+            raise AssertionError(f"unexpected path {path!r}")
+
+        poller = fleetpoll.FleetPoller(self.store, http_get=fake_http_get)
+        poller.poll_once()  # must not raise, must not go offline
+
+        view = self.store.fleet_view()
+        row = [d for d in view["devices"] if d["id"] == "dev1"][0]
+        self.assertEqual(row["online"], 1)
+
+    @patch("fleetpoll.fleet.build_fleet")
+    @patch("fleetpoll.devices.load_devices")
+    @patch("fleetpoll.devices.get_local_name")
+    def test_sessions_endpoint_failure_still_goes_offline_and_backs_off(
+            self, get_name, load_devices, build_fleet):
+        # The fallback must not mask a genuinely unreachable device --
+        # only the missing /rc/fleet route itself is treated specially.
+        get_name.return_value = "hub"
+        build_fleet.return_value = {"device_name": "hub", "role": "full", "version": "1",
+                                     "claude_version": "1", "sessions": [], "events": [],
+                                     "cursor": None, "generated_at": 1.0, "errors": []}
+        device = {"id": "dev1", "name": "example-device", "base_url": "http://example.com:8200"}
+        load_devices.return_value = [device]
+
+        def fake_http_get(base_url, path, auth_user="", auth_pass="", since=None, timeout=10):
+            if path == "/rc/fleet":
+                raise fleetpoll.FleetEndpointNotFound("404")
+            raise ConnectionError("refused")
+
+        poller = fleetpoll.FleetPoller(self.store, http_get=fake_http_get)
+        poller.poll_once()
+
+        view = self.store.fleet_view()
+        row = [d for d in view["devices"] if d["id"] == "dev1"][0]
+        self.assertEqual(row["online"], 0)
+        self.assertIsNotNone(poller._backoff.get("dev1"))
+
+    def test_default_http_get_raises_fleet_endpoint_not_found_on_404(self):
+        import http.server
+        import threading
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(404)
+                self.end_headers()
+
+            def log_message(self, *a):
+                pass
+
+        httpd = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+        try:
+            base_url = f"http://127.0.0.1:{httpd.server_port}"
+            with self.assertRaises(fleetpoll.FleetEndpointNotFound):
+                fleetpoll._default_http_get(base_url, "/rc/fleet")
+        finally:
+            httpd.shutdown()
+            thread.join(timeout=5)
 
 
 class StartStopTest(unittest.TestCase):
