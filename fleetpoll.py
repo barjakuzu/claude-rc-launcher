@@ -23,6 +23,13 @@ _LOG = logging.getLogger(__name__)
 
 BACKOFF_CEILING_SECONDS = 300
 
+# A device response larger than this is rejected outright (treated as a
+# device error, same as a connection failure) rather than read into memory
+# in full -- a misbehaving or compromised device returning a huge body
+# must not be able to OOM the hub just because the request itself didn't
+# time out.
+MAX_RESPONSE_BYTES = 8 * 1024 * 1024
+
 
 def _default_http_get(base_url, path, auth_user="", auth_pass="", since=None, timeout=10):
     url = base_url.rstrip("/") + path
@@ -33,7 +40,11 @@ def _default_http_get(base_url, path, auth_user="", auth_pass="", since=None, ti
         tok = base64.b64encode(f"{auth_user}:{auth_pass}".encode()).decode()
         req.add_header("Authorization", f"Basic {tok}")
     with urllib.request.urlopen(req, timeout=timeout) as r:
-        return json.loads(r.read())
+        data = r.read(MAX_RESPONSE_BYTES + 1)
+        if len(data) > MAX_RESPONSE_BYTES:
+            raise ValueError(
+                f"device response exceeded {MAX_RESPONSE_BYTES} bytes, rejected")
+        return json.loads(data)
 
 
 class FleetPoller:
@@ -100,20 +111,45 @@ class FleetPoller:
                 device["base_url"], "/rc/fleet",
                 auth_user=device.get("auth_user", ""), auth_pass=device.get("auth_pass", ""),
                 since=self._cursors.get(device_id))
-            self._ingest(device_id, snapshot)
         except Exception:
+            # Transport failure (unreachable, timed out, oversized/garbage
+            # response): back off and mark the device offline.
             _LOG.warning("fleetpoll: device %r unreachable", device_id, exc_info=True)
             backoff = min(self._backoff.get(device_id, self.interval) * 2, BACKOFF_CEILING_SECONDS)
             self._backoff[device_id] = backoff
             self._next_try_at[device_id] = now + backoff
-            try:
+            self._mark_unreachable(device_id, device)
+            return
+        try:
+            self._ingest(device_id, snapshot)
+        except Exception:
+            # A store-side failure while ingesting a snapshot we DID
+            # successfully fetch is not the same problem as the device
+            # being unreachable: the device answered fine. Don't back off
+            # or mark it offline for a hiccup on our end -- next poll
+            # will just retry ingest on schedule.
+            _LOG.exception(
+                "fleetpoll: ingest failed for device %r (store error, not backing off)", device_id)
+
+    def _mark_unreachable(self, device_id, device):
+        """On a transport failure, mark the device offline without
+        clobbering its last-known name/role/version with placeholder
+        "unknown"/None values -- only write a placeholder row if the
+        device isn't in the store at all yet (e.g. it has never
+        answered a single poll)."""
+        try:
+            known = any(d["id"] == device_id for d in self.store.fleet_view()["devices"])
+        except Exception:
+            known = False
+        try:
+            if not known:
                 self.store.upsert_device({
                     "id": device_id, "name": device.get("name", device_id),
                     "role": "unknown", "version": None, "claude_version": None,
                 })
-                self.store.mark_device_offline(device_id)
-            except Exception:
-                _LOG.exception("fleetpoll: failed to mark device %r offline", device_id)
+            self.store.mark_device_offline(device_id)
+        except Exception:
+            _LOG.exception("fleetpoll: failed to mark device %r offline", device_id)
 
     def poll_once(self, now_fn=time.time):
         """One pass over every device. Never raises. Serialized: a second
