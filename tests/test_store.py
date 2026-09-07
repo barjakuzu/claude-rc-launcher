@@ -828,6 +828,43 @@ class UsageCostAlertsTest(unittest.TestCase):
         ])
         self.assertEqual(result["skipped"], 1)
 
+    def test_upsert_session_usage_skips_row_with_non_coercible_numeric_field(self):
+        # Fix round 2, review Important 2: a device payload is untrusted --
+        # None, NaN, +/-inf and a non-numeric type must all be rejected for
+        # any of the numeric fields, and the whole row dropped rather than
+        # written with a partial value.
+        self.store.upsert_sessions("local", [
+            {"session_id": "s1", "name": "rc-foo", "cwd": "/tmp", "kind": "interactive",
+             "state": "idle"},
+        ])
+        bad_values = (None, float("nan"), float("inf"), float("-inf"), "n/a",
+                      [1], {"a": 1}, True)
+        for bad in bad_values:
+            with self.subTest(bad=bad):
+                result = self.store.upsert_session_usage("local", [
+                    {"session_id": "s1", "input": 1, "cache_read": 1, "cache_write": 1,
+                     "output": 1, "effective": bad, "last_ts": 1.0},
+                ])
+                self.assertEqual(result["skipped"], 1)
+        # None of those attempts ever wrote a row: usage stays None, not a
+        # partially-written or garbage value.
+        view = self.store.fleet_view()
+        self.assertIsNone(view["sessions"][0]["usage"])
+
+    def test_upsert_session_usage_coerces_numeric_strings(self):
+        result = self.store.upsert_session_usage("local", [
+            {"session_id": "s1", "input": "10", "cache_read": "20", "cache_write": "3",
+             "output": "4", "effective": "5000", "last_ts": "999.5"},
+        ])
+        self.assertEqual(result["skipped"], 0)
+        self.store.upsert_sessions("local", [
+            {"session_id": "s1", "name": "rc-foo", "cwd": "/tmp", "kind": "interactive",
+             "state": "idle"},
+        ])
+        view = self.store.fleet_view()
+        self.assertEqual(view["sessions"][0]["usage"]["effective"], 5000)
+        self.assertEqual(view["sessions"][0]["usage"]["last_ts"], 999.5)
+
     # -- upsert_cost_daily -------------------------------------------------
 
     def test_upsert_cost_daily_replaces_not_accumulates(self):
@@ -859,6 +896,53 @@ class UsageCostAlertsTest(unittest.TestCase):
         view = self.store.cost_view(days=30)
         projects = {p["project"]: p["effective"] for p in view["projects"]}
         self.assertEqual(projects.get(""), 42)
+
+    def test_upsert_cost_daily_skips_row_with_non_coercible_numeric_field(self):
+        # Fix round 2, review Important 2: this is the exact probe that
+        # broke /api/cost fleet-wide in the review -- effective: "n/a" must
+        # never reach the table, not raise later out of cost_view.
+        bad_values = (None, float("nan"), float("inf"), float("-inf"), "n/a",
+                      [1], {"a": 1}, True)
+        for bad in bad_values:
+            with self.subTest(bad=bad):
+                result = self.store.upsert_cost_daily("local", [
+                    {"day": _day(0), "project": "p1", "input": 1, "cache_read": 1,
+                     "cache_write": 1, "output": 1, "effective": bad},
+                ])
+                self.assertEqual(result["skipped"], 1)
+        # cost_view must still work (no TypeError out of summing a garbage
+        # value) and must show nothing for this device -- the bad row was
+        # never written.
+        view = self.store.cost_view(days=30)
+        self.assertEqual(view["devices"], [])
+        self.assertEqual(view["projects"], [])
+
+    def test_upsert_cost_daily_coerces_numeric_strings(self):
+        result = self.store.upsert_cost_daily("local", [
+            {"day": _day(0), "project": "p1", "input": "10", "cache_read": "20",
+             "cache_write": "3", "output": "4", "effective": "5000"},
+        ])
+        self.assertEqual(result["skipped"], 0)
+        view = self.store.cost_view(days=30)
+        dev = next(d for d in view["devices"] if d["device_id"] == "local")
+        self.assertEqual(dev["total_effective"], 5000)
+
+    def test_upsert_cost_daily_bad_row_from_one_device_does_not_break_others(self):
+        # Fix round 2, review Important 2: a bad value from one device must
+        # not take down /api/cost for the rest of the fleet.
+        self.store.upsert_cost_daily("device-a", [
+            {"day": _day(0), "project": "p1", "input": 1, "cache_read": 1,
+             "cache_write": 1, "output": 1, "effective": "n/a"},
+        ])
+        self.store.upsert_cost_daily("device-b", [
+            {"day": _day(0), "project": "p2", "input": 1, "cache_read": 1,
+             "cache_write": 1, "output": 1, "effective": 100},
+        ])
+        view = self.store.cost_view(days=30)
+        device_ids = {d["device_id"] for d in view["devices"]}
+        self.assertEqual(device_ids, {"device-b"})
+        projects = {p["project"] for p in view["projects"]}
+        self.assertEqual(projects, {"p2"})
 
     # -- cost_view -----------------------------------------------------
 
@@ -899,6 +983,21 @@ class UsageCostAlertsTest(unittest.TestCase):
         effectives = [p["effective"] for p in view["projects"]]
         self.assertEqual(effectives, sorted(effectives, reverse=True))
         self.assertEqual(effectives[0], 59)  # highest-effective project first
+
+    def test_cost_view_days_window_is_exact_not_off_by_one(self):
+        # Fix round 2, review Minor 5: days=30 must return exactly 30
+        # distinct calendar days, not 31 -- a day exactly `days` days old
+        # is the boundary itself and must be excluded.
+        self.store.upsert_cost_daily("local", [
+            {"day": _day(29), "project": "p-in", "input": 0, "cache_read": 0,
+             "cache_write": 0, "output": 0, "effective": 10},
+            {"day": _day(30), "project": "p-out", "input": 0, "cache_read": 0,
+             "cache_write": 0, "output": 0, "effective": 20},
+        ])
+        view = self.store.cost_view(days=30)
+        projects = {p["project"] for p in view["projects"]}
+        self.assertIn("p-in", projects)
+        self.assertNotIn("p-out", projects)
 
     # -- replace_alerts --------------------------------------------------
 
@@ -964,6 +1063,39 @@ class UsageCostAlertsTest(unittest.TestCase):
 
         after = self.store.live_alerts()
         self.assertEqual(after, before)
+
+    def test_replace_alerts_returns_skipped_count(self):
+        # Fix round 2, review Minor 6: matches every sibling upsert
+        # (upsert_sessions, upsert_session_usage, upsert_cost_daily all
+        # report `skipped`).
+        good = {"rule": "token_rate", "severity": "alert", "device_id": "local",
+                "session_id": "s1", "name": "rc-foo", "message": "m", "value": 1.0,
+                "threshold": 2.0, "since": 100.0}
+        malformed = {"rule": "token_rate", "severity": "alert", "message": "no device_id"}
+        result = self.store.replace_alerts([good, malformed])
+        self.assertEqual(result["count"], 1)
+        self.assertEqual(result["skipped"], 1)
+
+    def test_replace_alerts_sweep_deletes_a_legacy_null_session_id_row(self):
+        # Fix round 2, review Minor 6: `session_id=?` with a NULL parameter
+        # never matches in SQL (NULL is never "=" to anything), so a
+        # legacy row written with a real NULL (rather than this method's
+        # own "" convention) must be matched with IS NULL instead, or it
+        # can never be swept even after it stops firing.
+        conn = sqlite3.connect(self.db_path)
+        conn.execute(
+            "INSERT INTO alerts (device_id, session_id, rule, severity, message, value, "
+            "threshold, since, first_seen, last_seen) VALUES "
+            "('dev1', NULL, 'device_offline', 'warn', 'legacy row', 1.0, 2.0, "
+            "50.0, 50.0, 50.0)")
+        conn.commit()
+        conn.close()
+        self.assertEqual(len(self.store.live_alerts()), 1)
+
+        # An empty batch: the legacy row is absent from it and must be
+        # swept, same as any other stale finding.
+        self.store.replace_alerts([])
+        self.assertEqual(self.store.live_alerts(), [])
 
     def test_live_alerts_ordering_alert_before_warn_then_oldest_first_seen(self):
         warn_old = {"rule": "session_age", "severity": "warn", "device_id": "local",
@@ -1050,6 +1182,36 @@ class UsageCostAlertsTest(unittest.TestCase):
         ])
         deleted = self.store.prune(days=14)
         self.assertEqual(deleted["session_usage"], 0)
+
+    def test_prune_cost_daily_uses_its_own_cutoff_not_the_generic_days(self):
+        # Fix round 2, review Important 1: fleetpoll.py calls prune() bare,
+        # hourly. A cost_daily row 20 days old must survive that bare call
+        # even though it is well past the generic 14-day cutoff every
+        # other table uses -- cost_days defaults to 35, with headroom past
+        # /api/cost's own 30-day default window.
+        self.store.upsert_cost_daily("local", [
+            {"day": _day(20), "project": "p-recent", "input": 1, "cache_read": 1,
+             "cache_write": 1, "output": 1, "effective": 1},
+            {"day": _day(50), "project": "p-ancient", "input": 1, "cache_read": 1,
+             "cache_write": 1, "output": 1, "effective": 1},
+        ])
+        deleted = self.store.prune()  # bare call, matching fleetpoll.py's own usage
+        self.assertEqual(deleted["cost_daily"], 1)  # only the 50-day-old row
+        view = self.store.cost_view(days=9999)
+        days_present = {d["day"] for dev in view["devices"] for d in dev["daily"]}
+        self.assertIn(_day(20), days_present)
+        self.assertNotIn(_day(50), days_present)
+
+    def test_prune_cost_days_param_is_independently_overridable(self):
+        self.store.upsert_cost_daily("local", [
+            {"day": _day(20), "project": "p1", "input": 1, "cache_read": 1,
+             "cache_write": 1, "output": 1, "effective": 1},
+        ])
+        # An explicit, tighter cost_days deletes a row the 35-day default
+        # would have kept, while `days` (still 14 here) continues to
+        # govern everything else unchanged.
+        deleted = self.store.prune(days=14, cost_days=10)
+        self.assertEqual(deleted["cost_daily"], 1)
 
     # -- concurrency -------------------------------------------------------
 
