@@ -4,14 +4,100 @@ import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
 import { RT, FONT_MONO, FONT_SANS, Z } from '../tokens';
 import { Icons } from './primitives';
-import { api } from '../api';
+import { api, fetchSessionEvents } from '../api';
+import type { SessionEvent } from '../api';
+import { formatRelativeTime as formatEventTime } from '../relativeTime';
 import { TranscriptView } from './TranscriptView';
+
+// One-line rendering of an event's extra payload, when non-empty.
+function formatExtra(extra: Record<string, unknown> | undefined): string | null {
+  if (!extra || Object.keys(extra).length === 0) return null;
+  try {
+    return JSON.stringify(extra);
+  } catch {
+    return null;
+  }
+}
+
+// Activity section — recent events for this session (Task 10's
+// /api/sessions/<device>/<id>/events). Fetched on open and on demand
+// (the refresh button), never on a timer.
+function ActivitySection({ deviceId, sessionId }: { deviceId: string; sessionId: string }) {
+  const [events, setEvents] = useState<SessionEvent[]>([]);
+  const [loading, setLoading] = useState(true);
+  // Bumped on every load() call and on unmount/session-change cleanup, so a
+  // slow response from a superseded request (previous session, or after
+  // unmount) can never land on state that has moved on.
+  const reqIdRef = useRef(0);
+
+  const load = () => {
+    const id = ++reqIdRef.current;
+    setLoading(true);
+    fetchSessionEvents(deviceId, sessionId, 50)
+      .then((data) => { if (reqIdRef.current === id) setEvents(data.events ?? []); })
+      .catch(() => { if (reqIdRef.current === id) setEvents([]); })
+      .finally(() => { if (reqIdRef.current === id) setLoading(false); });
+  };
+
+  useEffect(() => {
+    setEvents([]);
+    setLoading(true);
+    load();
+    return () => { reqIdRef.current++; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [deviceId, sessionId]);
+
+  return (
+    <div style={{ borderTop: `1px solid ${RT.border}`, background: RT.bgRaised, flex: 'none', maxHeight: '30%', display: 'flex', flexDirection: 'column' }}>
+      <div style={{
+        flex: 'none', padding: '8px 14px', display: 'flex', alignItems: 'center', gap: 8,
+        fontSize: 10, color: RT.textLow, letterSpacing: '.14em', textTransform: 'uppercase', fontFamily: FONT_MONO,
+      }}>
+        Activity
+        <button
+          onClick={load}
+          title="Refresh"
+          style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: RT.textLow, marginLeft: 'auto', display: 'inline-flex', alignItems: 'center' }}
+        >
+          <Icons.refresh size={11} stroke={RT.textLow} />
+        </button>
+      </div>
+      <div style={{ overflow: 'auto', padding: '0 14px 10px' }}>
+        {loading && events.length === 0 && (
+          <div style={{ fontFamily: FONT_MONO, fontSize: 11, color: RT.textLow }}>Loading…</div>
+        )}
+        {!loading && events.length === 0 && (
+          <div style={{ fontFamily: FONT_MONO, fontSize: 11, color: RT.textLow }}>No recent events.</div>
+        )}
+        {events.map((e) => {
+          const extraStr = formatExtra(e.extra);
+          return (
+            <div key={e.id} style={{
+              display: 'flex', alignItems: 'baseline', gap: 8, padding: '4px 0',
+              fontFamily: FONT_MONO, fontSize: 11, color: RT.textDim, borderBottom: `1px solid ${RT.border}`,
+            }}>
+              <span style={{ color: RT.textLow, flex: 'none', minWidth: 62 }}>{formatEventTime(e.ts)}</span>
+              <span style={{ color: RT.text, flex: 'none' }}>{e.event}</span>
+              {extraStr && (
+                <span style={{ color: RT.textLow, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{extraStr}</span>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
 
 interface PreviewModalProps {
   deviceId: string;
   name: string;
   /** Backend mode string; 'sh' sessions have no transcript to show. */
   mode?: string;
+  /** Session id for the Activity panel's /api/sessions/<device>/<id>/events
+   * lookup (Task 10/14). Absent when the caller only has the tmux/launcher
+   * name — the Activity section is simply omitted in that case. */
+  sessionId?: string;
   onClose: () => void;
 }
 
@@ -32,7 +118,7 @@ const SPECIAL_KEY_MAP: Record<string, string> = {
   'Delete': 'DC',
 };
 
-export function PreviewModal({ deviceId, name, mode, onClose }: PreviewModalProps) {
+export function PreviewModal({ deviceId, name, mode, sessionId, onClose }: PreviewModalProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -523,6 +609,7 @@ export function PreviewModal({ deviceId, name, mode, onClose }: PreviewModalProp
             </button>
           )}
         </div>
+        {sessionId && <ActivitySection deviceId={deviceId} sessionId={sessionId} />}
         <KeyBar deviceId={deviceId} name={name} onActivity={() => { activityRef.current = true; }} />
         <div style={{
           flex: 'none', padding: '6px 14px', borderTop: `1px solid ${RT.border}`,

@@ -1,8 +1,9 @@
 // DeviceSettings.tsx — per-device settings panel (Settings tab).
-import { useState } from 'react';
-import { RT, FONT_MONO } from '../tokens';
+import { useEffect, useState } from 'react';
+import { RT, FONT_MONO, FONT_SANS } from '../tokens';
 import { Icons } from './primitives';
-import { api } from '../api';
+import { api, fetchAudit } from '../api';
+import type { AuditEntry } from '../api';
 import type { DeviceCard } from '../types';
 import { ConfigMatrixView } from './ConfigMatrix';
 
@@ -113,6 +114,91 @@ export function DeviceSettings({ device, cards, mobile = false }: DeviceSettings
           <ConfigMatrixView cards={cards} />
         </div>
       </div>
+
+      {/* Audit — last 50 hub audit-log entries (Task 11). Hub-wide, not
+          scoped to this device. */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+        <div style={{
+          fontSize: 10, color: RT.textLow, letterSpacing: '.14em',
+          textTransform: 'uppercase', fontFamily: FONT_MONO,
+        }}>
+          Audit
+        </div>
+        <AuditSection />
+      </div>
+    </div>
+  );
+}
+
+function formatAuditTime(epochSeconds: number | null | undefined): string {
+  if (epochSeconds == null) return '—';
+  try {
+    return new Date(epochSeconds * 1000).toLocaleString();
+  } catch {
+    return '—';
+  }
+}
+
+const auditThStyle = {
+  textAlign: 'left' as const, padding: '6px 10px', color: RT.textLow,
+  fontSize: 10, letterSpacing: '.06em', textTransform: 'uppercase' as const, fontFamily: FONT_MONO,
+};
+
+const auditTdStyle = {
+  padding: '6px 10px', fontFamily: FONT_MONO, fontSize: 11.5, color: RT.textDim,
+  borderTop: `1px solid ${RT.border}`,
+};
+
+function AuditSection() {
+  const [audit, setAudit] = useState<AuditEntry[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchAudit(50)
+      .then((data) => { if (!cancelled) setAudit(data.audit ?? []); })
+      .catch(() => { if (!cancelled) setLoadError(true); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, []);
+
+  if (loadError) {
+    return <div style={{ fontSize: 11, color: RT.red, fontFamily: FONT_MONO }}>Failed to load audit log.</div>;
+  }
+  if (loading) {
+    return <div style={{ fontSize: 11, color: RT.textLow, fontFamily: FONT_MONO }}>Loading…</div>;
+  }
+  if (audit.length === 0) {
+    return <div style={{ fontSize: 11, color: RT.textLow, fontFamily: FONT_MONO }}>No audit entries yet.</div>;
+  }
+
+  return (
+    <div style={{ overflowX: 'auto', margin: '0 -18px', padding: '0 18px' }}>
+      <table style={{ borderCollapse: 'collapse', width: '100%', fontFamily: FONT_SANS }}>
+        <thead>
+          <tr>
+            <th style={auditThStyle}>Time</th>
+            <th style={auditThStyle}>Actor</th>
+            <th style={auditThStyle}>Action</th>
+            <th style={auditThStyle}>Target</th>
+            <th style={auditThStyle}>Device</th>
+            <th style={auditThStyle}>Detail</th>
+          </tr>
+        </thead>
+        <tbody>
+          {audit.map((a) => (
+            <tr key={a.id}>
+              <td style={auditTdStyle}>{formatAuditTime(a.ts)}</td>
+              <td style={auditTdStyle}>{a.actor || '—'}</td>
+              <td style={auditTdStyle}>{a.action || '—'}</td>
+              <td style={auditTdStyle}>{a.target || '—'}</td>
+              <td style={auditTdStyle}>{a.device_id || '—'}</td>
+              <td style={auditTdStyle}>{a.detail || '—'}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }

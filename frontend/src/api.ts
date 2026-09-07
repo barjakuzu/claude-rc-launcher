@@ -42,6 +42,71 @@ export interface ConfigMatrix {
   skew: Record<string, string[]>;
 }
 
+// Fleet roll-up (hub-wide devices + sessions), from Task 8/9's store-backed
+// endpoints. Never proxied to a device — see server.py's _should_proxy.
+export interface FleetDevice {
+  id: string;
+  name: string;
+  role: string;
+  version: string | null;
+  claude_version: string | null;
+  last_seen: number | null;
+  online: number;
+}
+
+export interface FleetSession {
+  device_id: string;
+  session_id: string;
+  name: string | null;
+  cwd: string | null;
+  kind: string | null;
+  state: string | null;
+  started_at: number | null;
+  ended_at: number | null;
+  last_seen: number | null;
+  external: number;
+  needs_attention: boolean;
+  // Optional — a parallel backend change carries these through the store
+  // into /api/fleet, shaped exactly like the per-device GET /sessions rows
+  // (sessions.py's list_rc_sessions()/SessionRow.tsx's `Session`). Absent
+  // until that lands or when a row's fields genuinely don't apply; the UI
+  // must degrade gracefully rather than assume presence.
+  pid?: number | null;
+  /** Tmux pane an external session was adopted into, or null/absent if none
+   * was found — no Preview/terminal access is possible without this. */
+  tmux?: { session_name: string; pane_id: string } | null;
+  /** Remote Control URL, once enabled — null until then. */
+  rc_url?: string | null;
+  tokens?: number;
+  /** Backend mode string ('sh' sessions have no transcript). */
+  mode?: string;
+  claude?: { pid?: number | null; state?: string | null } | Record<string, unknown>;
+}
+
+export interface FleetView {
+  devices: FleetDevice[];
+  sessions: FleetSession[];
+}
+
+export interface SessionEvent {
+  id: number;
+  device_id: string;
+  session_id: string;
+  ts: number;
+  event: string;
+  extra: Record<string, unknown>;
+}
+
+export interface AuditEntry {
+  id: number;
+  ts: number;
+  actor: string;
+  action: string;
+  target: string;
+  device_id: string;
+  detail: string;
+}
+
 async function req(method: string, path: string, device?: string, body?: unknown) {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (device && device !== 'local') headers['X-RC-Device'] = device;
@@ -55,6 +120,19 @@ async function req(method: string, path: string, device?: string, body?: unknown
 // Mirrors api.overview()'s fetch style — hub-only, never proxied to a device.
 export async function fetchConfigMatrix(): Promise<ConfigMatrix> {
   return req('GET', '/api/config-matrix') as Promise<ConfigMatrix>;
+}
+
+// Mirrors fetchConfigMatrix's fetch style — hub-only, never proxied.
+export async function fetchFleet(): Promise<FleetView> {
+  return req('GET', '/api/fleet') as Promise<FleetView>;
+}
+
+export async function fetchSessionEvents(deviceId: string, sessionId: string, limit = 50): Promise<{ events: SessionEvent[] }> {
+  return req('GET', `/api/sessions/${encodeURIComponent(deviceId)}/${encodeURIComponent(sessionId)}/events?limit=${limit}`) as Promise<{ events: SessionEvent[] }>;
+}
+
+export async function fetchAudit(limit = 50): Promise<{ audit: AuditEntry[] }> {
+  return req('GET', `/api/audit?limit=${limit}`) as Promise<{ audit: AuditEntry[] }>;
 }
 export const api = {
   overview: () => req('GET', '/overview'),

@@ -109,7 +109,7 @@ export function App() {
             // Mobile cross-device tab views.
             <>
               {mTab === 'sessions' && (
-                <AllSessions cards={cards} onOpenDevice={handleOpenDevice} />
+                <AllSessions onOpenDevice={handleOpenDevice} />
               )}
               {mTab === 'scheduled' && (
                 <AllScheduled cards={cards} />
@@ -162,7 +162,7 @@ export function App() {
                 )}
                 {desktopView === 'tasks' && <AllScheduled cards={cards} />}
                 {desktopView === 'sessions' && (
-                  <AllSessions cards={cards} onOpenDevice={handleOpenDevice} />
+                  <AllSessions onOpenDevice={handleOpenDevice} />
                 )}
                 {desktopView === 'config' && <ConfigMatrixView cards={cards} />}
               </div>
