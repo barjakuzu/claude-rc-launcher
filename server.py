@@ -7,6 +7,7 @@ import hmac
 import http.server
 import ipaddress
 import json
+import logging
 import os
 import re
 import secrets
@@ -49,6 +50,7 @@ from devices import (
 )
 import configreport
 import overview
+import store
 import ws as ws_terminal
 
 
@@ -114,6 +116,57 @@ def _save_auth_tokens():
 
 
 _auth_tokens = _load_auth_tokens()  # {token: expiry_epoch}
+
+_LOG = logging.getLogger(__name__)
+
+HUB_STORE = None  # set by app.py at startup; store.Store instance
+
+SSE_HEARTBEAT_SECONDS = 20
+FLEET_CHANGE_SUBSCRIBERS = set()
+_fleet_change_lock = threading.Lock()
+
+
+def notify_fleet_changed():
+    """Called by fleetpoll.FleetPoller after a successful ingest. Wakes
+    every open /api/fleet/stream connection."""
+    with _fleet_change_lock:
+        subs = list(FLEET_CHANGE_SUBSCRIBERS)
+    for ev in subs:
+        ev.set()
+
+
+def _resolve_actor(handler):
+    """Actor for the audit log: the login token id if cookie auth was
+    used, "basic" for Basic auth, "unknown" otherwise. Never the
+    password -- only the token/cookie value's own id (itself a random
+    secret, but that's the existing session identifier, not a
+    credential to protect further than the cookie already is)."""
+    cookie_header = getattr(handler, "headers", {}).get("Cookie", "") if hasattr(handler, "headers") else ""
+    if cookie_header and "rc_session=" in str(cookie_header):
+        try:
+            cookie = SimpleCookie()
+            cookie.load(cookie_header)
+            if "rc_session" in cookie:
+                return cookie["rc_session"].value[:12]  # short id, not a secret disclosure surface
+        except Exception:
+            pass
+    auth_hdr = getattr(handler, "headers", {}).get("Authorization", "") if hasattr(handler, "headers") else ""
+    if str(auth_hdr).startswith("Basic "):
+        return "basic"
+    return "unknown"
+
+
+def _audit(handler, action, target, device_id="local", detail=""):
+    """Write one audit_log row. A no-op (never raises) when HUB_STORE is
+    None -- a device running without a hub role, or a test that hasn't
+    set it up."""
+    if HUB_STORE is None:
+        return
+    try:
+        HUB_STORE.add_audit(actor=_resolve_actor(handler), action=action,
+                             target=target or "", device_id=device_id or "local", detail=detail)
+    except Exception:
+        _LOG.exception("audit log write failed for action=%r target=%r", action, target)
 
 
 def _auth_token_valid(token):
@@ -678,6 +731,58 @@ def _derive_session_state(session_row, now=None):
     return "idle"
 
 
+# CONTROLLER RULING (overrides the original task-8 brief): the hook set
+# was cut to five events -- StopFailure, Notification, SubagentStop,
+# PreCompact, SessionEnd -- so Stop/UserPromptSubmit no longer produce
+# events and "no later Stop/UserPromptSubmit" can't be used as the
+# clearing signal. needs_attention instead comes primarily from each
+# session's own polled state (fleetpoll._ingest sets sessions[i]["state"]
+# via _derive_session_state before writing to the store, so the store's
+# `state` column already reflects waiting_for/blocked between hub polls).
+# A `Notification` event raises it immediately without waiting for the
+# next 30s poll; a `SessionEnd` event clears it immediately. Any other
+# event type (StopFailure, SubagentStop, PreCompact) is not decisive and
+# is skipped when scanning for the newest relevant event.
+def _derive_needs_attention(events):
+    """events: iterable of {session_id, ts, event, extra}. Returns
+    {session_id: bool}, present only for sessions with a decisive event
+    (the newest Notification or SessionEnd for that session) -- absent
+    entries mean "no override, use the session's polled state instead"
+    (see the /api/fleet and /api/fleet/stream routes, which fall back to
+    session["state"] == "needs_attention" via .get(session_id, base))."""
+    by_session = {}
+    for e in events:
+        sid = e.get("session_id")
+        if not sid:
+            continue
+        by_session.setdefault(sid, []).append(e)
+    result = {}
+    for sid, rows in by_session.items():
+        rows = sorted(rows, key=lambda r: r.get("ts") or 0, reverse=True)
+        for r in rows:
+            ev = r.get("event")
+            if ev == "Notification":
+                result[sid] = True
+                break
+            if ev == "SessionEnd":
+                result[sid] = False
+                break
+    return result
+
+
+def _apply_needs_attention(sessions_rows, events):
+    """Mutates each row in sessions_rows (store.fleet_view()["sessions"]
+    shape) in place, adding needs_attention: bool. Base comes from the
+    session's own polled state; a session-scoped Notification/SessionEnd
+    event can override it between polls."""
+    overrides = _derive_needs_attention(events)
+    for s in sessions_rows:
+        sid = s.get("session_id")
+        base = s.get("state") == "needs_attention"
+        s["needs_attention"] = overrides.get(sid, base)
+    return sessions_rows
+
+
 def _stoppable_session_names(rows):
     """Names to `stop_session` (tmux kill-session) for /stop-all. External
     rows have no rc-* tmux session of their own — stop_session would
@@ -877,6 +982,26 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(json.dumps(data).encode())
 
+    def _sse_write(self, text):
+        """Write one raw SSE chunk. Returns False (and swallows the error)
+        if the client has disconnected, so the stream loop can exit
+        cleanly instead of raising into the request-handling thread."""
+        try:
+            self.wfile.write(text.encode())
+            self.wfile.flush()
+            return True
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            return False
+
+    def _sse_send_fleet_snapshot(self):
+        if HUB_STORE is None:
+            view = {"devices": [], "sessions": []}
+        else:
+            view = HUB_STORE.fleet_view()
+            recent = HUB_STORE.recent_events(limit=500)
+            _apply_needs_attention(view["sessions"], recent)
+        return self._sse_write(f"data: {json.dumps(view)}\n\n")
+
     def _html(self, content):
         self.send_response(200)
         self.send_header("Content-Type", "text/html")
@@ -913,7 +1038,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         p = self.path.split('?')[0]
         if p.startswith("/rc"):
             p = p[3:]
-        if p.startswith("/static/") or p == "/devices" or p == "/devices/rename" or p == "/api/config-matrix":
+        if (p.startswith("/static/") or p == "/devices" or p == "/devices/rename"
+                or p == "/api/config-matrix" or p == "/api/fleet" or p == "/api/fleet/stream"
+                or p == "/api/audit" or p.startswith("/api/sessions/")):
             return False
         return True
 
@@ -1035,6 +1162,66 @@ class Handler(http.server.BaseHTTPRequestHandler):
             qs = parse_qs(urlparse(self.path).query)
             since = qs.get("since", [None])[0]
             self._json(fleet.build_fleet(since=since))
+
+        elif path == "/api/fleet":
+            if HUB_STORE is None:
+                return self._json({"devices": [], "sessions": []})
+            view = HUB_STORE.fleet_view()
+            recent = HUB_STORE.recent_events(limit=500)
+            _apply_needs_attention(view["sessions"], recent)
+            self._json(view)
+
+        elif path == "/api/fleet/stream":
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "keep-alive")
+            self.send_header("X-Accel-Buffering", "no")
+            self.end_headers()
+            my_event = threading.Event()
+            with _fleet_change_lock:
+                FLEET_CHANGE_SUBSCRIBERS.add(my_event)
+            try:
+                if not self._sse_send_fleet_snapshot():
+                    return
+                while True:
+                    changed = my_event.wait(timeout=SSE_HEARTBEAT_SECONDS)
+                    if changed:
+                        my_event.clear()
+                        if not self._sse_send_fleet_snapshot():
+                            break
+                    else:
+                        if not self._sse_write(": ping\n\n"):
+                            break
+            finally:
+                with _fleet_change_lock:
+                    FLEET_CHANGE_SUBSCRIBERS.discard(my_event)
+
+        elif path.split('?')[0].startswith("/api/sessions/") and path.split('?')[0].endswith("/events"):
+            clean = path.split('?')[0]
+            parts = clean[len("/api/sessions/"):-len("/events")].strip("/").split("/", 1)
+            if len(parts) != 2 or not parts[0] or not parts[1]:
+                return self._json({"ok": False, "message": "Malformed path"}, 400)
+            device_id, session_id = parts
+            qs = parse_qs(urlparse(self.path).query)
+            try:
+                limit = min(500, max(1, int(qs.get("limit", ["50"])[0])))
+            except ValueError:
+                limit = 50
+            if HUB_STORE is None:
+                return self._json({"events": []})
+            rows = HUB_STORE.recent_events(session_id=session_id, device_id=device_id, limit=limit)
+            self._json({"events": rows})
+
+        elif path == "/api/audit":
+            if HUB_STORE is None:
+                return self._json({"audit": []})
+            qs = parse_qs(urlparse(self.path).query)
+            try:
+                limit = min(200, max(1, int(qs.get("limit", ["50"])[0])))
+            except ValueError:
+                limit = 50
+            self._json({"audit": HUB_STORE.recent_audit(limit=limit)})
 
         elif path.split('?')[0].startswith("/sessions/") and path.split('?')[0].endswith("/ws"):
             # Live terminal WebSocket (see ws.py). Takes over the socket.
@@ -1419,6 +1606,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     target=setup_session,
                     args=(name, display_name or name, mode), daemon=True,
                 ).start()
+            _audit(self, action="start", target=name, detail=f"mode={mode}")
             self._json({"ok": True, "message": "Started", "name": name})
 
         elif path == "/devices/rename":
@@ -1426,6 +1614,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             ok, message = rename_device(
                 body.get("id", ""), body.get("name", ""),
             )
+            if ok:
+                _audit(self, action="devices/rename",
+                       target=body.get("id", "") or "local", device_id=body.get("id", "") or "local",
+                       detail=f"name={body.get('name', '')}")
             self._json({"ok": ok, "message": message}, 200 if ok else 400)
 
         elif path == "/stop":
@@ -1447,6 +1639,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return
             if session_exists(name):
                 stop_session(name)
+            _audit(self, action="stop", target=name)
             self._json({"ok": True, "message": "Stopped"})
 
         elif path == "/unstick":
@@ -1456,11 +1649,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._json({"ok": False, "message": "Invalid session name"}, 400)
                 return
             result = unstick_session(name)
+            _audit(self, action="unstick", target=name, detail=result.get("detail", ""))
             self._json({"ok": result["unstuck"], "message": result["detail"]})
 
         elif path == "/stop-all":
-            for name in _stoppable_session_names(list_rc_sessions()):
+            stopped = _stoppable_session_names(list_rc_sessions())
+            for name in stopped:
                 stop_session(name)
+            _audit(self, action="stop-all", target="", detail=f"count={len(stopped)}")
             self._json({"ok": True, "message": "All stopped"})
 
         elif path == "/restart":
@@ -1474,6 +1670,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return
             resume = body.get("resume", True)
             ok, msg = restart_session(name, resume=resume)
+            _audit(self, action="restart", target=name, detail=f"resume={resume}")
             self._json({"ok": ok, "message": msg, "name": name})
 
         elif path.startswith("/sessions/") and path.endswith("/preview-bye"):
@@ -1539,6 +1736,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 if keys:
                     cmd = ["tmux", "send-keys", "-t", target, "-l", keys]
                     subprocess.run(cmd, capture_output=True, check=False, timeout=5)
+                _audit(self, action="keys", target=name)
                 self._json({"ok": True})
             except subprocess.SubprocessError as e:
                 self._json({"ok": False, "message": str(e)}, 500)
@@ -1563,6 +1761,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             finally:
                 with _enable_rc_in_flight_lock:
                     _enable_rc_in_flight.pop(name, None)
+            _audit(self, action="enable-rc", target=name)
             self._json(result, 200 if result.get("ok") else 502)
 
         elif path == "/resume/start":
@@ -1601,6 +1800,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._json({"ok": False, "message": f"Invalid cron: {err}"}, 400)
                 return
             schedule = create_schedule(body)
+            _audit(self, action="schedules", target=str(schedule.get("id", "")))
             self._json({"ok": True, "schedule": schedule})
 
         elif path == "/schedules/update":
@@ -1617,6 +1817,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     return
             result = update_schedule(sid, body)
             if result:
+                _audit(self, action="schedules/update", target=str(sid))
                 self._json({"ok": True, "schedule": result})
             else:
                 self._json({"ok": False, "message": "Schedule not found"}, 404)
@@ -1628,6 +1829,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._json({"ok": False, "message": "Missing schedule id"}, 400)
                 return
             if delete_schedule(sid):
+                _audit(self, action="schedules/delete", target=str(sid))
                 self._json({"ok": True, "message": "Deleted"})
             else:
                 self._json({"ok": False, "message": "Schedule not found"}, 404)
@@ -1655,6 +1857,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             except Exception:
                 pass
             restart_msg = _detect_and_restart()
+            _audit(self, action="update", target="", detail=f"{old_ver}->{new_ver}")
             self._json({"ok": True, "old": old_ver, "new": new_ver,
                          "message": f"Updated {old_ver} → {new_ver}. {restart_msg}"})
 
@@ -1670,6 +1873,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._json({"ok": False, "message": "Schedule not found"}, 404)
                 return
             _fire_schedule(schedule)
+            _audit(self, action="schedules/fire", target=str(sid))
             self._json({"ok": True, "message": f"Firing schedule '{schedule.get('name')}'"})
 
         else:
@@ -1761,7 +1965,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if path in ("/rc/sessions", "/rc/tunnel/status", "/rc/projects",
                      "/rc/browse", "/rc/schedules", "/rc/version",
                      "/rc/resume/sessions", "/rc/stats", "/rc/overview",
-                     "/rc/config-report", "/api/config-matrix", "/rc/fleet") or \
+                     "/rc/config-report", "/api/config-matrix", "/rc/fleet", "/api/fleet") or \
                 path.startswith("/rc/static/") or path.startswith("/static/") or \
                 path.startswith("/rc/jobs/") or "/preview" in path:
             return

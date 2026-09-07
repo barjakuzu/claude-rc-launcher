@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import config
 import server
+import store
 
 
 class _FakeCompleted:
@@ -1066,6 +1067,197 @@ class FleetRouteTest(unittest.TestCase):
         import inspect
         src = inspect.getsource(server)
         self.assertIn('"/rc/fleet"', src)
+
+
+class DeriveNeedsAttentionTest(unittest.TestCase):
+    # CONTROLLER RULING supersedes the original task-8 brief here: the
+    # hook set was cut to StopFailure/Notification/SubagentStop/
+    # PreCompact/SessionEnd, so Stop/UserPromptSubmit never appear and
+    # can't be the clearing signal. _derive_needs_attention now only
+    # returns a per-session override when the newest relevant event is
+    # Notification (True) or SessionEnd (False); other event types are
+    # not decisive. The base value (no override) comes from the store's
+    # polled session state, applied by _apply_needs_attention.
+    def test_notification_is_a_decisive_override(self):
+        events = [
+            {"session_id": "s1", "ts": 10, "event": "Notification", "extra": {}},
+        ]
+        result = server._derive_needs_attention(events)
+        self.assertTrue(result["s1"])
+
+    def test_session_end_after_notification_clears_override(self):
+        events = [
+            {"session_id": "s1", "ts": 10, "event": "Notification", "extra": {}},
+            {"session_id": "s1", "ts": 11, "event": "SessionEnd", "extra": {}},
+        ]
+        result = server._derive_needs_attention(events)
+        self.assertFalse(result["s1"])
+
+    def test_non_decisive_event_types_are_skipped_when_scanning_back(self):
+        events = [
+            {"session_id": "s1", "ts": 10, "event": "Notification", "extra": {}},
+            {"session_id": "s1", "ts": 11, "event": "StopFailure", "extra": {}},
+            {"session_id": "s1", "ts": 12, "event": "SubagentStop", "extra": {}},
+            {"session_id": "s1", "ts": 13, "event": "PreCompact", "extra": {}},
+        ]
+        result = server._derive_needs_attention(events)
+        self.assertTrue(result["s1"])
+
+    def test_no_decisive_event_leaves_session_absent(self):
+        events = [
+            {"session_id": "s1", "ts": 10, "event": "PreCompact", "extra": {}},
+        ]
+        result = server._derive_needs_attention(events)
+        self.assertNotIn("s1", result)
+
+
+class ApplyNeedsAttentionTest(unittest.TestCase):
+    def test_polled_needs_attention_state_is_the_base(self):
+        sessions_rows = [{"session_id": "s1", "state": "needs_attention"}]
+        server._apply_needs_attention(sessions_rows, [])
+        self.assertTrue(sessions_rows[0]["needs_attention"])
+
+    def test_notification_event_overrides_idle_polled_state(self):
+        sessions_rows = [{"session_id": "s1", "state": "idle"}]
+        events = [{"session_id": "s1", "ts": 10, "event": "Notification", "extra": {}}]
+        server._apply_needs_attention(sessions_rows, events)
+        self.assertTrue(sessions_rows[0]["needs_attention"])
+
+    def test_session_end_event_overrides_stale_needs_attention_state(self):
+        sessions_rows = [{"session_id": "s1", "state": "needs_attention"}]
+        events = [{"session_id": "s1", "ts": 10, "event": "SessionEnd", "extra": {}}]
+        server._apply_needs_attention(sessions_rows, events)
+        self.assertFalse(sessions_rows[0]["needs_attention"])
+
+
+class ApiFleetRouteTest(unittest.TestCase):
+    def test_api_fleet_is_hub_only_not_proxied(self):
+        h = server.Handler.__new__(server.Handler)
+        h.path = "/api/fleet"
+        self.assertFalse(h._should_proxy("some-device"))
+
+    def test_api_fleet_stream_is_hub_only_not_proxied(self):
+        h = server.Handler.__new__(server.Handler)
+        h.path = "/api/fleet/stream"
+        self.assertFalse(h._should_proxy("some-device"))
+
+    def test_api_audit_is_hub_only_not_proxied(self):
+        h = server.Handler.__new__(server.Handler)
+        h.path = "/api/audit"
+        self.assertFalse(h._should_proxy("some-device"))
+
+    def test_api_sessions_events_is_hub_only_not_proxied(self):
+        h = server.Handler.__new__(server.Handler)
+        h.path = "/api/sessions/local/s1/events"
+        self.assertFalse(h._should_proxy("some-device"))
+
+
+class ApiFleetStreamHeadersTest(unittest.TestCase):
+    def test_stream_sets_no_buffering_headers(self):
+        import inspect
+        src = inspect.getsource(server.Handler.do_GET)
+        block = src.split('"/api/fleet/stream"', 1)[1]
+        block = block[:2000]
+        self.assertIn('text/event-stream', block)
+        self.assertIn('X-Accel-Buffering', block)
+        self.assertIn('no-cache', block)
+        self.assertIn('keep-alive', block)
+
+    def test_heartbeat_interval_constant_is_20_seconds(self):
+        self.assertEqual(server.SSE_HEARTBEAT_SECONDS, 20)
+
+
+class NotifyFleetChangedTest(unittest.TestCase):
+    def test_notify_sets_all_subscriber_events(self):
+        import threading
+        server.FLEET_CHANGE_SUBSCRIBERS.clear()
+        ev1, ev2 = threading.Event(), threading.Event()
+        server.FLEET_CHANGE_SUBSCRIBERS.add(ev1)
+        server.FLEET_CHANGE_SUBSCRIBERS.add(ev2)
+        server.notify_fleet_changed()
+        self.assertTrue(ev1.is_set())
+        self.assertTrue(ev2.is_set())
+
+
+class ApiSessionEventsRouteTest(unittest.TestCase):
+    def test_route_calls_store_recent_events_with_device_and_session(self):
+        import inspect
+        src = inspect.getsource(server.Handler.do_GET)
+        self.assertIn('"/api/sessions/"', src)
+        self.assertIn('.recent_events(', src)
+
+
+class AuditLogTest(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.TemporaryDirectory()
+        server.HUB_STORE = store.Store(os.path.join(self.tmp.name, "hub.db"))
+
+    def tearDown(self):
+        if server.HUB_STORE is not None:
+            server.HUB_STORE.close()
+        server.HUB_STORE = None
+        self.tmp.cleanup()
+
+    def test_audit_writes_row_with_resolved_actor(self):
+        class FakeHandler:
+            headers = {"Cookie": "rc_session=tok_abc123"}
+        server._audit(FakeHandler(), action="start", target="rc-foo", detail="mode=c")
+        rows = server.HUB_STORE.recent_audit()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["action"], "start")
+        self.assertEqual(rows[0]["target"], "rc-foo")
+        self.assertNotIn("password", rows[0]["detail"])
+
+    def test_audit_never_raises_when_store_is_none(self):
+        server.HUB_STORE.close()
+        server.HUB_STORE = None
+
+        class FakeHandler:
+            headers = {}
+        server._audit(FakeHandler(), action="stop", target="rc-foo")  # must not raise
+
+    def test_audit_actor_is_basic_for_basic_auth(self):
+        class FakeHandler:
+            headers = {"Authorization": "Basic dXNlcjpwYXNz"}
+        server._audit(FakeHandler(), action="stop", target="rc-foo")
+        rows = server.HUB_STORE.recent_audit()
+        self.assertEqual(rows[0]["actor"], "basic")
+
+    def test_all_named_mutating_routes_call_audit(self):
+        # Each marker is the literal text that opens the named route's
+        # elif branch in do_POST -- some routes are exact-path matches
+        # ("/start"), others are startswith/endswith matches for a path
+        # under /sessions/<name>/... ("/keys", "/enable-rc").
+        import inspect
+        src = inspect.getsource(server.Handler.do_POST)
+        markers = {
+            "/start": 'if path == "/start"',
+            "/stop": 'elif path == "/stop"',
+            "/stop-all": 'elif path == "/stop-all"',
+            "/restart": 'elif path == "/restart"',
+            "/unstick": 'elif path == "/unstick"',
+            "/keys": 'endswith("/keys")',
+            "/enable-rc": 'endswith("/enable-rc")',
+            "/schedules (create)": 'elif path == "/schedules"',
+            "/schedules/update": 'elif path == "/schedules/update"',
+            "/schedules/delete": 'elif path == "/schedules/delete"',
+            "/schedules/fire": 'elif path == "/schedules/fire"',
+            "/update": 'elif path == "/update"',
+            "/devices/rename": 'elif path == "/devices/rename"',
+        }
+        for name, marker in markers.items():
+            block = src.split(marker, 1)
+            self.assertEqual(len(block), 2, f"route {name} not found in do_POST")
+            next_block = block[1].split("\n        elif ", 1)[0]
+            self.assertIn("_audit(", next_block, f"{name} branch missing _audit() call")
+
+
+class ApiAuditRouteTest(unittest.TestCase):
+    def test_get_api_audit_is_hub_only(self):
+        import inspect
+        src = inspect.getsource(server.Handler.do_GET)
+        self.assertIn('"/api/audit"', src)
 
 
 if __name__ == "__main__":
