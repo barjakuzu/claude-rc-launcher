@@ -350,16 +350,36 @@ class IgnoreListsTest(unittest.TestCase):
         self.assertEqual(findings, [])
 
 
+def _swap_session_rule(rule_name, replacement):
+    """Context-manager-free helper: swap one entry of guard._SESSION_RULES
+    for `replacement`, returning the original tuple to restore in a
+    finally block. Used only to simulate "a rule function raises for some
+    reason" for the containment tests below - round 3's _validated_rule_cfg
+    fix means a caller-supplied bad threshold no longer reaches a rule
+    function unvalidated (it's defaulted before the rule ever runs), so
+    the earlier bad-rules-dict trick these tests used can no longer
+    trigger a real exception. Testing the containment mechanism itself
+    now requires injecting the failure directly."""
+    original = guard._SESSION_RULES
+    guard._SESSION_RULES = tuple(
+        (name, replacement) if name == rule_name else (name, func)
+        for name, func in original
+    )
+    return original
+
+
 class RuleErrorContainmentTest(unittest.TestCase):
     def test_raising_rule_is_contained_and_recorded(self):
-        rules = guard.default_rules()
-        # A caller-constructed rules dict can carry a bad type that
-        # load_rules()/_merge_rules would have rejected; evaluate() must
-        # not trust it blindly, and must not let it take down the run.
-        rules["rules"]["session_age"]["max_age_hours"] = "not-a-number-/secret/path"
-        s1 = session(session_id="s1", started_at=NOW - 3600)
-        s2 = session(session_id="s2", usage={"effective": 90_000_000, "last_ts": NOW})
-        findings = guard.evaluate(snap([s1, s2]), rules=rules, now_fn=now_fn)
+        def _raiser(s, cfg, now):
+            raise ValueError("boom - /secret/path")
+
+        original = _swap_session_rule("session_age", _raiser)
+        try:
+            s1 = session(session_id="s1")
+            s2 = session(session_id="s2", usage={"effective": 90_000_000, "last_ts": NOW})
+            findings = guard.evaluate(snap([s1, s2]), rules=guard.default_rules(), now_fn=now_fn)
+        finally:
+            guard._SESSION_RULES = original
 
         fired_rules = {f["rule"] for f in findings}
         self.assertNotIn("session_age", fired_rules)
@@ -368,7 +388,7 @@ class RuleErrorContainmentTest(unittest.TestCase):
         self.assertEqual(len(guard.LAST_RULE_ERRORS), 2)
         for rule_name, exc_type in guard.LAST_RULE_ERRORS:
             self.assertEqual(rule_name, "session_age")
-            self.assertEqual(exc_type, "TypeError")
+            self.assertEqual(exc_type, "ValueError")
         # The exception message (which could embed a path) must never
         # leak into the recorded errors.
         self.assertNotIn("secret", str(guard.LAST_RULE_ERRORS))
@@ -772,24 +792,30 @@ class IgnoreNamesDoesNotAffectDevicesTest(unittest.TestCase):
 
 class ConcurrentEvaluateErrorsTest(unittest.TestCase):
     def test_concurrent_evaluate_calls_leave_exact_error_count(self):
-        rules = guard.default_rules()
-        rules["rules"]["session_age"]["max_age_hours"] = "not-a-number"
-        sessions = [session(session_id=f"s-{i}") for i in range(5)]
-        snapshot = snap(sessions)
-        errors = []
+        def _raiser(s, cfg, now):
+            raise TypeError("boom")
 
-        def worker():
-            try:
-                for _ in range(20):
-                    guard.evaluate(snapshot, rules=rules, now_fn=now_fn)
-            except Exception as e:
-                errors.append(e)
+        original = _swap_session_rule("session_age", _raiser)
+        try:
+            rules = guard.default_rules()
+            sessions = [session(session_id=f"s-{i}") for i in range(5)]
+            snapshot = snap(sessions)
+            errors = []
 
-        threads = [threading.Thread(target=worker) for _ in range(6)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
+            def worker():
+                try:
+                    for _ in range(20):
+                        guard.evaluate(snapshot, rules=rules, now_fn=now_fn)
+                except Exception as e:
+                    errors.append(e)
+
+            threads = [threading.Thread(target=worker) for _ in range(6)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+        finally:
+            guard._SESSION_RULES = original
 
         self.assertEqual(errors, [])
         self.assertEqual(len(guard.LAST_RULE_ERRORS), 5)
@@ -984,6 +1010,85 @@ class FormatCountSubThousandRoundingTest(unittest.TestCase):
 
     def test_value_that_would_round_to_1000_promotes_to_k_tier(self):
         self.assertEqual(guard._fmt_count(999.95), "1.0 k")
+
+
+# ---------------------------------------------------------------------------
+# Fix round 3 (scoped re-review): one test per remaining item.
+# ---------------------------------------------------------------------------
+
+class IdentityFieldsFiniteTest(unittest.TestCase):
+    """Important 2 was only partially fixed in round 2: value, threshold
+    and since were sanitized, but device_id, session_id and name were
+    still copied verbatim into the finding, so a NaN or inf there still
+    reached json.dumps as the bare token NaN/Infinity and would have
+    broken the entire alerts response the same way."""
+
+    def test_nan_inf_identity_fields_are_sanitized_and_json_dumps_cleanly(self):
+        s = session(
+            device_id=float("nan"), session_id=float("inf"), name=float("nan"),
+            usage={"effective": 90_000_000, "last_ts": NOW})
+        findings = guard.evaluate(snap([s]), rules=guard.default_rules(), now_fn=now_fn)
+        self.assertGreaterEqual(len(findings), 1)
+        for f in findings:
+            self.assertIsNone(f["device_id"])
+            self.assertIsNone(f["session_id"])
+            self.assertIsNone(f["name"])
+
+        # allow_nan=False raises on any NaN/inf still present anywhere in
+        # the structure - the direct proxy for "the browser's JSON.parse
+        # would not choke on this".
+        encoded = json.dumps(findings, allow_nan=False)
+        self.assertEqual(json.loads(encoded), findings)
+
+
+class ConfigHugeIntThresholdTest(unittest.TestCase):
+    """New Minor: math.isfinite() itself raises OverflowError on an int
+    too large to convert to float (more digits than fit in a float's
+    range), so a guard.json threshold with ~400 nines used to propagate
+    that exception out of load_rules(), breaking its documented
+    never-raises contract. Every Python int is finite by construction,
+    so the fix is to skip the isfinite check for ints entirely."""
+
+    def test_huge_int_threshold_does_not_raise_and_is_accepted(self):
+        tmpdir = tempfile.mkdtemp()
+        try:
+            path = os.path.join(tmpdir, "guard.json")
+            huge = "9" * 400
+            with open(path, "w") as f:
+                f.write('{"rules": {"token_total": {"max_effective_total": %s}}}' % huge)
+            rules = guard.load_rules(path=path)  # must not raise
+            self.assertEqual(rules["rules"]["token_total"]["max_effective_total"], int(huge))
+            self.assertIsNone(guard.LAST_LOAD_ERROR)
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+class EvaluateValidatesThresholdsTest(unittest.TestCase):
+    """New Nit: sanitizing only at finding-construction time let the
+    message (built from the raw config value before construction) and
+    the field (sanitized only after) disagree - "over the nan h limit" or
+    "over the 1.0 h limit" next to threshold: null. Validating the rule's
+    config at the point evaluate() reads it means the message and the
+    field are always built from the same, real (defaulted-if-invalid)
+    number."""
+
+    def test_nan_and_bool_thresholds_fall_back_to_default_so_message_and_field_agree(self):
+        s = session(started_at=NOW - 100 * 3600)  # 100h old, over the real 24h default
+
+        rules_nan = guard.default_rules()
+        rules_nan["rules"]["session_age"]["max_age_hours"] = float("nan")
+        findings = guard.evaluate(snap([s]), rules=rules_nan, now_fn=now_fn)
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0]["threshold"], 24)
+        self.assertIn("24.0 h", findings[0]["message"])
+        self.assertNotIn("nan", findings[0]["message"].lower())
+
+        rules_bool = guard.default_rules()
+        rules_bool["rules"]["session_age"]["max_age_hours"] = True
+        findings = guard.evaluate(snap([s]), rules=rules_bool, now_fn=now_fn)
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0]["threshold"], 24)
+        self.assertIn("24.0 h", findings[0]["message"])
 
 
 if __name__ == "__main__":
