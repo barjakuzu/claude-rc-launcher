@@ -15,13 +15,31 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 <link href="https://fonts.googleapis.com/css2?family=Geist+Mono:wght@400;500;600&family=Inter:wght@300;400;500;600;700&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet" />
 <style>
-  html, body { margin: 0; padding: 0; height: 100%; background: oklch(0.155 0.004 80); }
-  body { font-family: 'Inter', system-ui, sans-serif; -webkit-font-smoothing: antialiased; color: oklch(0.96 0.004 80); }
+  /* Pin the document to the viewport so the header/nav (flex:none siblings
+     of the scrolling content in App.tsx) can never be dragged along by an
+     iOS Safari rubber-band bounce of the outer page — that bounce is what
+     "header and bottom sidebar to be fixed not moving" was reporting. Each
+     view's own content scrolls inside its own overflow:auto container;
+     nothing here should ever need document-level scroll. overscroll-behavior
+     additionally kills the bounce gesture itself where it's still possible
+     (e.g. an inner list already at its scroll limit). */
+  html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; overscroll-behavior: none; background: oklch(0.155 0.004 80); }
+  body {
+    position: fixed; inset: 0;
+    font-family: 'Inter', system-ui, sans-serif; -webkit-font-smoothing: antialiased; color: oklch(0.96 0.004 80);
+  }
   * { box-sizing: border-box; }
   ::selection { background: rgba(201,100,66,.25); }
-  #root { height: 100%; }
+  /* 100% first as a fallback for browsers with no dvh support; 100dvh
+     overrides it where supported so #root tracks the real visible
+     viewport as the mobile browser's own chrome shows/hides, instead of
+     the stale height 100% can report at that moment. */
+  #root { height: 100%; height: 100dvh; }
+  /* Removes the ~300ms tap delay and disables double-tap-to-zoom on
+     buttons/links, so taps feel immediate rather than laggy on touch. */
+  button, a { -webkit-tap-highlight-color: transparent; touch-action: manipulation; }
 </style>
-  <script type="module" crossorigin src="/static/dist/assets/index-D5BkgcRB.js"></script>
+  <script type="module" crossorigin src="/static/dist/assets/index-mvrI3uM_.js"></script>
   <link rel="stylesheet" crossorigin href="/static/dist/assets/index-6GBZ9nXN.css">
 </head>
 <body><div id="root"></div></body>
