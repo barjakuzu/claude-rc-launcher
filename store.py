@@ -20,6 +20,12 @@ import time
 
 _LOG = logging.getLogger(__name__)
 
+
+class StoreClosed(RuntimeError):
+    """Raised by any Store call made after close() (or racing it), so
+    callers can distinguish "the store is shut down" from any other
+    RuntimeError a write might raise."""
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS devices (
     id TEXT PRIMARY KEY, name TEXT, role TEXT, version TEXT,
@@ -140,7 +146,7 @@ class Store:
             # Fail anything still queued behind the sentinel (submitted
             # concurrently with close(), or left over if the loop exited
             # early) so no caller blocks for the full _write timeout.
-            drain_error = self._close_error or RuntimeError("store is closed")
+            drain_error = self._close_error or StoreClosed("store is closed")
             while True:
                 try:
                     leftover = self._q.get_nowait()
@@ -153,7 +159,7 @@ class Store:
 
     def _write(self, fn, *args, **kwargs):
         if self._closed:
-            raise RuntimeError("store is closed")
+            raise StoreClosed("store is closed")
         item = _Write(fn, args, kwargs)
         self._q.put(item)
         if not item.done.wait(timeout=10):
@@ -208,6 +214,9 @@ class Store:
                 sid = r.get("session_id")
                 if not sid:
                     skipped += 1
+                    _LOG.warning(
+                        "upsert_sessions: skipping row for device %r with no session_id: %r",
+                        device_id, r.get("name"))
                     continue
                 seen_ids.add(sid)
                 existing = conn.execute(
@@ -237,15 +246,29 @@ class Store:
         """Insert events, ignoring exact duplicates of an existing row on
         (device_id, session_id, ts, event) -- makes a poller cursor rewind
         that resubmits an already-seen batch a no-op instead of duplicating
-        rows."""
+        rows.
+
+        A row without `session_id` is rejected (not silently inserted as
+        NULL): the unique index above treats NULL as distinct from every
+        other NULL (SQL NULL != NULL), so such rows would never dedupe and
+        would pile up forever on every cursor replay."""
         def _do(conn):
+            skipped = 0
             for r in rows:
+                sid = r.get("session_id")
+                if not sid:
+                    skipped += 1
+                    _LOG.warning(
+                        "add_events: rejecting event for device %r with no session_id: %r",
+                        device_id, r.get("event"))
+                    continue
                 conn.execute(
                     "INSERT OR IGNORE INTO session_events "
                     "(device_id, session_id, ts, event, extra_json) "
                     "VALUES (?, ?, ?, ?, ?)",
-                    (device_id, r.get("session_id"), r.get("ts"), r.get("event"),
+                    (device_id, sid, r.get("ts"), r.get("event"),
                      json.dumps(r.get("extra") or {})))
+            return {"skipped": skipped}
         return self._write(_do)
 
     def add_audit(self, actor, action, target, device_id, detail="", now_fn=time.time):
@@ -324,7 +347,7 @@ class Store:
         # close() is rejected immediately with a clear error instead of
         # being queued and left to hang.
         self._closed = True
-        self._close_error = RuntimeError("store is closed")
+        self._close_error = StoreClosed("store is closed")
         self._stop.set()
         self._q.put(None)
         self._thread.join(timeout=5)

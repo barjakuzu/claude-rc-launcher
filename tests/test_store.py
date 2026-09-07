@@ -162,6 +162,21 @@ class StoreTest(unittest.TestCase):
             t.join(timeout=10)
         self.assertEqual(errors, [])
 
+    def test_write_after_close_raises_store_closed(self):
+        self.store.close()
+        with self.assertRaises(store.StoreClosed):
+            self.store.upsert_device({"id": "local", "name": "hub", "role": "full",
+                                       "version": "1", "claude_version": "1"})
+
+    def test_add_events_rejects_rows_without_session_id(self):
+        self.store.upsert_device({"id": "local", "name": "hub", "role": "full",
+                                   "version": "1", "claude_version": "1"})
+        result = self.store.add_events("local", [
+            {"ts": 1.0, "event": "Stop", "extra": {}},  # no session_id
+        ])
+        self.assertEqual(result["skipped"], 1)
+        self.assertEqual(self.store.recent_events(device_id="local"), [])
+
 
 if __name__ == "__main__":
     unittest.main()
