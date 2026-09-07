@@ -34,6 +34,61 @@ class FakeRun:
         return r
 
 
+class NormalizeStartedAtTest(unittest.TestCase):
+    """agents.normalize_started_at: raw `startedAt` (as `claude agents
+    --json` reports it, or whatever else might show up) -> epoch SECONDS
+    as a float, or None. Never raises."""
+
+    def test_milliseconds_converts_to_seconds(self):
+        self.assertEqual(agents.normalize_started_at(1757100000000), 1757100000.0)
+
+    def test_real_observed_value_converts_exactly(self):
+        # The actual value seen in `claude agents --json` output on a
+        # production box.
+        self.assertEqual(agents.normalize_started_at(1787677948238), 1787677948.238)
+
+    def test_seconds_already_kept_as_is(self):
+        self.assertEqual(agents.normalize_started_at(1757100000), 1757100000.0)
+
+    def test_numeric_string_milliseconds_converts(self):
+        self.assertEqual(agents.normalize_started_at("1787677948238"), 1787677948.238)
+
+    def test_numeric_string_seconds_converts(self):
+        self.assertEqual(agents.normalize_started_at("1757100000"), 1757100000.0)
+
+    def test_zero_is_none(self):
+        self.assertIsNone(agents.normalize_started_at(0))
+
+    def test_negative_is_none(self):
+        self.assertIsNone(agents.normalize_started_at(-1757100000))
+
+    def test_none_is_none(self):
+        self.assertIsNone(agents.normalize_started_at(None))
+
+    def test_bool_true_is_not_accepted_as_a_number(self):
+        self.assertIsNone(agents.normalize_started_at(True))
+
+    def test_bool_false_is_not_accepted_as_a_number(self):
+        self.assertIsNone(agents.normalize_started_at(False))
+
+    def test_nan_is_none(self):
+        self.assertIsNone(agents.normalize_started_at(float("nan")))
+
+    def test_positive_infinity_is_none(self):
+        self.assertIsNone(agents.normalize_started_at(float("inf")))
+
+    def test_negative_infinity_is_none(self):
+        self.assertIsNone(agents.normalize_started_at(float("-inf")))
+
+    def test_non_numeric_string_is_none(self):
+        self.assertIsNone(agents.normalize_started_at("not-a-number"))
+
+    def test_too_small_to_be_a_real_timestamp_is_none(self):
+        # Below MIN_STARTED_AT_SECONDS (1e9) but positive -- e.g. a
+        # relative/offset value, not a plausible epoch time.
+        self.assertIsNone(agents.normalize_started_at(12345))
+
+
 RAW_JSON = '''[
   {"pid": 111, "cwd": "/home/user/proj", "kind": "interactive",
    "startedAt": 1757100000000, "sessionId": "abc-123", "name": "portugal",
@@ -73,14 +128,21 @@ class ListClaudeSessionsTest(AgentsJsonCapsGateMixin, unittest.TestCase):
         fake = FakeRun(stdout=RAW_JSON)
         rows = agents.list_claude_sessions(claude_bin="claude", run=fake)
         self.assertEqual(len(rows), 3)
+        # startedAt in the fixture is epoch MILLISECONDS (the real shape
+        # `claude agents --json` reports) -- normalize_started_at converts
+        # it to epoch seconds; started_at_raw keeps the untouched original
+        # for debugging.
         self.assertEqual(rows[0], {
             "session_id": "abc-123", "name": "portugal", "cwd": "/home/user/proj",
-            "kind": "interactive", "status": "idle", "started_at": 1757100000000,
-            "pid": 111, "waiting_for": None, "state": None,
+            "kind": "interactive", "status": "idle", "started_at": 1757100000.0,
+            "started_at_raw": 1757100000000, "pid": 111, "waiting_for": None,
+            "state": None,
         })
         self.assertEqual(rows[2]["waiting_for"], "permission_prompt")
         self.assertIsNone(rows[2]["name"])
         self.assertEqual(rows[1]["state"], "running")
+        self.assertEqual(rows[1]["started_at"], 1757100005.0)
+        self.assertEqual(rows[2]["started_at"], 1757100010.0)
 
     def test_returned_list_is_a_copy(self):
         """Mutating a previously returned list must not corrupt the cache
