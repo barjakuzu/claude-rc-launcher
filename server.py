@@ -243,19 +243,26 @@ def _proxy_audit_action(path):
 
 
 def _proxy_audit_target(path, body_bytes):
-    """Best-effort target name for a proxied audit row: prefer a name/
-    session/id field from the JSON body (matching what the local routes
-    audit), else fall back to the session name segment of a /sessions/<name>/...
-    path."""
+    """Best-effort target name for a proxied audit row, matching what each
+    local route audits: /schedules* audit the numeric schedule id, so id
+    is checked first there; /resume/start audits `name or session_id` (see
+    the local handler), so session_id is checked before the title
+    fallback; everything else prefers name/session. Falls back to the
+    session name segment of a /sessions/<name>/... path."""
+    parsed = {}
     if body_bytes:
         try:
             parsed = json.loads(body_bytes)
-            for key in ("name", "session", "id"):
-                val = parsed.get(key)
-                if val:
-                    return str(val)
         except Exception:
-            pass
+            parsed = {}
+    if path.startswith("/schedules"):
+        keys = ("id", "name", "session", "session_id", "title")
+    else:
+        keys = ("name", "session", "session_id", "title", "id")
+    for key in keys:
+        val = parsed.get(key)
+        if val:
+            return str(val)
     if path.startswith("/sessions/"):
         parts = path.split("/")
         if len(parts) > 2 and parts[2]:
@@ -1726,6 +1733,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             body = self.rfile.read(length) if length > 0 else None
             action = _proxy_audit_action(proxy_path)
             if action:
+                # Written before forwarding: a request the remote device
+                # later rejects (bad session, 4xx, unreachable) still shows
+                # up as an attempted action -- the hub can't know the
+                # device's outcome ahead of time, only that this was asked.
                 _audit(self, action=action,
                        target=_proxy_audit_target(proxy_path, body),
                        device_id=dev_id, detail="proxied=true")

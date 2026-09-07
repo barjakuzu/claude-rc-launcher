@@ -1614,6 +1614,26 @@ class ProxiedRequestAuditTest(unittest.TestCase):
         self.assertEqual(rows[0]["target"], "rc-foo")
         self.assertIn("proxied", rows[0]["detail"])
 
+    def test_proxied_resume_start_records_session_id_as_target(self):
+        body = b'{"session_id": "abc-123", "title": "My Session"}'
+        h = self._make_handler("/rc/resume/start", body)
+        with mock.patch.object(server.urllib.request, "urlopen",
+                                return_value=self._fake_response()):
+            h.do_POST()
+        rows = server.HUB_STORE.recent_audit()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["target"], "abc-123")
+
+    def test_proxied_schedules_update_prefers_id_over_name(self):
+        body = b'{"id": "42", "name": "should-not-win"}'
+        h = self._make_handler("/rc/schedules/update", body)
+        with mock.patch.object(server.urllib.request, "urlopen",
+                                return_value=self._fake_response()):
+            h.do_POST()
+        rows = server.HUB_STORE.recent_audit()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["target"], "42")
+
     def test_proxied_get_writes_no_audit_row(self):
         h = self._make_handler("/rc/stop", b"")
         h.command = "GET"
