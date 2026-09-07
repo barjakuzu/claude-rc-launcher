@@ -2,9 +2,19 @@ import json
 import os
 import sqlite3
 import tempfile
+import time
 import unittest
 
 import store
+
+
+def _day(offset_days=0):
+    """A real "YYYY-MM-DD" date string, `offset_days` days before now (UTC).
+    cost_view() has no injectable clock (CONTRACT.md: no now_fn parameter,
+    since cost_daily.day is a calendar-date string written once per real
+    day, not an epoch) -- so tests that need to land inside or outside its
+    rolling window use real day arithmetic instead of a fake now_fn."""
+    return time.strftime("%Y-%m-%d", time.gmtime(time.time() - offset_days * 86400))
 
 
 class StoreTest(unittest.TestCase):
@@ -747,6 +757,415 @@ class SessionsStatusColumnTest(unittest.TestCase):
             ])
             view2 = migrated.fleet_view()
             self.assertEqual(view2["sessions"][0]["status"], "busy")
+        finally:
+            migrated.close()
+
+
+class UsageCostAlertsTest(unittest.TestCase):
+    """Phase 3 wiring, CONTRACT.md section 2: session_usage, cost_daily,
+    alerts and the methods built on them."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db_path = os.path.join(self.tmp.name, "hub.db")
+        self.store = store.Store(self.db_path)
+
+    def tearDown(self):
+        self.store.close()
+        self.tmp.cleanup()
+
+    def test_new_tables_exist_on_a_fresh_database(self):
+        conn = sqlite3.connect(self.db_path)
+        try:
+            tables = {row[0] for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")}
+            self.assertIn("session_usage", tables)
+            self.assertIn("cost_daily", tables)
+            self.assertIn("alerts", tables)
+        finally:
+            conn.close()
+
+    # -- upsert_session_usage --------------------------------------------
+
+    def test_upsert_session_usage_insert_then_update_in_place_via_fleet_view(self):
+        self.store.upsert_device({"id": "local", "name": "hub", "role": "full",
+                                   "version": "1", "claude_version": "1"})
+        self.store.upsert_sessions("local", [
+            {"session_id": "s1", "name": "rc-foo", "cwd": "/tmp", "kind": "interactive",
+             "state": "busy", "started_at": 1000},
+        ], now_fn=lambda: 1000.0)
+        self.store.upsert_session_usage("local", [
+            {"session_id": "s1", "input": 100, "cache_read": 200, "cache_write": 30,
+             "output": 40, "effective": 5000, "last_ts": 1000.0},
+        ], now_fn=lambda: 1010.0)
+        view = self.store.fleet_view()
+        self.assertEqual(view["sessions"][0]["usage"], {
+            "input": 100, "cache_read": 200, "cache_write": 30,
+            "output": 40, "effective": 5000, "last_ts": 1000.0})
+
+        # Same (device_id, session_id): updates the one row in place,
+        # never a second row.
+        self.store.upsert_session_usage("local", [
+            {"session_id": "s1", "input": 150, "cache_read": 250, "cache_write": 35,
+             "output": 45, "effective": 6000, "last_ts": 1020.0},
+        ], now_fn=lambda: 1030.0)
+        view2 = self.store.fleet_view()
+        self.assertEqual(len(view2["sessions"]), 1)
+        self.assertEqual(view2["sessions"][0]["usage"]["effective"], 6000)
+        self.assertEqual(view2["sessions"][0]["usage"]["last_ts"], 1020.0)
+
+    def test_upsert_session_usage_skips_rows_without_session_id(self):
+        result = self.store.upsert_session_usage("local", [
+            {"input": 1, "cache_read": 2, "cache_write": 3, "output": 4, "effective": 5,
+             "last_ts": 1.0},
+        ])
+        self.assertEqual(result["skipped"], 1)
+
+    # -- upsert_cost_daily -------------------------------------------------
+
+    def test_upsert_cost_daily_replaces_not_accumulates(self):
+        row = {"day": _day(0), "project": "-var-www", "input": 100, "cache_read": 200,
+               "cache_write": 30, "output": 40, "effective": 5000}
+        for _ in range(3):
+            self.store.upsert_cost_daily("local", [row])
+        view = self.store.cost_view(days=30)
+        dev = next(d for d in view["devices"] if d["device_id"] == "local")
+        self.assertEqual(dev["total_effective"], 5000)  # not 15000
+        self.assertEqual(len(dev["daily"]), 1)
+        self.assertEqual(dev["daily"][0]["effective"], 5000)
+
+    def test_upsert_cost_daily_skips_rows_without_day(self):
+        result = self.store.upsert_cost_daily("local", [
+            {"project": "p1", "input": 1, "cache_read": 2, "cache_write": 3, "output": 4,
+             "effective": 5},
+        ])
+        self.assertEqual(result["skipped"], 1)
+
+    def test_upsert_cost_daily_empty_project_is_valid_not_skipped(self):
+        # CONTRACT.md: project is the empty string when the device did not
+        # report one (metadata role), never skipped for that reason alone.
+        result = self.store.upsert_cost_daily("local", [
+            {"day": _day(0), "project": "", "input": 1, "cache_read": 1, "cache_write": 1,
+             "output": 1, "effective": 42},
+        ])
+        self.assertEqual(result["skipped"], 0)
+        view = self.store.cost_view(days=30)
+        projects = {p["project"]: p["effective"] for p in view["projects"]}
+        self.assertEqual(projects.get(""), 42)
+
+    # -- cost_view -----------------------------------------------------
+
+    def test_cost_view_aggregates_devices_and_projects_and_honours_days(self):
+        self.store.upsert_device({"id": "local", "name": "hub", "role": "full",
+                                   "version": "1", "claude_version": "1"})
+        self.store.upsert_cost_daily("local", [
+            {"day": _day(0), "project": "proj-a", "input": 10, "cache_read": 20,
+             "cache_write": 3, "output": 4, "effective": 1000},
+            {"day": _day(0), "project": "proj-b", "input": 5, "cache_read": 6,
+             "cache_write": 1, "output": 2, "effective": 500},
+        ])
+        self.store.upsert_cost_daily("local", [
+            {"day": _day(40), "project": "proj-old", "input": 1, "cache_read": 1,
+             "cache_write": 1, "output": 1, "effective": 999999},
+        ])
+        view = self.store.cost_view(days=30)
+        dev = next(d for d in view["devices"] if d["device_id"] == "local")
+        self.assertEqual(dev["name"], "hub")
+        # The 40-day-old row is outside the 30-day window and must not
+        # count toward the device total.
+        self.assertEqual(dev["total_effective"], 1500)
+        self.assertEqual(len(dev["daily"]), 1)
+        projects = {p["project"]: p["effective"] for p in view["projects"]
+                    if p["device_id"] == "local"}
+        self.assertEqual(projects, {"proj-a": 1000, "proj-b": 500})
+        self.assertNotIn("proj-old", projects)
+
+    def test_cost_view_projects_sorted_descending_and_capped_at_50(self):
+        rows = [
+            {"day": _day(0), "project": f"proj-{i}", "input": 0, "cache_read": 0,
+             "cache_write": 0, "output": 0, "effective": i}
+            for i in range(60)
+        ]
+        self.store.upsert_cost_daily("local", rows)
+        view = self.store.cost_view(days=30)
+        self.assertEqual(len(view["projects"]), 50)
+        effectives = [p["effective"] for p in view["projects"]]
+        self.assertEqual(effectives, sorted(effectives, reverse=True))
+        self.assertEqual(effectives[0], 59)  # highest-effective project first
+
+    # -- replace_alerts --------------------------------------------------
+
+    def test_replace_alerts_preserves_first_seen_moves_last_seen_and_deletes_stale(self):
+        finding = {"rule": "token_rate", "severity": "alert", "target_type": "session",
+                   "device_id": "local", "session_id": "s1", "name": "rc-foo",
+                   "message": "m1", "value": 1.0, "threshold": 2.0, "since": 100.0}
+        self.store.replace_alerts([finding], now_fn=lambda: 1000.0)
+        alerts = self.store.live_alerts()
+        self.assertEqual(len(alerts), 1)
+        self.assertEqual(alerts[0]["first_seen"], 1000.0)
+        self.assertEqual(alerts[0]["last_seen"], 1000.0)
+
+        finding_updated = dict(finding, message="m1 updated", value=2.0)
+        self.store.replace_alerts([finding_updated], now_fn=lambda: 2000.0)
+        alerts2 = self.store.live_alerts()
+        self.assertEqual(len(alerts2), 1)
+        self.assertEqual(alerts2[0]["first_seen"], 1000.0)  # unchanged
+        self.assertEqual(alerts2[0]["last_seen"], 2000.0)   # moved
+        self.assertEqual(alerts2[0]["message"], "m1 updated")
+
+        # Stops firing (absent from the batch) -> deleted, not left stale.
+        self.store.replace_alerts([], now_fn=lambda: 3000.0)
+        self.assertEqual(self.store.live_alerts(), [])
+
+    def test_replace_alerts_device_finding_upserted_twice_yields_one_row(self):
+        device_finding = {"rule": "device_offline", "severity": "warn",
+                           "target_type": "device", "device_id": "dev1",
+                           "session_id": None, "name": "laptop", "message": "offline",
+                           "value": 10.0, "threshold": 5.0, "since": 50.0}
+        self.store.replace_alerts([device_finding], now_fn=lambda: 100.0)
+        self.store.replace_alerts([device_finding], now_fn=lambda: 200.0)
+        alerts = self.store.live_alerts()
+        self.assertEqual(len(alerts), 1)
+        self.assertEqual(alerts[0]["session_id"], "")  # empty string, not NULL
+        self.assertEqual(alerts[0]["first_seen"], 100.0)
+        self.assertEqual(alerts[0]["last_seen"], 200.0)
+
+    def test_replace_alerts_is_atomic_on_failure(self):
+        good = {"rule": "token_rate", "severity": "alert", "device_id": "local",
+                "session_id": "s1", "name": "rc-foo", "message": "m1", "value": 1.0,
+                "threshold": 2.0, "since": 100.0}
+        self.store.replace_alerts([good], now_fn=lambda: 1000.0)
+        before = self.store.live_alerts()
+
+        # A finding with a value sqlite3 cannot bind at all: the write must
+        # fail and roll back, not partially apply (e.g. deleting `good`
+        # because it's absent from this batch, then dying on the insert).
+        bad = {"rule": "token_rate", "severity": "alert", "device_id": "local",
+               "session_id": "s2", "name": "rc-bar", "message": "m2",
+               "value": object(), "threshold": 2.0, "since": 100.0}
+        with self.assertRaises(Exception):
+            self.store.replace_alerts([bad], now_fn=lambda: 2000.0)
+
+        after = self.store.live_alerts()
+        self.assertEqual(after, before)
+
+    def test_live_alerts_ordering_alert_before_warn_then_oldest_first_seen(self):
+        warn_old = {"rule": "session_age", "severity": "warn", "device_id": "local",
+                    "session_id": "s1", "name": "a", "message": "m", "value": 1.0,
+                    "threshold": 2.0, "since": 1.0}
+        alert_old = {"rule": "stalled", "severity": "alert", "device_id": "local",
+                     "session_id": "s4", "name": "d", "message": "m", "value": 1.0,
+                     "threshold": 2.0, "since": 1.0}
+        warn_new = {"rule": "token_total", "severity": "warn", "device_id": "local",
+                    "session_id": "s3", "name": "c", "message": "m", "value": 1.0,
+                    "threshold": 2.0, "since": 1.0}
+        alert_new = {"rule": "token_rate", "severity": "alert", "device_id": "local",
+                     "session_id": "s2", "name": "b", "message": "m", "value": 1.0,
+                     "threshold": 2.0, "since": 1.0}
+        # first_seen order across calls: warn_old(100) < alert_old(200) <
+        # warn_new(300) < alert_new(400).
+        self.store.replace_alerts([warn_old], now_fn=lambda: 100.0)
+        self.store.replace_alerts([warn_old, alert_old], now_fn=lambda: 200.0)
+        self.store.replace_alerts([warn_old, alert_old, warn_new], now_fn=lambda: 300.0)
+        self.store.replace_alerts(
+            [warn_old, alert_old, warn_new, alert_new], now_fn=lambda: 400.0)
+
+        rules = [a["rule"] for a in self.store.live_alerts()]
+        self.assertEqual(rules, ["stalled", "token_rate", "session_age", "token_total"])
+
+    # -- fleet_view usage join --------------------------------------------
+
+    def test_fleet_view_sessions_carry_usage_none_when_absent(self):
+        self.store.upsert_device({"id": "local", "name": "hub", "role": "full",
+                                   "version": "1", "claude_version": "1"})
+        self.store.upsert_sessions("local", [
+            {"session_id": "s1", "name": "rc-foo", "cwd": "/tmp", "kind": "interactive",
+             "state": "idle", "started_at": 1000},
+        ], now_fn=lambda: 1000.0)
+        view = self.store.fleet_view()
+        self.assertIsNone(view["sessions"][0]["usage"])
+
+    # -- prune -------------------------------------------------------------
+
+    def test_prune_removes_orphan_session_usage_and_old_cost_daily_keeps_live(self):
+        self.store.upsert_device({"id": "local", "name": "hub", "role": "full",
+                                   "version": "1", "claude_version": "1"})
+        self.store.upsert_sessions("local", [
+            {"session_id": "s1", "name": "rc-foo", "cwd": "/tmp", "kind": "interactive",
+             "state": "idle", "started_at": time.time()},
+        ])
+        self.store.upsert_session_usage("local", [
+            {"session_id": "s1", "input": 1, "cache_read": 1, "cache_write": 1,
+             "output": 1, "effective": 1, "last_ts": time.time()},
+            {"session_id": "orphan", "input": 1, "cache_read": 1, "cache_write": 1,
+             "output": 1, "effective": 1, "last_ts": time.time()},
+        ])
+        self.store.upsert_cost_daily("local", [
+            {"day": _day(0), "project": "p1", "input": 1, "cache_read": 1,
+             "cache_write": 1, "output": 1, "effective": 1},
+            {"day": _day(40), "project": "p2", "input": 1, "cache_read": 1,
+             "cache_write": 1, "output": 1, "effective": 1},
+        ])
+
+        deleted = self.store.prune(days=14)
+        self.assertEqual(deleted["session_usage"], 1)  # only the orphan
+        self.assertEqual(deleted["cost_daily"], 1)      # only the 40-day-old row
+
+        # The live session's own usage row survives (its sessions row still
+        # exists -- it never got an ended_at, so `se` doesn't touch it
+        # either).
+        view = self.store.fleet_view()
+        self.assertIsNotNone(view["sessions"][0]["usage"])
+        cost = self.store.cost_view(days=30)
+        dev = next(d for d in cost["devices"] if d["device_id"] == "local")
+        self.assertEqual(len(dev["daily"]), 1)
+        self.assertEqual(dev["daily"][0]["day"], _day(0))
+
+    def test_prune_does_not_remove_a_still_referenced_session_usage_row(self):
+        self.store.upsert_device({"id": "local", "name": "hub", "role": "full",
+                                   "version": "1", "claude_version": "1"})
+        self.store.upsert_sessions("local", [
+            {"session_id": "s1", "name": "rc-foo", "cwd": "/tmp", "kind": "interactive",
+             "state": "idle", "started_at": time.time()},
+        ])
+        self.store.upsert_session_usage("local", [
+            {"session_id": "s1", "input": 1, "cache_read": 1, "cache_write": 1,
+             "output": 1, "effective": 1, "last_ts": time.time()},
+        ])
+        deleted = self.store.prune(days=14)
+        self.assertEqual(deleted["session_usage"], 0)
+
+    # -- concurrency -------------------------------------------------------
+
+    def test_concurrent_writes_to_new_tables_do_not_raise(self):
+        import threading
+        self.store.upsert_device({"id": "local", "name": "hub", "role": "full",
+                                   "version": "1", "claude_version": "1"})
+        # upsert_sessions treats its `rows` as the device's WHOLE current
+        # session list (anything absent gets ended_at) -- seed all 5
+        # sessions in one call, upfront, so the concurrent section below
+        # only races the per-key upserts against each other, not against
+        # upsert_sessions's own end-of-sweep semantics.
+        self.store.upsert_sessions("local", [
+            {"session_id": f"s{n}", "name": f"s{n}", "cwd": "/tmp",
+             "kind": "interactive", "state": "busy", "started_at": 1000.0}
+            for n in range(5)
+        ])
+        errors = []
+
+        def writer(n):
+            try:
+                sid = f"s{n}"
+                for i in range(15):
+                    self.store.upsert_session_usage("local", [
+                        {"session_id": sid, "input": i, "cache_read": i,
+                         "cache_write": i, "output": i, "effective": i, "last_ts": float(i)},
+                    ])
+                    self.store.upsert_cost_daily("local", [
+                        {"day": _day(0), "project": f"proj-{n}", "input": i,
+                         "cache_read": i, "cache_write": i, "output": i, "effective": i},
+                    ])
+            except Exception as e:
+                errors.append(e)
+
+        threads = [threading.Thread(target=writer, args=(n,)) for n in range(5)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=15)
+        self.assertEqual(errors, [])
+
+        view = self.store.fleet_view()
+        self.assertEqual(len(view["sessions"]), 5)
+        for s in view["sessions"]:
+            self.assertIsNotNone(s["usage"])
+            self.assertEqual(s["usage"]["effective"], 14)  # last iteration's value, i=14
+
+        cost = self.store.cost_view(days=30)
+        dev = next(d for d in cost["devices"] if d["device_id"] == "local")
+        self.assertEqual(len(dev["daily"]), 1)
+        self.assertEqual(len(cost["projects"]), 5)
+        for p in cost["projects"]:
+            self.assertEqual(p["effective"], 14)
+
+
+class UsageCostAlertsMigrationTest(unittest.TestCase):
+    """The new tables against a copy of a hub.db that predates them (the
+    actual shape of the live production hub.db this task must never touch
+    directly -- see task-w2-brief.md)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_new_tables_created_on_a_db_that_predates_them(self):
+        old_db = os.path.join(self.tmp.name, "old.db")
+        conn = sqlite3.connect(old_db)
+        conn.executescript("""
+            CREATE TABLE devices (
+                id TEXT PRIMARY KEY, name TEXT, role TEXT, version TEXT,
+                claude_version TEXT, last_seen REAL, online INTEGER DEFAULT 0
+            );
+            CREATE TABLE sessions (
+                device_id TEXT, session_id TEXT, name TEXT, cwd TEXT, kind TEXT,
+                state TEXT, started_at REAL, ended_at REAL, last_seen REAL,
+                external INTEGER DEFAULT 0,
+                pid INTEGER, tmux TEXT, rc_url TEXT, tokens INTEGER, claude TEXT,
+                status TEXT,
+                PRIMARY KEY (device_id, session_id)
+            );
+            CREATE TABLE session_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, device_id TEXT, session_id TEXT,
+                ts REAL, event TEXT, extra_json TEXT
+            );
+            CREATE UNIQUE INDEX idx_events_unique
+                ON session_events(device_id, session_id, ts, event);
+            CREATE TABLE audit_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, actor TEXT, action TEXT,
+                target TEXT, device_id TEXT, detail TEXT
+            );
+        """)
+        conn.execute(
+            "INSERT INTO devices (id, name, role, version, claude_version, last_seen, online) "
+            "VALUES ('local', 'hub', 'full', '1', '1', 100.0, 1)")
+        conn.execute(
+            "INSERT INTO sessions (device_id, session_id, name, cwd, kind, state, started_at, "
+            "ended_at, last_seen, external, status) VALUES "
+            "('local', 's1', 'rc-old', '/tmp', 'interactive', 'idle', 100.0, NULL, 100.0, 0, "
+            "'busy')")
+        conn.commit()
+        conn.close()
+        os.chmod(old_db, 0o600)
+
+        migrated = store.Store(old_db)
+        try:
+            view = migrated.fleet_view()
+            self.assertEqual(len(view["sessions"]), 1)
+            self.assertEqual(view["sessions"][0]["name"], "rc-old")
+            self.assertIsNone(view["sessions"][0]["usage"])  # table is new, empty
+
+            migrated.upsert_session_usage("local", [
+                {"session_id": "s1", "input": 1, "cache_read": 2, "cache_write": 3,
+                 "output": 4, "effective": 5, "last_ts": 200.0},
+            ])
+            migrated.upsert_cost_daily("local", [
+                {"day": _day(0), "project": "p1", "input": 1, "cache_read": 2,
+                 "cache_write": 3, "output": 4, "effective": 5},
+            ])
+            migrated.replace_alerts([
+                {"rule": "token_rate", "severity": "warn", "device_id": "local",
+                 "session_id": "s1", "name": "rc-old", "message": "m", "value": 1.0,
+                 "threshold": 2.0, "since": 100.0},
+            ])
+
+            view2 = migrated.fleet_view()
+            self.assertEqual(view2["sessions"][0]["usage"]["effective"], 5)
+            cost = migrated.cost_view(days=30)
+            dev = next(d for d in cost["devices"] if d["device_id"] == "local")
+            self.assertEqual(dev["total_effective"], 5)
+            self.assertEqual(len(migrated.live_alerts()), 1)
         finally:
             migrated.close()
 
