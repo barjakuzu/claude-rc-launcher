@@ -15,7 +15,9 @@ CLAUDE_BIN = os.path.expanduser(os.environ.get("RC_CLAUDE_BIN", "claude"))
 AUTH_USER = os.environ.get("RC_AUTH_USER", "")
 AUTH_PASS = os.environ.get("RC_AUTH_PASS", "")
 RC_ROLE = os.environ.get("RC_ROLE", "full")
-RC_HASH_SALT = os.environ.get("RC_HASH_SALT", "")
+if RC_ROLE not in ("full", "metadata"):
+    print(f"Warning: invalid RC_ROLE={RC_ROLE!r}, defaulting to 'full'")
+    RC_ROLE = "full"
 SHELL_BIN = os.environ.get("RC_SHELL_BIN") or os.environ.get("SHELL") or "/bin/bash"
 RC_TRUSTED_PROXIES = set(
     p.strip() for p in os.environ.get("RC_TRUSTED_PROXIES", "127.0.0.1,::1").split(",")
@@ -101,3 +103,40 @@ try:
 except OSError:
     pass
 os.makedirs(os.path.join(RC_HOME, "logs"), exist_ok=True)
+
+_ENV_FILE = os.path.join(RC_HOME, "env")
+
+
+def _load_or_create_hash_salt():
+    """RC_HASH_SALT, generated once into ~/.claude-rc/env (0600) if
+    absent -- mirrors devices.py's device-name file pattern. Read order:
+    explicit env var, then the persisted file, then generate fresh."""
+    env_var = os.environ.get("RC_HASH_SALT", "").strip()
+    if env_var:
+        return env_var
+    existing = None
+    try:
+        with open(_ENV_FILE) as f:
+            for line in f:
+                if line.startswith("RC_HASH_SALT="):
+                    existing = line.strip().split("=", 1)[1]
+                    break
+    except OSError:
+        pass
+    if existing:
+        return existing
+    import secrets
+    salt = secrets.token_hex(32)
+    line = f"RC_HASH_SALT={salt}\n"
+    try:
+        fd = os.open(_ENV_FILE, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        with os.fdopen(fd, "a") as f:
+            f.write(line)
+        os.chmod(_ENV_FILE, 0o600)
+    except OSError:
+        pass
+    return salt
+
+
+RC_HASH_SALT = _load_or_create_hash_salt()
+os.environ.setdefault("RC_HASH_SALT", RC_HASH_SALT)

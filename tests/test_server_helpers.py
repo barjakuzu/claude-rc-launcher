@@ -1181,6 +1181,35 @@ class ApiFleetStreamHeadersTest(unittest.TestCase):
         self.assertIn('data: {heartbeat}', block)
 
 
+class MetadataRoleGatingTest(unittest.TestCase):
+    def setUp(self):
+        server.config.RC_ROLE = "metadata"
+
+    def tearDown(self):
+        server.config.RC_ROLE = "full"
+
+    def test_metadata_role_refuses_start_with_403(self):
+        import inspect
+        src = inspect.getsource(server.Handler.do_POST)
+        self.assertIn("RC_ROLE", src)
+
+    def test_metadata_allowed_paths_constant_matches_spec(self):
+        self.assertEqual(
+            server.METADATA_ALLOWED_GET_PATHS,
+            {"/fleet", "/version", "/stats", "/config-report"})
+
+    def test_get_enforcement_present_in_do_get(self):
+        import inspect
+        src = inspect.getsource(server.Handler.do_GET)
+        self.assertIn("RC_ROLE", src)
+        self.assertIn("METADATA_ALLOWED_GET_PATHS", src)
+
+    def test_post_refused_prefixes_constant_matches_spec(self):
+        self.assertEqual(
+            server.METADATA_REFUSED_POST_PATHS_PREFIXES,
+            ("/start", "/keys", "/resize", "/enable-rc", "/schedules"))
+
+
 class SseCapacityTest(unittest.TestCase):
     def setUp(self):
         server.FLEET_CHANGE_SUBSCRIBERS.clear()

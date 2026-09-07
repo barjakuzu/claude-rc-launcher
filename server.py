@@ -23,6 +23,7 @@ import uuid
 from http.cookies import SimpleCookie
 from urllib.parse import urlparse, parse_qs
 
+import config
 from config import (
     VERSION, HOST, PORT, SESSION_PREFIX, WORKING_DIR, CLAUDE_BIN,
     AUTH_USER, AUTH_PASS, RC_FLAGS, MODEL_MAP, SHELL_BIN, SHELL_MODE,
@@ -122,6 +123,12 @@ _LOG = logging.getLogger(__name__)
 HUB_STORE = None  # set by app.py at startup; store.Store instance
 
 SSE_HEARTBEAT_SECONDS = 20
+
+# RC_ROLE="metadata" enforcement: a metadata device serves only fleet
+# roll-up/health data, never session control, terminal, or transcript
+# content. See docs/DEVICES.md.
+METADATA_ALLOWED_GET_PATHS = {"/fleet", "/version", "/stats", "/config-report"}
+METADATA_REFUSED_POST_PATHS_PREFIXES = ("/start", "/keys", "/resize", "/enable-rc", "/schedules")
 # ThreadingHTTPServer spins up one thread per open connection; an
 # unbounded number of open /api/fleet/stream connections is an easy way
 # to exhaust threads. Above this many concurrent subscribers, new
@@ -1142,6 +1149,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if not _check_auth(self):
             return _send_auth_required(self)
 
+        if config.RC_ROLE == "metadata":
+            clean = self.path.split('?')[0]
+            local_path = clean[3:] if clean.startswith("/rc") else clean
+            if (local_path not in METADATA_ALLOWED_GET_PATHS and local_path not in ("/", "/legacy")
+                    and not local_path.startswith("/static/") and not local_path.startswith("/rc/static/")
+                    or local_path.endswith("/ws") or local_path.endswith("/preview")):
+                return self._json({"ok": False, "message": "This device is metadata-role only"}, 403)
+
         # Route to a remote device if one is selected.
         dev_id = self._target_device()
         if self._should_proxy(dev_id):
@@ -1583,6 +1598,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         if not _check_auth(self):
             return _send_auth_required(self)
+
+        if config.RC_ROLE == "metadata":
+            clean = self.path.split('?')[0]
+            local_path = clean[3:] if clean.startswith("/rc") else clean
+            if local_path.startswith(METADATA_REFUSED_POST_PATHS_PREFIXES) or local_path in (
+                    "/stop", "/stop-all", "/restart", "/unstick", "/ws", "/preview"):
+                return self._json({"ok": False, "message": "This device is metadata-role only"}, 403)
 
         # Route to a remote device if one is selected.
         dev_id = self._target_device()

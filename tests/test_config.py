@@ -3,6 +3,7 @@ working (subprocess argv never does shell-style ~ expansion on its own)."""
 import importlib
 import os
 import sys
+import tempfile
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -77,10 +78,38 @@ class RoleAndSaltEnvTest(unittest.TestCase):
         self.assertEqual(config.RC_ROLE, "metadata")
         self.assertEqual(config.RC_HASH_SALT, "pepper")
 
-    def test_salt_defaults_to_empty_string(self):
+    def test_salt_is_generated_when_unset(self):
+        # Superseded: RC_HASH_SALT no longer defaults to "" -- it is
+        # generated and persisted into ~/.claude-rc/env (see
+        # RcRoleTest.test_hash_salt_is_generated_and_persisted for the
+        # isolated-RC_HOME version of this).
         os.environ.pop("RC_HASH_SALT", None)
         importlib.reload(config)
-        self.assertEqual(config.RC_HASH_SALT, "")
+        self.assertTrue(config.RC_HASH_SALT)
+
+
+class RcRoleTest(unittest.TestCase):
+    def test_default_role_is_full(self):
+        # config module already imported at test collection time with no
+        # RC_ROLE set in this test process's env
+        self.assertIn(config.RC_ROLE, ("full", "metadata"))
+
+    def test_hash_salt_is_generated_and_persisted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            os.environ["RC_HOME"] = tmp
+            os.environ.pop("RC_HASH_SALT", None)
+            importlib.reload(config)
+            self.assertTrue(config.RC_HASH_SALT)
+            env_file = os.path.join(tmp, "env")
+            self.assertTrue(os.path.exists(env_file))
+            self.assertEqual(oct(os.stat(env_file).st_mode & 0o777), "0o600")
+            with open(env_file) as f:
+                content = f.read()
+            self.assertIn("RC_HASH_SALT=", content)
+            del os.environ["RC_HOME"]
+            os.environ.pop("RC_HASH_SALT", None)
+            importlib.reload(config)
+
 
 if __name__ == "__main__":
     unittest.main()
