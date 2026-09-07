@@ -1634,6 +1634,33 @@ class ApiCostRouteTest(_ApiRouteFixture):
         self.assertEqual(code, 200)
         self.assertEqual(data["days"], 365)
 
+    def test_days_scientific_notation_overflow_also_clamps_to_maximum(self):
+        # Fix round 1 (Minor): float("1e400") saturates to +inf (Python's
+        # float parser does this for any string whose magnitude exceeds
+        # double range, whichever notation produced it) -- this used to
+        # take a different path than the digit-string case above (an
+        # OverflowError out of int(inf), caught and silently defaulted to
+        # 30 instead of clamped to 365). Same magnitude, same result now.
+        data, code = self._get_json("/api/cost?days=1e400")
+        self.assertEqual(code, 200)
+        self.assertEqual(data["days"], 365)
+
+    def test_days_huge_digit_string_matches_scientific_notation(self):
+        huge = "9" * 400
+        data, code = self._get_json(f"/api/cost?days={huge}")
+        self.assertEqual(code, 200)
+        self.assertEqual(data["days"], 365)
+
+    def test_days_negative_scientific_notation_overflow_clamps_to_minimum(self):
+        data, code = self._get_json("/api/cost?days=-1e400")
+        self.assertEqual(code, 200)
+        self.assertEqual(data["days"], 1)
+
+    def test_days_nan_defaults_rather_than_500(self):
+        data, code = self._get_json("/api/cost?days=nan")
+        self.assertEqual(code, 200)
+        self.assertEqual(data["days"], 30)
+
     def test_empty_store_returns_empty_shape_not_an_error(self):
         data, code = self._get_json("/api/cost")
         self.assertEqual(code, 200)

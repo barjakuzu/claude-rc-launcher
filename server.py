@@ -8,6 +8,7 @@ import http.server
 import ipaddress
 import json
 import logging
+import math
 import os
 import re
 import secrets
@@ -144,14 +145,29 @@ def _parse_cost_days(qs):
     [COST_DAYS_MIN, COST_DAYS_MAX], always -- absent, empty, or
     unparseable clamps to COST_DAYS_DEFAULT (there is no sane direction to
     clamp garbage input toward); a parseable but out-of-range number
-    clamps to the nearer bound instead. Never raises."""
+    clamps to the nearer bound instead. Never raises.
+
+    Fix round 1 (Minor): float(raw) itself never raises for an
+    over-large-but-numeric string -- Python's float parser saturates to
+    +-inf rather than overflowing (true whether the string is "1e400" or
+    a 400-digit literal, same magnitude, same result). Checking for that
+    BEFORE the int() conversion, rather than only catching int(inf)'s
+    OverflowError afterward, is what makes "absurdly large" behave the
+    same regardless of which digit-count/notation produced it: both
+    forms now clamp to COST_DAYS_MAX, instead of one clamping and the
+    other silently falling back to COST_DAYS_DEFAULT."""
     raw = qs.get("days", [None])[0]
     if raw is None or raw == "":
         return COST_DAYS_DEFAULT
     try:
-        value = int(float(raw))
-    except (TypeError, ValueError, OverflowError):
+        value = float(raw)
+    except (TypeError, ValueError):
         return COST_DAYS_DEFAULT
+    if math.isnan(value):
+        return COST_DAYS_DEFAULT
+    if math.isinf(value):
+        return COST_DAYS_MAX if value > 0 else COST_DAYS_MIN
+    value = int(value)
     if value < COST_DAYS_MIN:
         return COST_DAYS_MIN
     if value > COST_DAYS_MAX:
