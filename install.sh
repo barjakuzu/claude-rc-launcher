@@ -6,6 +6,8 @@
 # Re-running this script updates an existing installation via git pull.
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 RC_HOME="$HOME/.claude-rc"
 APP_DIR="$RC_HOME/app"
 CONFIG_FILE="$RC_HOME/env"
@@ -308,6 +310,18 @@ exec python3 "$APP_DIR/app.py" "$@"
 WRAPPER
 chmod +x "$BIN_LINK"
 ok "Created wrapper at $BIN_LINK"
+
+# ── rc-hook (Claude Code hook event spooler) ─────────────────────────
+
+mkdir -p "$RC_HOME/bin"
+mkdir -p "$RC_HOME/events"
+chmod 700 "$RC_HOME/bin"
+chmod 700 "$RC_HOME/events"
+cp "$SCRIPT_DIR/hooks/rc-hook" "$RC_HOME/bin/rc-hook"
+chmod 700 "$RC_HOME/bin/rc-hook"
+ok "Installed hook spooler at $RC_HOME/bin/rc-hook"
+echo "  To enable fleet event visibility, merge docs/hooks/settings.snippet.json"
+echo "  into your ~/.claude/settings.json (see README.md 'Hook events')."
 
 # ── PATH setup ──────────────────────────────────────────────────────
 
