@@ -7,6 +7,7 @@ import { Dot, Icons } from './primitives';
 import { btn } from './btn';
 import { api } from '../api';
 import { ShareTunnel } from './ShareTunnel';
+import { AlertsIndicator } from './AlertsIndicator';
 
 // ─── Props ───────────────────────────────────────────────────────────────────
 
@@ -512,6 +513,9 @@ export function Header({ cards, openId, setOpenId, layout, onRefresh }: HeaderPr
             <span style={{ padding: '0px 5px', border: `1px solid ${RT.border}`, borderRadius: 3, fontSize: 11 }}>⌘K</span>
           </div>
         )}
+
+        {/* Alerts indicator: hidden entirely when clean */}
+        <AlertsIndicator />
 
         {/* Share tunnel button */}
         <button
