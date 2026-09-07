@@ -2,6 +2,7 @@
 
 import base64
 import compat
+import fleet
 import hmac
 import http.server
 import ipaddress
@@ -1029,6 +1030,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 resp["errors"] = errors
             self._json(resp)
 
+        elif path.split('?')[0] == "/fleet":
+            from urllib.parse import parse_qs
+            qs = parse_qs(urlparse(self.path).query)
+            since = qs.get("since", [None])[0]
+            self._json(fleet.build_fleet(since=since))
+
         elif path.split('?')[0].startswith("/sessions/") and path.split('?')[0].endswith("/ws"):
             # Live terminal WebSocket (see ws.py). Takes over the socket.
             clean = path.split('?')[0]
@@ -1754,7 +1761,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if path in ("/rc/sessions", "/rc/tunnel/status", "/rc/projects",
                      "/rc/browse", "/rc/schedules", "/rc/version",
                      "/rc/resume/sessions", "/rc/stats", "/rc/overview",
-                     "/rc/config-report", "/api/config-matrix") or \
+                     "/rc/config-report", "/api/config-matrix", "/rc/fleet") or \
                 path.startswith("/rc/static/") or path.startswith("/static/") or \
                 path.startswith("/rc/jobs/") or "/preview" in path:
             return

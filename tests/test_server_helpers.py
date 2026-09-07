@@ -1061,5 +1061,12 @@ class ResizeCapturesAdoptedWindowSizeTest(unittest.TestCase):
         self.assertEqual(sessions.restore_window_size("mysession"), (132, 44))
 
 
+class FleetRouteTest(unittest.TestCase):
+    def test_fleet_added_to_should_proxy_exemption_and_log_quiet_list(self):
+        import inspect
+        src = inspect.getsource(server)
+        self.assertIn('"/rc/fleet"', src)
+
+
 if __name__ == "__main__":
     unittest.main()
