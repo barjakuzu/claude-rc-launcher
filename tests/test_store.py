@@ -323,9 +323,15 @@ class StoreTest(unittest.TestCase):
 
 
 class UpsertSessionsStartedAtTest(unittest.TestCase):
-    """upsert_sessions: the stored started_at becomes the earliest known
-    non-null of {existing, reported}. 0, negative, NaN and inf all count
-    as "not set", the same as None."""
+    """upsert_sessions: a valid reported started_at WINS OUTRIGHT over
+    whatever is already stored, regardless of which is earlier -- min()
+    was tried and rejected here too (see store.upsert_sessions' docstring):
+    restart-in-place reuses the session id, so the row never goes through
+    "ended" between the restart and the next poll, and a stale existing
+    value would otherwise permanently outrank the new session's own,
+    correct, more recent started_at. Existing is used only when THIS
+    poll's reported value is not usable. 0, negative, NaN and inf all
+    count as "not set", the same as None."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -369,7 +375,9 @@ class UpsertSessionsStartedAtTest(unittest.TestCase):
         ], now_fn=lambda: 600.0)
         self.assertEqual(self._started_at(), 300.0)
 
-    def test_both_set_keeps_the_earlier(self):
+    def test_reported_wins_over_an_older_existing_value(self):
+        # The reported value (300.0) is EARLIER than what's already stored
+        # (900.0) -- still wins outright, same as any other reported value.
         self.store.upsert_sessions("local", [
             {"session_id": "s1", "name": "rc-a", "cwd": "/tmp", "kind": "interactive",
              "state": "idle", "started_at": 900.0},
@@ -380,7 +388,14 @@ class UpsertSessionsStartedAtTest(unittest.TestCase):
         ], now_fn=lambda: 1100.0)
         self.assertEqual(self._started_at(), 300.0)
 
-    def test_a_later_reported_time_does_not_move_the_stored_value_forward(self):
+    def test_reported_wins_over_a_newer_existing_value_restart_in_place(self):
+        # The exact restart-in-place bug from fix round 2: the row keeps
+        # its session id across a restart (never goes "ended"), so a stale
+        # existing value (300.0, from long before the restart) would
+        # otherwise permanently outrank the new session's own, later,
+        # started_at (9999.0) if it lost a min() comparison. It must not:
+        # the later reported value wins outright and moves the stored
+        # value FORWARD, replacing the stale one.
         self.store.upsert_sessions("local", [
             {"session_id": "s1", "name": "rc-a", "cwd": "/tmp", "kind": "interactive",
              "state": "idle", "started_at": 300.0},
@@ -389,7 +404,7 @@ class UpsertSessionsStartedAtTest(unittest.TestCase):
             {"session_id": "s1", "name": "rc-a", "cwd": "/tmp", "kind": "interactive",
              "state": "idle", "started_at": 9999.0},
         ], now_fn=lambda: 1100.0)
-        self.assertEqual(self._started_at(), 300.0)
+        self.assertEqual(self._started_at(), 9999.0)
 
     def test_reported_zero_is_treated_as_not_set(self):
         # upsert_sessions itself must never let a bare 0 win -- it falls
@@ -403,8 +418,8 @@ class UpsertSessionsStartedAtTest(unittest.TestCase):
     def test_stored_zero_loses_to_a_real_reported_timestamp(self):
         # Simulate a legacy row that already has a bare 0 stored directly
         # (bypassing upsert_sessions, which would never write one itself)
-        # -- a real reported timestamp must still win a min() against it,
-        # per the brief's explicit "a stored 0 must not win" requirement.
+        # -- a real reported timestamp must still win outright, per the
+        # brief's explicit "a stored 0 must not win" requirement.
         def _insert_raw(conn):
             conn.execute(
                 "INSERT INTO sessions (device_id, session_id, name, cwd, kind, state, "
@@ -434,10 +449,15 @@ class UpsertSessionsStartedAtTest(unittest.TestCase):
                 self.assertEqual(self._started_at(), 300.0)
 
     def test_backfill_path_moves_stored_value_back_to_a_real_earlier_timestamp(self):
-        """A row inserted with no started_at lands on `now`. A later
-        upsert reporting the real (earlier) claude/tmux timestamp must
-        move the stored value BACK to it -- this is the exact repair the
-        live hub.db needs for every row already in it."""
+        """A row inserted with no started_at lands on `now` (a
+        first-sighting guess). A later upsert reporting the real (earlier)
+        claude/tmux timestamp must move the stored value BACK to it -- the
+        reported value wins outright, so this falls out of the same rule
+        that fixes restart-in-place, and it is the exact repair the live
+        hub.db needs for every row already in it. This is also why the
+        reported-wins rule cannot simply ignore existing altogether: this
+        path still needs `now` as a placeholder until a real value shows
+        up, which is existing's other job (see the invalid/invalid case)."""
         now = 1757000000.0  # a realistic epoch "now", not a small test offset
         self.store.upsert_sessions("local", [
             {"session_id": "s1", "name": "rc-a", "cwd": "/tmp", "kind": "interactive",
@@ -467,10 +487,14 @@ class UpsertSessionsStartedAtTest(unittest.TestCase):
 class RecreatedSessionStartedAtTest(unittest.TestCase):
     """A (device_id, session_id) pair can be reused -- most commonly a
     synthetic tmux:<name> id, reassigned the moment a tmux session of that
-    name is recreated. The dead row's started_at must not be inherited by
-    the new session (neither kept outright nor min-ed against it), or a
-    session recreated seconds ago would permanently read as however old
-    the previous occupant of that id happened to be."""
+    name is recreated. A LONG-dead row's started_at must not be inherited
+    by the new session (neither kept outright nor min-ed against it), or a
+    session recreated well after the old one ended would permanently read
+    as however old the previous occupant of that id happened to be. A
+    row ended only moments ago (within store.ENDED_ROW_GRACE_SECONDS) is
+    treated differently -- see FlickeredRowStartedAtTest below -- since
+    that's more likely the same session flickering than a real
+    end-then-recreate."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -513,15 +537,20 @@ class RecreatedSessionStartedAtTest(unittest.TestCase):
         self.assertIsNone(result["sessions"][0]["ended_at"])
 
     def test_recreated_session_with_no_reported_started_at_falls_back_to_now_not_dead_value(self):
+        # The gap between the old row ending and the new sighting is well
+        # past store.ENDED_ROW_GRACE_SECONDS -- a genuinely new session
+        # reusing the id, not the same session flickering (contrast with
+        # FlickeredRowStartedAtTest, where a short gap keeps the old value).
         old_now = 1757000000.0
         old_started = old_now - 20 * 86400
         self.store.upsert_sessions("local", [
             {"session_id": "tmux:rc-alpha", "name": "rc-alpha", "cwd": "/tmp",
              "kind": "interactive", "state": "idle", "started_at": old_started},
         ], now_fn=lambda: old_now)
-        self.store.upsert_sessions("local", [], now_fn=lambda: old_now + 10.0)
+        ended_at = old_now + 10.0
+        self.store.upsert_sessions("local", [], now_fn=lambda: ended_at)
 
-        new_now = old_now + 15.0
+        new_now = ended_at + store.ENDED_ROW_GRACE_SECONDS + 60.0
         self.store.upsert_sessions("local", [
             {"session_id": "tmux:rc-alpha", "name": "rc-alpha", "cwd": "/tmp",
              "kind": "interactive", "state": "idle"},  # no started_at reported
@@ -529,6 +558,76 @@ class RecreatedSessionStartedAtTest(unittest.TestCase):
 
         result = self.store.fleet_view()
         self.assertEqual(result["sessions"][0]["started_at"], new_now)
+
+
+class FlickeredRowStartedAtTest(unittest.TestCase):
+    """Fix round 2, Minor 2: a row can drop out of a single poll's `rows`
+    without the underlying session having stopped (e.g. `claude agents
+    --json` timing out, which empties every external row for that poll --
+    see agents._fetch_rows). The end-of-sweep in upsert_sessions marks it
+    ended_at=now regardless. If the row reappears within
+    store.ENDED_ROW_GRACE_SECONDS and still has no usable reported
+    started_at, its own (recently-ended) started_at must be kept -- not
+    reset to `now` -- or a flaky claude build would restart a real
+    session's clock on every hiccup."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db_path = os.path.join(self.tmp.name, "hub.db")
+        self.store = store.Store(self.db_path)
+        self.store.upsert_device({"id": "local", "name": "hub", "role": "full",
+                                   "version": "1", "claude_version": "1"})
+
+    def tearDown(self):
+        self.store.close()
+        self.tmp.cleanup()
+
+    def test_flickered_row_within_grace_window_keeps_its_started_at(self):
+        old_now = 1757000000.0
+        old_started = old_now - 12 * 86400  # a 12-day-old session
+        self.store.upsert_sessions("local", [
+            {"session_id": "s1", "name": "rc-a", "cwd": "/tmp", "kind": "interactive",
+             "state": "idle", "started_at": old_started},
+        ], now_fn=lambda: old_now)
+
+        # A flicker: the row drops out of one poll (marks it ended)...
+        ended_at = old_now + 30.0
+        self.store.upsert_sessions("local", [], now_fn=lambda: ended_at)
+        # ...then reappears well within the grace window, still without a
+        # usable reported started_at.
+        self.assertLess(store.ENDED_ROW_GRACE_SECONDS, 3600)  # sanity: grace is short
+        flicker_now = ended_at + 15.0
+        self.store.upsert_sessions("local", [
+            {"session_id": "s1", "name": "rc-a", "cwd": "/tmp", "kind": "interactive",
+             "state": "idle"},  # no started_at reported
+        ], now_fn=lambda: flicker_now)
+
+        result = self.store.fleet_view()
+        self.assertEqual(result["sessions"][0]["started_at"], old_started)
+        self.assertIsNone(result["sessions"][0]["ended_at"])
+
+    def test_20_flicker_cycles_do_not_reset_a_12_day_age(self):
+        start = 1757000000.0
+        old_started = start - 12 * 86400
+        self.store.upsert_sessions("local", [
+            {"session_id": "s1", "name": "rc-a", "cwd": "/tmp", "kind": "interactive",
+             "state": "idle", "started_at": old_started},
+        ], now_fn=lambda: start)
+
+        t = start
+        for _ in range(20):
+            t += 15.0
+            self.store.upsert_sessions("local", [], now_fn=lambda: t)  # flicker: row vanishes
+            t += 15.0
+            self.store.upsert_sessions("local", [
+                {"session_id": "s1", "name": "rc-a", "cwd": "/tmp", "kind": "interactive",
+                 "state": "idle"},  # reappears, still no usable started_at
+            ], now_fn=lambda: t)
+
+        result = self.store.fleet_view()
+        self.assertEqual(len(result["sessions"]), 1)
+        self.assertEqual(result["sessions"][0]["started_at"], old_started)
+        self.assertIsNone(result["sessions"][0]["ended_at"])
 
 
 class SessionsStatusColumnTest(unittest.TestCase):

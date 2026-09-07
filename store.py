@@ -25,7 +25,7 @@ _LOG = logging.getLogger(__name__)
 def _valid_started_at(value):
     """True if `value` is a usable started_at: a finite, positive number.
     0, negative, NaN and inf (and None, and non-numbers) are all "not
-    set" -- a stored 0 must never win a min() against a real timestamp.
+    set" and must never be treated as a real timestamp.
     Never raises: math.isfinite() itself raises OverflowError on an int
     with roughly 308+ digits (too large to convert to a C double), which
     is caught here rather than left to escape upsert_sessions."""
@@ -37,6 +37,21 @@ def _valid_started_at(value):
         return math.isfinite(value) and value > 0
     except OverflowError:
         return False
+
+
+# A row can go missing from a single poll's `rows` without the underlying
+# session actually having stopped -- e.g. `claude agents --json` timing out
+# (agents._fetch_rows returns [] on a timeout) drops every external row for
+# that poll, which the end-of-sweep below marks ended_at=now even though
+# nothing really ended. If the very next poll(s) also report an invalid
+# started_at (an older `claude` build simply omitting startedAt, say), a
+# recently-ended row's own started_at is still the honest answer -- it's
+# the same session flickering, not a new one reusing the id. A row that's
+# been ended for longer than this grace window IS treated as a new session
+# (see upsert_sessions): fleetpoll's default poll interval is 30s, so this
+# covers a couple of missed polls' worth of jitter/backoff without
+# resurrecting a genuinely dead session's clock onto its replacement.
+ENDED_ROW_GRACE_SECONDS = 90
 
 
 class StoreClosed(RuntimeError):
@@ -258,35 +273,51 @@ class Store:
 
     def upsert_sessions(self, device_id, rows, now_fn=time.time):
         """Replace this device's live-session view: rows present are
-        upserted (started_at becomes the earliest known non-null of the
-        stored value and the newly reported one -- see _valid_started_at);
-        rows in the DB for this device but absent from `rows` get ended_at
-        set, exactly once (only rows that were still live, ended_at IS
-        NULL, transition).
+        upserted; rows in the DB for this device but absent from `rows`
+        get ended_at set, exactly once (only rows that were still live,
+        ended_at IS NULL, transition).
 
-        started_at resolution (existing = the started_at of a still-LIVE
-        stored row for this (device_id, session_id) -- an ENDED row does
-        not count as existing, see below; reported = r's started_at; both
-        run through _valid_started_at first):
-        - existing invalid, reported invalid: now (first sighting, no
-          usable timestamp from either side yet).
-        - existing invalid, reported valid: reported (the backfill path
-          that repairs a row stored before this timestamp existed).
-        - existing valid, reported invalid: existing, unchanged.
-        - both valid: min(existing, reported) -- a later reported time
-          must never move the stored value forward.
+        started_at resolution (reported = r's started_at; existing = the
+        started_at of a stored row for this (device_id, session_id), only
+        trusted per the ended-row rule below; both run through
+        _valid_started_at first):
+        - reported valid: reported WINS OUTRIGHT, whether it's earlier or
+          later than whatever is already stored. This is deliberate, not
+          a min()/earliest-of-two rule (that rule was tried and rejected
+          at the device layer in agents.py/sessions.py, and reapplying it
+          here -- across polls instead of across sources -- reintroduces
+          the exact same bug: restart-in-place reuses RC_SESSION_ID, so
+          the row never goes through "ended" between the restart and the
+          next poll, and a stale stored value would otherwise permanently
+          outrank the new session's own, correct, much more recent
+          started_at. The reported value comes from claude's own
+          startedAt, which is stable per session, so trusting it outright
+          is the right side to err on: the alternative (under-reporting a
+          session's age for one poll if a device ever reports a jittery
+          timestamp) is far cheaper than a false runaway flag or an
+          unwanted kill from a stale value that never gets corrected.
+        - reported invalid, existing valid AND trustworthy: existing,
+          unchanged. This is the backfill path that repairs a row stored
+          before this field existed (or before a real timestamp was ever
+          reported) -- it stays correct because it is reached only when
+          THIS poll didn't carry a usable value.
+        - reported invalid, no trustworthy existing value: now.
 
-        A (device_id, session_id) pair can be reused: a synthetic
-        tmux:<name> id in particular is reassigned the moment a tmux
-        session of that name is recreated, and the old row's ended_at is
-        still set at that point (the sweep below only clears it once the
-        new sighting's INSERT/UPDATE runs). The started_at lookup only
-        considers a row with ended_at IS NULL "existing" -- otherwise a
-        session recreated seconds ago would inherit whatever started_at
-        the dead session under the same id happened to have, permanently
-        (that dead value would either be kept outright or win a min()
-        against the new session's real, much more recent, reported time).
-        Reusing an id is a new session as far as started_at is concerned.
+        "Trustworthy existing" means a row that is either still live
+        (ended_at IS NULL) or was ended within ENDED_ROW_GRACE_SECONDS of
+        `now`. A row can go missing from a single poll's `rows` without
+        the underlying session having actually stopped (a `claude agents
+        --json` timeout drops every external row for that poll -- see
+        agents._fetch_rows), which the end-of-sweep below marks
+        ended_at=now even though nothing really ended; if the very next
+        poll(s) also report an invalid started_at, the recently-ended
+        row's own started_at is still the honest answer for the SAME
+        session flickering. A row ended longer ago than the grace window
+        is instead treated as a genuinely new session reusing the id (the
+        common case: a synthetic tmux:<name> id reassigned once a tmux
+        session of that name is recreated) and gets its own clock -- its
+        stale started_at must not be inherited, whether kept outright or
+        (as it was before this fix) min()'d against a real reported value.
 
         A row without `session_id` is not a valid natural key (falling back
         to `name` risks colliding two distinct sessions, or an accidental
@@ -306,22 +337,24 @@ class Store:
                         device_id, r.get("name"))
                     continue
                 seen_ids.add(sid)
-                existing = conn.execute(
-                    "SELECT started_at FROM sessions WHERE device_id=? AND session_id=? "
-                    "AND ended_at IS NULL",
-                    (device_id, sid)).fetchone()
-                existing_started = existing["started_at"] if existing else None
-                existing_valid = existing_started if _valid_started_at(existing_started) else None
                 reported_started = r.get("started_at")
                 reported_valid = reported_started if _valid_started_at(reported_started) else None
-                if existing_valid is not None and reported_valid is not None:
-                    started_at = min(existing_valid, reported_valid)
-                elif existing_valid is not None:
-                    started_at = existing_valid
-                elif reported_valid is not None:
+                if reported_valid is not None:
                     started_at = reported_valid
                 else:
-                    started_at = now
+                    existing = conn.execute(
+                        "SELECT started_at, ended_at FROM sessions "
+                        "WHERE device_id=? AND session_id=?",
+                        (device_id, sid)).fetchone()
+                    trustworthy = existing is not None and (
+                        existing["ended_at"] is None
+                        or (now - existing["ended_at"]) <= ENDED_ROW_GRACE_SECONDS
+                    )
+                    existing_started = existing["started_at"] if trustworthy else None
+                    existing_valid = (
+                        existing_started if _valid_started_at(existing_started) else None
+                    )
+                    started_at = existing_valid if existing_valid is not None else now
                 conn.execute(
                     "INSERT INTO sessions (device_id, session_id, name, cwd, kind, state, "
                     "started_at, ended_at, last_seen, external, pid, tmux, rc_url, tokens, "
