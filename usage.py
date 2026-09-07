@@ -52,6 +52,15 @@ MAX_CONSECUTIVE_STALLS = 3
 # evicted first once this is exceeded.
 MAX_CACHE_ENTRIES = 2000
 
+# Cap on daily_by_project's total row count (days x projects, not just
+# days): a box with 40 project directories over a 30 day window is 1200
+# rows every poll, sent over the network by every device on every poll,
+# for a hub API that only ever surfaces the top 50 projects anyway. Kept
+# well above that (300, not 50) so the hub still has real choices to make
+# once it aggregates across every device rather than being handed an
+# already-pre-filtered single device's view. See rollup()'s docstring.
+MAX_DAILY_BY_PROJECT_ENTRIES = 300
+
 # Module-level cache, keyed by absolute transcript file path. An
 # OrderedDict so "least recently stat'ed" eviction is a cheap
 # move_to_end() on every visit plus a popitem(last=False) when over cap.
@@ -653,6 +662,16 @@ def rollup(root=None, max_bytes_per_call=DEFAULT_MAX_BYTES_PER_CALL,
     _new_entry), so this is one extra grouping pass, not a second read
     or parse. `daily` itself is unchanged: several callers already read
     it as the device-wide trend.
+
+    `daily_by_project` is capped at MAX_DAILY_BY_PROJECT_ENTRIES total
+    rows (days times projects, not per day), keeping the
+    highest-effective ones and dropping the rest, only when the real
+    count exceeds the cap: a box with many project directories would
+    otherwise multiply its 30 day window into a payload nobody asked
+    for. `daily_by_project_capped` says whether this call's list was
+    actually truncated, so a consumer can tell "this device really only
+    touched N projects" from "there's more, we cut it off" instead of a
+    silently-partial list looking complete.
     """
     root = _default_root() if root is None else root
     file_entries, discover_skipped = _discover_files(root)
@@ -840,10 +859,24 @@ def rollup(root=None, max_bytes_per_call=DEFAULT_MAX_BYTES_PER_CALL,
             if date_str > cutoff_str  # strict: `days` buckets, not days+1, same as daily_out
         ]
 
+        # Cap the TOTAL row count (days times projects), not per-day: see
+        # MAX_DAILY_BY_PROJECT_ENTRIES and the docstring. Only sorted (an
+        # O(n log n) pass) when actually over the cap, since the common
+        # case (a handful of projects) never needs it. The presentation
+        # order callers see (fleet.py re-sorts by day) doesn't depend on
+        # this sort surviving past this point, only WHICH rows survive
+        # does, so no second sort back to day order is needed here.
+        daily_by_project_capped = len(daily_by_project_out) > MAX_DAILY_BY_PROJECT_ENTRIES
+        if daily_by_project_capped:
+            daily_by_project_out.sort(key=lambda row: (row["day"], row["project"]))
+            daily_by_project_out.sort(key=lambda row: row["effective"], reverse=True)
+            daily_by_project_out = daily_by_project_out[:MAX_DAILY_BY_PROJECT_ENTRIES]
+
         return {
             "sessions": sessions_out,
             "daily": daily_out,
             "daily_by_project": daily_by_project_out,
+            "daily_by_project_capped": daily_by_project_capped,
             "generated_at": now,
             "files": len(file_entries) + discover_skipped,
             "bytes_read": total_bytes_read,
