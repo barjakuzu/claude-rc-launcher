@@ -10,7 +10,12 @@ import sessions
 
 EXTERNAL_ROW = {
     "session_id": "abc-123", "name": "portugal", "cwd": "/home/user/proj",
-    "kind": "interactive", "status": "idle", "started_at": 1757100000000,
+    "kind": "interactive", "status": "idle",
+    # Already-normalized epoch SECONDS, as agents.normalize_started_at
+    # would produce -- not the raw millisecond value `claude` reports.
+    # This fixture feeds directly into sessions.py (bypassing agents.py),
+    # so it must look like agents.py's output, not claude's raw input.
+    "started_at": 1757100000.0,
     "pid": 2003, "waiting_for": None, "state": None,
 }
 
@@ -311,10 +316,14 @@ class PaneMatchedRcRowMergeTest(unittest.TestCase):
 
 class AttachClaudeRowStartedAtTest(unittest.TestCase):
     """_attach_claude_row sets the launcher row's top-level started_at from
-    the (already-normalized, epoch seconds) claude row started_at, honestly
-    combined with tmux's own created_at -- see sessions._attach_claude_row
-    for the reasoning (tmux session creation can precede the claude
-    process, and a session restarted in place keeps its older tmux time)."""
+    the (already-normalized, epoch seconds) claude row started_at. A
+    claude started_at, when present, WINS OUTRIGHT over tmux's created_at
+    -- NOT the earlier of the two (min() was tried and rejected: a claude
+    session two minutes old inside a twelve-day-old tmux session, i.e.
+    restart-in-place, must report two minutes, not twelve days). tmux
+    created_at is used only as a fallback when there is no claude
+    started_at at all -- see sessions._attach_claude_row for the full
+    reasoning."""
 
     def test_sets_started_at_from_claude_row_when_no_tmux_created_at(self):
         launcher_row = {"name": "rc-portugal", "created_at": None}
@@ -322,17 +331,26 @@ class AttachClaudeRowStartedAtTest(unittest.TestCase):
         sessions._attach_claude_row(launcher_row, claude_row)
         self.assertEqual(launcher_row["started_at"], 500.0)
 
-    def test_prefers_earlier_claude_started_at_over_later_tmux_created_at(self):
+    def test_claude_started_at_wins_even_when_earlier_than_tmux_created_at(self):
         launcher_row = {"name": "rc-portugal", "created_at": 1000.0}
         claude_row = {"started_at": 500.0}
         sessions._attach_claude_row(launcher_row, claude_row)
         self.assertEqual(launcher_row["started_at"], 500.0)
 
-    def test_prefers_earlier_tmux_created_at_over_later_claude_started_at(self):
-        # Opposite ordering from the case above -- tmux's created_at is
-        # the earlier (more honest) value this time.
+    def test_claude_started_at_wins_even_when_later_than_tmux_created_at(self):
+        # The restart-in-place case: tmux's created_at is much OLDER
+        # (twelve days vs. two minutes in the real incident this guards
+        # against). The claude value must still win outright -- taking
+        # the minimum here would misreport a two-minute-old session as
+        # twelve days old.
         launcher_row = {"name": "rc-portugal", "created_at": 200.0}
         claude_row = {"started_at": 900.0}
+        sessions._attach_claude_row(launcher_row, claude_row)
+        self.assertEqual(launcher_row["started_at"], 900.0)
+
+    def test_falls_back_to_tmux_created_at_when_claude_started_at_is_none(self):
+        launcher_row = {"name": "rc-portugal", "created_at": 200.0}
+        claude_row = {"started_at": None}
         sessions._attach_claude_row(launcher_row, claude_row)
         self.assertEqual(launcher_row["started_at"], 200.0)
 

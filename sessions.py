@@ -259,13 +259,17 @@ def _attach_claude_row(launcher_row, claude_row):
     must win over a stale "busy".
 
     Also sets the row's top-level started_at from the claude row's
-    already-normalized (agents.normalize_started_at) value. tmux session
-    creation can precede the claude process starting (the pane exists
-    first), and a session restarted in place keeps its original tmux
-    created_at, so when both a tmux created_at and a claude started_at are
-    available the EARLIER of the two is the honest answer to "how long has
-    this been running". A known started_at is never overwritten with
-    None."""
+    already-normalized (agents.normalize_started_at) value. A claude
+    started_at, when present, WINS OUTRIGHT over tmux's created_at --
+    NOT the earlier of the two. Restart-in-place is exactly the case
+    where the old tmux created_at is not this session's age: a two-
+    minute-old claude process inside a twelve-day-old tmux session is a
+    two-minute-old session, and taking the minimum of the two would
+    misreport it as twelve days old (a false runaway flag, and later an
+    unwanted kill). tmux created_at is used only as a fallback when there
+    is no claude started_at at all. A known started_at is never
+    overwritten with None. created_at itself stays on the row unchanged
+    -- other code and the UI read it."""
     launcher_row["claude"] = {
         "status": claude_row.get("status"),
         "state": claude_row.get("state"),
@@ -279,9 +283,7 @@ def _attach_claude_row(launcher_row, claude_row):
         launcher_row["status"] = "busy"
     claude_started = claude_row.get("started_at")
     tmux_created = launcher_row.get("created_at")
-    if claude_started is not None and tmux_created is not None:
-        launcher_row["started_at"] = min(claude_started, tmux_created)
-    elif claude_started is not None:
+    if claude_started is not None:
         launcher_row["started_at"] = claude_started
     elif tmux_created is not None:
         launcher_row["started_at"] = tmux_created
