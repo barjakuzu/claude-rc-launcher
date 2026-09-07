@@ -88,6 +88,15 @@ class NormalizeStartedAtTest(unittest.TestCase):
         # relative/offset value, not a plausible epoch time.
         self.assertIsNone(agents.normalize_started_at(12345))
 
+    def test_huge_int_does_not_raise_overflow_error(self):
+        # An int with ~308+ digits can't convert to a float at all
+        # ("int too large to convert to float") -- must come back None,
+        # not escape as an OverflowError, per the "never raises" contract.
+        self.assertIsNone(agents.normalize_started_at(10 ** 400))
+
+    def test_huge_negative_int_does_not_raise_overflow_error(self):
+        self.assertIsNone(agents.normalize_started_at(-(10 ** 400)))
+
 
 RAW_JSON = '''[
   {"pid": 111, "cwd": "/home/user/proj", "kind": "interactive",

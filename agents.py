@@ -35,10 +35,18 @@ def normalize_started_at(value):
     if isinstance(value, str):
         try:
             value = float(value)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             return None
     elif isinstance(value, (int, float)):
-        value = float(value)
+        # An int with roughly 308+ digits can't convert to a float at all
+        # ("int too large to convert to float") -- not a plausible
+        # timestamp either way, so treat it the same as any other
+        # not-a-usable-value case instead of letting the OverflowError
+        # escape this function's "never raises" contract.
+        try:
+            value = float(value)
+        except OverflowError:
+            return None
     else:
         return None
     if not math.isfinite(value):
