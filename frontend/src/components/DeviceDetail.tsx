@@ -169,6 +169,7 @@ export function DeviceDetail({ device, cards, tab, setTab, onClose, layout }: De
           deviceId={device.id}
           name={previewName}
           mode={sessions.find((s) => s.name === previewName)?.mode}
+          sessionId={sessions.find((s) => s.name === previewName)?.session_id}
           onClose={() => setPreviewName(null)}
         />
       )}
