@@ -843,16 +843,20 @@ class PhantomEmptySessionTest(UsageTestCase):
 
 
 class BudgetStallRecoveryTest(UsageTestCase):
-    """Round 3: a single line larger than what one call's fair share of
-    the budget allows must still eventually complete, via the boosted
-    (at least max_bytes_per_call) allowance a file gets on the call after
-    it stalls. Two files: "sess-a" always has something small and new to
-    read and is kept newer-mtime (processed first) so it reliably eats a
-    fixed slice of the shared budget every call; "sess-b" is one line
-    just big enough to fit in a full max_bytes_per_call on its own, but
-    NOT in what's left over once "sess-a" goes first. Without the boost,
-    "sess-b" would never naturally get enough room, since the leftover
-    after "sess-a" is the same every call."""
+    """Round 3/4: a single line larger than what one call's fair share of
+    the budget allows must still eventually complete, once a call comes
+    along that can offer it the full max_bytes_per_call. Two files:
+    "sess-a" has something small to read and is kept newer-mtime
+    (processed first) so on a call where it has new content it eats into
+    the shared budget ahead of "sess-b"; "sess-b" is one line just big
+    enough to fit in a full max_bytes_per_call on its own, but NOT in
+    what's left over once "sess-a" goes first and spends some of it.
+    Call 1: "sess-a" has new content, "sess-b" stalls (round 4: the
+    allowance is now clamped to what this call actually has left, so a
+    stall while something else is competing for the SAME call's budget
+    is deferred, not force-completed at "sess-a"'s expense). Call 2:
+    "sess-a" is unchanged (nothing new, fast-pathed, costs nothing), so
+    "sess-b" gets the full budget to itself and completes."""
 
     def setUp(self):
         super().setUp()
@@ -865,7 +869,7 @@ class BudgetStallRecoveryTest(UsageTestCase):
         self._write(self.path_a, line, mode="a")
         return len(line.encode("utf-8"))
 
-    def test_stalled_file_completes_via_boosted_allowance_on_retry(self):
+    def test_stalled_file_completes_once_a_call_offers_the_full_budget(self):
         row_b = _usage_row(session_id="sess-b", msg_id="big-b", input_tokens=3, output=3)
         line_b = _line(row_b)
         self._write(self.path_b, line_b)
@@ -876,21 +880,20 @@ class BudgetStallRecoveryTest(UsageTestCase):
         os.utime(self.path_a, (2_000_000_100, 2_000_000_100))  # newer: processed first
 
         # Enough for "sess-b" alone, not enough once "sess-a" (processed
-        # first every call) has already spent a_chunk of it.
+        # first) has already spent a_chunk of it this call.
         budget = size_b + max(a_chunk // 2, 1)
         self.assertLess(budget - a_chunk, size_b)
 
         first = usage.rollup(root=self.root, max_bytes_per_call=budget)
         self.assertIn("sess-a", first["sessions"])  # unaffected by B's trouble
-        self.assertNotIn("sess-b", first["sessions"])  # B stalled: no boost yet
+        self.assertNotIn("sess-b", first["sessions"])  # B stalled: not enough room
 
-        self._append_a(1)
-        os.utime(self.path_a, (2_000_000_200, 2_000_000_200))
+        # "sess-a" has nothing new this time, so it costs nothing:
+        # "sess-b" gets the entire budget to itself and completes.
         second = usage.rollup(root=self.root, max_bytes_per_call=budget)
         self.assertIn("sess-b", second["sessions"])
         self.assertEqual(second["sessions"]["sess-b"]["messages"], 1)
         self.assertEqual(second["sessions"]["sess-b"]["input"], 3)
-        self.assertIn("sess-a", second["sessions"])
 
 
 class GiveUpAfterMaxStallsTest(UsageTestCase):
@@ -997,6 +1000,96 @@ class StallCounterResetTest(UsageTestCase):
         second = usage.rollup(root=self.root, max_bytes_per_call=budget)
         self.assertIn("sess-b", second["sessions"])
         self.assertEqual(usage._cache[path_b]["stall_count"], 0)
+
+
+class AbandonmentIsBudgetRelativeTest(UsageTestCase):
+    """Round 4, the Major: giving up on a file must be relative to the
+    budget that failed, not permanent. Round 3's design gave up until a
+    rotation or truncation reset the entry, which the round 4 review
+    proved was frequently unreachable (abandonment at offset 0, the
+    common case, can never satisfy the size-based reset check, and
+    delete-and-recreate is not guaranteed to change the inode either) --
+    a live session's number could freeze forever with no way out. Giving
+    up is now scoped to "no call since has offered more than what
+    already failed", so a later call with a bigger budget always gets a
+    real chance, however many times MAX_CONSECUTIVE_STALLS has been
+    exceeded."""
+
+    def _make_pathological(self):
+        path = self._session_path()
+        line = _line(_usage_row(input_tokens=7, output=7))
+        self._write(path, line)
+        line_size = len(line.encode("utf-8"))
+        small_budget = max(line_size // 4, 20)
+        return path, line_size, small_budget
+
+    def _drive_to_abandonment(self, small_budget):
+        for _ in range(usage.MAX_CONSECUTIVE_STALLS):
+            usage.rollup(root=self.root, max_bytes_per_call=small_budget)
+        confirm = usage.rollup(root=self.root, max_bytes_per_call=small_budget)
+        self.assertEqual(confirm["sessions"], {})
+        self.assertGreaterEqual(confirm["skipped"], 1)
+        self.assertTrue(confirm["partial"])
+
+    def test_abandoned_file_is_retried_under_a_larger_budget(self):
+        path, line_size, small_budget = self._make_pathological()
+        self._drive_to_abandonment(small_budget)
+
+        big_budget = line_size + 200  # comfortably bigger than what failed
+        self.assertGreater(big_budget, small_budget)
+        data = usage.rollup(root=self.root, max_bytes_per_call=big_budget)
+        self.assertIn("sess-1", data["sessions"])
+        self.assertEqual(data["sessions"]["sess-1"]["input"], 7)
+        self.assertEqual(data["sessions"]["sess-1"]["output"], 7)
+
+    def test_abandoned_file_is_not_retried_under_the_same_or_a_smaller_budget(self):
+        path, line_size, small_budget = self._make_pathological()
+        self._drive_to_abandonment(small_budget)
+
+        real_read = usage._read_new_bytes
+        read_calls = []
+
+        def _spy(p, offset, max_bytes):
+            read_calls.append(max_bytes)
+            return real_read(p, offset, max_bytes)
+
+        with mock.patch.object(usage, "_read_new_bytes", side_effect=_spy):
+            same = usage.rollup(root=self.root, max_bytes_per_call=small_budget)
+            smaller = usage.rollup(root=self.root, max_bytes_per_call=max(small_budget // 2, 1))
+
+        self.assertEqual(read_calls, [])  # no I/O spent on either call
+        self.assertEqual(same["sessions"], {})
+        self.assertTrue(same["partial"])
+        self.assertEqual(smaller["sessions"], {})
+        self.assertTrue(smaller["partial"])
+
+
+class BoostNeverExceedsCallBudgetTest(UsageTestCase):
+    """Round 4, Minor: a stalled file's retry allowance must never push
+    a call's total bytes_read past max_bytes_per_call, even when another
+    file competes for the same call's budget on every single call (the
+    scenario that measured a call reading 1.98x its documented cap
+    before this fix: the old boost formula ignored budget already spent
+    by other files in the same call)."""
+
+    def test_bytes_read_never_exceeds_max_bytes_per_call(self):
+        path_a = self._session_path(session_id="sess-a")
+        path_b = self._session_path(session_id="sess-b")
+
+        row_b = _usage_row(session_id="sess-b", msg_id="big-b", input_tokens=1, output=1)
+        line_b = _line(row_b)
+        self._write(path_b, line_b)
+        size_b = len(line_b.encode("utf-8"))
+        budget = size_b + 40
+
+        for i in range(usage.MAX_CONSECUTIVE_STALLS + 2):
+            a_line = _line(_usage_row(
+                session_id="sess-a", msg_id="a%d" % i, request_id="ra%d" % i,
+                input_tokens=1, output=1))
+            self._write(path_a, a_line, mode="a")
+            os.utime(path_a, (2_000_002_000 + i, 2_000_002_000 + i))  # always newer: goes first
+            data = usage.rollup(root=self.root, max_bytes_per_call=budget)
+            self.assertLessEqual(data["bytes_read"], budget)
 
 
 class MiscTest(UsageTestCase):
