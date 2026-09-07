@@ -322,5 +322,196 @@ class StoreTest(unittest.TestCase):
         self.assertEqual(self.store.recent_events(device_id="local"), [])
 
 
+class UpsertSessionsStartedAtTest(unittest.TestCase):
+    """upsert_sessions: the stored started_at becomes the earliest known
+    non-null of {existing, reported}. 0, negative, NaN and inf all count
+    as "not set", the same as None."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db_path = os.path.join(self.tmp.name, "hub.db")
+        self.store = store.Store(self.db_path)
+        self.store.upsert_device({"id": "local", "name": "hub", "role": "full",
+                                   "version": "1", "claude_version": "1"})
+
+    def tearDown(self):
+        self.store.close()
+        self.tmp.cleanup()
+
+    def _started_at(self):
+        return self.store.fleet_view()["sessions"][0]["started_at"]
+
+    def test_existing_null_and_reported_null_falls_back_to_now(self):
+        self.store.upsert_sessions("local", [
+            {"session_id": "s1", "name": "rc-a", "cwd": "/tmp", "kind": "interactive",
+             "state": "idle"},
+        ], now_fn=lambda: 500.0)
+        self.assertEqual(self._started_at(), 500.0)
+
+    def test_existing_null_reported_set_takes_reported(self):
+        # First sighting has no started_at at all (lands on now), the
+        # backfill path below covers moving it back to a real value --
+        # this test is the plain "reported arrives already set" case.
+        self.store.upsert_sessions("local", [
+            {"session_id": "s1", "name": "rc-a", "cwd": "/tmp", "kind": "interactive",
+             "state": "idle", "started_at": 300.0},
+        ], now_fn=lambda: 500.0)
+        self.assertEqual(self._started_at(), 300.0)
+
+    def test_existing_set_reported_null_keeps_existing(self):
+        self.store.upsert_sessions("local", [
+            {"session_id": "s1", "name": "rc-a", "cwd": "/tmp", "kind": "interactive",
+             "state": "idle", "started_at": 300.0},
+        ], now_fn=lambda: 500.0)
+        self.store.upsert_sessions("local", [
+            {"session_id": "s1", "name": "rc-a", "cwd": "/tmp", "kind": "interactive",
+             "state": "idle"},
+        ], now_fn=lambda: 600.0)
+        self.assertEqual(self._started_at(), 300.0)
+
+    def test_both_set_keeps_the_earlier(self):
+        self.store.upsert_sessions("local", [
+            {"session_id": "s1", "name": "rc-a", "cwd": "/tmp", "kind": "interactive",
+             "state": "idle", "started_at": 900.0},
+        ], now_fn=lambda: 1000.0)
+        self.store.upsert_sessions("local", [
+            {"session_id": "s1", "name": "rc-a", "cwd": "/tmp", "kind": "interactive",
+             "state": "idle", "started_at": 300.0},
+        ], now_fn=lambda: 1100.0)
+        self.assertEqual(self._started_at(), 300.0)
+
+    def test_a_later_reported_time_does_not_move_the_stored_value_forward(self):
+        self.store.upsert_sessions("local", [
+            {"session_id": "s1", "name": "rc-a", "cwd": "/tmp", "kind": "interactive",
+             "state": "idle", "started_at": 300.0},
+        ], now_fn=lambda: 1000.0)
+        self.store.upsert_sessions("local", [
+            {"session_id": "s1", "name": "rc-a", "cwd": "/tmp", "kind": "interactive",
+             "state": "idle", "started_at": 9999.0},
+        ], now_fn=lambda: 1100.0)
+        self.assertEqual(self._started_at(), 300.0)
+
+    def test_reported_zero_is_treated_as_not_set(self):
+        # upsert_sessions itself must never let a bare 0 win -- it falls
+        # back to now, the same as reported being absent entirely.
+        self.store.upsert_sessions("local", [
+            {"session_id": "s1", "name": "rc-a", "cwd": "/tmp", "kind": "interactive",
+             "state": "idle", "started_at": 0},
+        ], now_fn=lambda: 1000.0)
+        self.assertEqual(self._started_at(), 1000.0)
+
+    def test_stored_zero_loses_to_a_real_reported_timestamp(self):
+        # Simulate a legacy row that already has a bare 0 stored directly
+        # (bypassing upsert_sessions, which would never write one itself)
+        # -- a real reported timestamp must still win a min() against it,
+        # per the brief's explicit "a stored 0 must not win" requirement.
+        def _insert_raw(conn):
+            conn.execute(
+                "INSERT INTO sessions (device_id, session_id, name, cwd, kind, state, "
+                "started_at, ended_at, last_seen, external) VALUES "
+                "('local','s1','rc-a','/tmp','interactive','idle',0,NULL,1000.0,0)")
+        self.store._write(_insert_raw)
+        self.assertEqual(self._started_at(), 0)
+
+        self.store.upsert_sessions("local", [
+            {"session_id": "s1", "name": "rc-a", "cwd": "/tmp", "kind": "interactive",
+             "state": "idle", "started_at": 300.0},
+        ], now_fn=lambda: 1100.0)
+        self.assertEqual(self._started_at(), 300.0)
+
+    def test_reported_negative_nan_inf_all_treated_as_not_set(self):
+        for bad_value in (-5.0, float("nan"), float("inf")):
+            with self.subTest(bad_value=bad_value):
+                self.store.upsert_sessions("local", [
+                    {"session_id": "s1", "name": "rc-a", "cwd": "/tmp", "kind": "interactive",
+                     "state": "idle", "started_at": 300.0},
+                ], now_fn=lambda: 1000.0)
+                self.store.upsert_sessions("local", [
+                    {"session_id": "s1", "name": "rc-a", "cwd": "/tmp", "kind": "interactive",
+                     "state": "idle", "started_at": bad_value},
+                ], now_fn=lambda: 1100.0)
+                # existing (300.0) stays -- the bad reported value never wins.
+                self.assertEqual(self._started_at(), 300.0)
+
+    def test_backfill_path_moves_stored_value_back_to_a_real_earlier_timestamp(self):
+        """A row inserted with no started_at lands on `now`. A later
+        upsert reporting the real (earlier) claude/tmux timestamp must
+        move the stored value BACK to it -- this is the exact repair the
+        live hub.db needs for every row already in it."""
+        now = 1757000000.0  # a realistic epoch "now", not a small test offset
+        self.store.upsert_sessions("local", [
+            {"session_id": "s1", "name": "rc-a", "cwd": "/tmp", "kind": "interactive",
+             "state": "idle"},
+        ], now_fn=lambda: now)
+        self.assertEqual(self._started_at(), now)
+
+        real_earlier = now - (12.8 * 86400)  # the 12.8-day-old case from the brief
+        self.store.upsert_sessions("local", [
+            {"session_id": "s1", "name": "rc-a", "cwd": "/tmp", "kind": "interactive",
+             "state": "idle", "started_at": real_earlier},
+        ], now_fn=lambda: now + 100.0)
+        self.assertEqual(self._started_at(), real_earlier)
+
+
+class SessionsStatusColumnTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db_path = os.path.join(self.tmp.name, "hub.db")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_status_column_added_to_a_pre_existing_db_and_round_trips(self):
+        # Simulate a hub.db from before the status column existed (also
+        # missing the other additive columns, same as
+        # test_existing_db_created_before_new_columns_gains_them_without_data_loss).
+        old_db = os.path.join(self.tmp.name, "old.db")
+        conn = sqlite3.connect(old_db)
+        conn.executescript("""
+            CREATE TABLE devices (
+                id TEXT PRIMARY KEY, name TEXT, role TEXT, version TEXT,
+                claude_version TEXT, last_seen REAL, online INTEGER DEFAULT 0
+            );
+            CREATE TABLE sessions (
+                device_id TEXT, session_id TEXT, name TEXT, cwd TEXT, kind TEXT,
+                state TEXT, started_at REAL, ended_at REAL, last_seen REAL,
+                external INTEGER DEFAULT 0,
+                PRIMARY KEY (device_id, session_id)
+            );
+            CREATE TABLE session_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, device_id TEXT, session_id TEXT,
+                ts REAL, event TEXT, extra_json TEXT
+            );
+            CREATE TABLE audit_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, actor TEXT, action TEXT,
+                target TEXT, device_id TEXT, detail TEXT
+            );
+        """)
+        conn.execute(
+            "INSERT INTO devices (id, name, role, version, claude_version, last_seen, online) "
+            "VALUES ('local', 'hub', 'full', '1', '1', 100.0, 1)")
+        conn.execute(
+            "INSERT INTO sessions (device_id, session_id, name, cwd, kind, state, started_at, "
+            "ended_at, last_seen, external) VALUES "
+            "('local', 's1', 'rc-old', '/tmp', 'interactive', 'idle', 100.0, NULL, 100.0, 0)")
+        conn.commit()
+        conn.close()
+        os.chmod(old_db, 0o600)
+
+        migrated = store.Store(old_db)
+        try:
+            view = migrated.fleet_view()
+            self.assertIsNone(view["sessions"][0]["status"])  # pre-existing row: column added as NULL
+
+            migrated.upsert_sessions("local", [
+                {"session_id": "s1", "name": "rc-old", "cwd": "/tmp", "kind": "interactive",
+                 "state": "idle", "status": "busy"},
+            ])
+            view2 = migrated.fleet_view()
+            self.assertEqual(view2["sessions"][0]["status"], "busy")
+        finally:
+            migrated.close()
+
+
 if __name__ == "__main__":
     unittest.main()

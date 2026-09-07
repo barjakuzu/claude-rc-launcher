@@ -12,6 +12,7 @@ threading.Event, not on any shared mutex.
 """
 import json
 import logging
+import math
 import os
 import queue
 import sqlite3
@@ -19,6 +20,17 @@ import threading
 import time
 
 _LOG = logging.getLogger(__name__)
+
+
+def _valid_started_at(value):
+    """True if `value` is a usable started_at: a finite, positive number.
+    0, negative, NaN and inf (and None, and non-numbers) are all "not
+    set" -- a stored 0 must never win a min() against a real timestamp."""
+    if value is None or isinstance(value, bool):
+        return False
+    if not isinstance(value, (int, float)):
+        return False
+    return math.isfinite(value) and value > 0
 
 
 class StoreClosed(RuntimeError):
@@ -80,6 +92,12 @@ _NEW_SESSION_COLUMNS = (
     ("rc_url", "TEXT"),
     ("tokens", "INTEGER"),
     ("claude", "TEXT"),      # JSON: the claude agents sub-object, or NULL
+    # The row's raw status (e.g. "busy"/"idle"/"dead"), distinct from the
+    # `state` column which holds the DERIVED state (needs_attention
+    # outranks busy). Persisted so a stall-detection rule can later tell a
+    # session that is wedged-while-busy from one that is genuinely idle --
+    # nothing reads this column yet.
+    ("status", "TEXT"),
 )
 
 
@@ -234,9 +252,21 @@ class Store:
 
     def upsert_sessions(self, device_id, rows, now_fn=time.time):
         """Replace this device's live-session view: rows present are
-        upserted (started_at kept from the first sighting); rows in the DB
-        for this device but absent from `rows` get ended_at set, exactly
-        once (only rows that were still live, ended_at IS NULL, transition).
+        upserted (started_at becomes the earliest known non-null of the
+        stored value and the newly reported one -- see _valid_started_at);
+        rows in the DB for this device but absent from `rows` get ended_at
+        set, exactly once (only rows that were still live, ended_at IS
+        NULL, transition).
+
+        started_at resolution (existing = already stored, reported = r's
+        started_at, both run through _valid_started_at first):
+        - existing invalid, reported invalid: now (first sighting, no
+          usable timestamp from either side yet).
+        - existing invalid, reported valid: reported (the backfill path
+          that repairs a row stored before this timestamp existed).
+        - existing valid, reported invalid: existing, unchanged.
+        - both valid: min(existing, reported) -- a later reported time
+          must never move the stored value forward.
 
         A row without `session_id` is not a valid natural key (falling back
         to `name` risks colliding two distinct sessions, or an accidental
@@ -259,20 +289,32 @@ class Store:
                 existing = conn.execute(
                     "SELECT started_at FROM sessions WHERE device_id=? AND session_id=?",
                     (device_id, sid)).fetchone()
-                started_at = existing["started_at"] if existing else (r.get("started_at") or now)
+                existing_started = existing["started_at"] if existing else None
+                existing_valid = existing_started if _valid_started_at(existing_started) else None
+                reported_started = r.get("started_at")
+                reported_valid = reported_started if _valid_started_at(reported_started) else None
+                if existing_valid is not None and reported_valid is not None:
+                    started_at = min(existing_valid, reported_valid)
+                elif existing_valid is not None:
+                    started_at = existing_valid
+                elif reported_valid is not None:
+                    started_at = reported_valid
+                else:
+                    started_at = now
                 conn.execute(
                     "INSERT INTO sessions (device_id, session_id, name, cwd, kind, state, "
                     "started_at, ended_at, last_seen, external, pid, tmux, rc_url, tokens, "
-                    "claude) VALUES (?,?,?,?,?,?,?,NULL,?,?,?,?,?,?,?) "
+                    "claude, status) VALUES (?,?,?,?,?,?,?,NULL,?,?,?,?,?,?,?,?) "
                     "ON CONFLICT(device_id, session_id) DO UPDATE SET name=excluded.name, "
                     "cwd=excluded.cwd, kind=excluded.kind, state=excluded.state, "
+                    "started_at=excluded.started_at, "
                     "last_seen=excluded.last_seen, ended_at=NULL, external=excluded.external, "
                     "pid=excluded.pid, tmux=excluded.tmux, rc_url=excluded.rc_url, "
-                    "tokens=excluded.tokens, claude=excluded.claude",
+                    "tokens=excluded.tokens, claude=excluded.claude, status=excluded.status",
                     (device_id, sid, r.get("name"), r.get("cwd"), r.get("kind"),
                      r.get("state"), started_at, now, int(bool(r.get("external"))),
                      r.get("pid"), _json_or_none(r.get("tmux")), r.get("rc_url"),
-                     r.get("tokens"), _json_or_none(r.get("claude"))))
+                     r.get("tokens"), _json_or_none(r.get("claude")), r.get("status")))
             existing_ids = [row["session_id"] for row in conn.execute(
                 "SELECT session_id FROM sessions WHERE device_id=? AND ended_at IS NULL",
                 (device_id,))]
