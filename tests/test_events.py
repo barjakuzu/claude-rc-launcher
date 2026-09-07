@@ -3,6 +3,7 @@ import os
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 import events
 
@@ -154,6 +155,43 @@ class ReadEventsTest(unittest.TestCase):
         self.assertEqual(len(rows), 1 + 47)  # rotated tail + the 47 fresh rows
         # No row was dropped or corrupted by a mid-line resume.
         self.assertTrue(all(isinstance(r, dict) and "event" in r for r in rows))
+
+    def test_stat_failure_writes_empty_inode_not_zero(self):
+        # `_inode(path) or 0` used to fold a failed stat() into inode 0,
+        # a *valid-looking* inode value. A later read would then compare
+        # that fabricated 0 against the real current inode, see them
+        # differ, and report a spurious rotation -- re-reading the ".1"
+        # sibling and duplicating rows even though nothing rotated.
+        # inode must come back as "" (unknown), not "0".
+        _write_day(self.root, "2026-09-07", [
+            {"ts": 1, "event": "SessionStart", "session_id": "a", "extra": {}},
+        ])
+        with mock.patch.object(events, "_inode", return_value=None):
+            _, cursor = events.read_events(self.root)
+        self.assertTrue(cursor.endswith(":"), cursor)
+        filename, offset, inode = events._parse_cursor(cursor)
+        self.assertIsNone(inode)
+
+    def test_unknown_cursor_inode_does_not_spuriously_report_rotation(self):
+        # With a cursor whose inode is unknown (as produced above), a
+        # same-file read must fall back to the size heuristic instead of
+        # comparing against a fabricated inode 0 -- so no duplicate rows
+        # even when an unrelated ".1" sibling happens to exist.
+        path = _write_day(self.root, "2026-09-07", [
+            {"ts": 1, "event": "SessionStart", "session_id": "a", "extra": {}},
+        ])
+        with mock.patch.object(events, "_inode", return_value=None):
+            _, cursor = events.read_events(self.root)
+        self.assertTrue(cursor.endswith(":"), cursor)
+        # An unrelated rotated sibling from some earlier day's rollover.
+        with open(path + ".1", "w") as f:
+            f.write(json.dumps({"ts": 0, "event": "Stop", "session_id": "old", "extra": {}}) + "\n")
+        _write_day(self.root, "2026-09-07", [
+            {"ts": 2, "event": "Stop", "session_id": "a", "extra": {}},
+        ])
+        rows, _ = events.read_events(self.root, since_cursor=cursor)
+        self.assertEqual([r["event"] for r in rows], ["Stop"])
+        self.assertEqual(rows[0]["session_id"], "a")
 
 
 class PruneTest(unittest.TestCase):

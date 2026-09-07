@@ -1166,6 +1166,20 @@ class ApiFleetStreamHeadersTest(unittest.TestCase):
     def test_heartbeat_interval_constant_is_20_seconds(self):
         self.assertEqual(server.SSE_HEARTBEAT_SECONDS, 20)
 
+    def test_heartbeat_is_a_data_frame_not_a_comment(self):
+        # A ": ping" SSE comment line never reaches the browser's
+        # EventSource.onmessage, so the client's staleness watchdog can't
+        # tell "no changes" from "connection silently died" and settles
+        # into permanent polling on an idle-but-healthy stream. The
+        # heartbeat must be a real "data:" frame instead.
+        import inspect
+        src = inspect.getsource(server.Handler.do_GET)
+        block = src.split('"/api/fleet/stream"', 1)[1]
+        block = block[:3000]
+        self.assertNotIn(': ping', block)
+        self.assertIn('"type": "heartbeat"', block)
+        self.assertIn('data: {heartbeat}', block)
+
 
 class SseCapacityTest(unittest.TestCase):
     def setUp(self):

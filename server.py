@@ -1226,7 +1226,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         if not self._sse_send_fleet_snapshot():
                             break
                     else:
-                        if not self._sse_write(": ping\n\n"):
+                        # A heartbeat as an SSE comment line never
+                        # reaches EventSource.onmessage -- the
+                        # client's staleness watchdog has no way to tell
+                        # "no changes" from "connection silently died",
+                        # so it fires on a quiet-but-healthy stream and
+                        # falls into permanent polling. Send it as a real
+                        # data frame (tagged so the client can tell it
+                        # apart from a fleet snapshot) instead.
+                        heartbeat = json.dumps({"type": "heartbeat", "ts": time.time()})
+                        if not self._sse_write(f"data: {heartbeat}\n\n"):
                             break
             finally:
                 with _fleet_change_lock:

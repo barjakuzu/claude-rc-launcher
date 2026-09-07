@@ -83,6 +83,15 @@ def _inode(path):
         return None
 
 
+def _inode_str(path):
+    """Cursor-safe rendering of _inode(): "" (never "0") when the inode
+    is unknown, so a later _parse_cursor() reads it back as None and
+    falls back to the size heuristic instead of comparing against a
+    fabricated inode 0 and reporting a spurious rotation."""
+    inode = _inode(path)
+    return "" if inode is None else str(inode)
+
+
 def read_events(root, since_cursor=None, limit=500):
     """Rows newer than since_cursor (oldest first), capped at limit, and
     the cursor to resume from next time. Tolerant of day-boundary
@@ -177,13 +186,13 @@ def read_events(root, since_cursor=None, limit=500):
                 rows.append(row)
                 if len(rows) >= limit:
                     last_file, last_offset = fname, pos
-                    return rows, f"{last_file}:{last_offset}:{_inode(path) or 0}"
+                    return rows, f"{last_file}:{last_offset}:{_inode_str(path)}"
         last_file, last_offset = fname, pos
         if truncated:
             break
 
     last_path = os.path.join(root, last_file)
-    return rows, f"{last_file}:{last_offset}:{_inode(last_path) or 0}"
+    return rows, f"{last_file}:{last_offset}:{_inode_str(last_path)}"
 
 
 def prune(root, days=7, now_fn=time.time):

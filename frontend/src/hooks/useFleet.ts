@@ -22,10 +22,10 @@ export interface UseFleetResult {
 }
 
 const POLL_INTERVAL_MS = 5000;
-// server.py's SSE_HEARTBEAT_SECONDS is 20s; heartbeats are SSE comment
-// lines (": ping\n\n") which EventSource never surfaces to onmessage, so
-// this can't distinguish "no changes" from "connection silently died" —
-// it's a heuristic watchdog, not a precise heartbeat check. ~2 intervals.
+// server.py's SSE_HEARTBEAT_SECONDS is 20s; every interval the server
+// sends either a fleet snapshot or a {"type":"heartbeat"} data frame, so
+// onmessage fires and lastFrameAt advances even on a quiet-but-healthy
+// stream. ~2 intervals of slack before declaring the stream stale.
 const STALE_MS = 40_000;
 const RECONNECT_BASE_MS = 1000;
 const RECONNECT_MAX_MS = 30_000;
@@ -127,7 +127,12 @@ export function useFleet(): UseFleetResult {
         lastFrameAt = Date.now();
         setStale(false);
         try {
-          setView(JSON.parse(ev.data) as FleetView);
+          const parsed = JSON.parse(ev.data) as FleetView | { type: 'heartbeat'; ts: number };
+          // A heartbeat frame only proves the stream is alive — it
+          // carries no fleet data, so it must not overwrite the view.
+          if (!('type' in parsed && parsed.type === 'heartbeat')) {
+            setView(parsed as FleetView);
+          }
         } catch {
           // Malformed frame — ignore, wait for the next one.
         }
