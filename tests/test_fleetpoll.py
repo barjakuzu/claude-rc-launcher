@@ -564,6 +564,63 @@ class FleetViewExcludesEndedSessionsTest(unittest.TestCase):
         self.assertEqual(len(self.store.fleet_view(include_ended=True)["sessions"]), 1)
 
 
+class GraceSecondsCoupledToPollIntervalTest(unittest.TestCase):
+    """Fix round 3, Item 2: store.ENDED_ROW_GRACE_SECONDS is a floor, not
+    the effective grace window -- _ingest must pass
+    max(store.ENDED_ROW_GRACE_SECONDS, 3 * self.interval) explicitly, so a
+    poller configured with a longer-than-default interval can't have a
+    single missed poll silently disable the flicker-vs-new-session grace
+    window in upsert_sessions."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = _fake_store(self.tmp.name)
+
+    def tearDown(self):
+        self.store.close()
+        self.tmp.cleanup()
+
+    @patch("fleetpoll.fleet.build_fleet")
+    @patch("fleetpoll.devices.load_devices")
+    @patch("fleetpoll.devices.get_local_name")
+    def test_default_interval_uses_the_grace_floor(self, get_name, load_devices, build_fleet):
+        get_name.return_value = "hub"
+        load_devices.return_value = []
+        build_fleet.return_value = {
+            "device_name": "hub", "role": "full", "version": "1", "claude_version": "1",
+            "sessions": [{"session_id": "s1", "name": "rc-a", "state": "idle"}],
+            "events": [], "cursor": None, "generated_at": 1.0, "errors": [],
+        }
+        poller = fleetpoll.FleetPoller(self.store, http_get=MagicMock())  # default interval=30
+        self.assertEqual(poller.interval, 30)
+        poller.store.upsert_sessions = MagicMock()
+        poller.poll_once()
+
+        poller.store.upsert_sessions.assert_called_once()
+        self.assertEqual(
+            poller.store.upsert_sessions.call_args.kwargs["grace_seconds"],
+            store.ENDED_ROW_GRACE_SECONDS)  # 3*30=90 ties the floor, floor wins
+
+    @patch("fleetpoll.fleet.build_fleet")
+    @patch("fleetpoll.devices.load_devices")
+    @patch("fleetpoll.devices.get_local_name")
+    def test_longer_interval_widens_the_grace_window(self, get_name, load_devices, build_fleet):
+        get_name.return_value = "hub"
+        load_devices.return_value = []
+        build_fleet.return_value = {
+            "device_name": "hub", "role": "full", "version": "1", "claude_version": "1",
+            "sessions": [{"session_id": "s1", "name": "rc-a", "state": "idle"}],
+            "events": [], "cursor": None, "generated_at": 1.0, "errors": [],
+        }
+        poller = fleetpoll.FleetPoller(self.store, interval=120, http_get=MagicMock())
+        poller.store.upsert_sessions = MagicMock()
+        poller.poll_once()
+
+        poller.store.upsert_sessions.assert_called_once()
+        self.assertEqual(
+            poller.store.upsert_sessions.call_args.kwargs["grace_seconds"], 360)  # 3*120
+
+
 class StartStopTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

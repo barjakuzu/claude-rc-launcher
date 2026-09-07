@@ -14,6 +14,7 @@ import urllib.request
 
 import devices
 import fleet
+import store
 
 # Imported lazily inside _ingest (not at module load) to avoid a hard
 # circular-import dependency: server.py is the much heavier module and
@@ -101,7 +102,13 @@ class FleetPoller:
                 s["state"] = server._derive_session_state(s)
             except Exception:
                 pass
-        self.store.upsert_sessions(device_id, sessions_in)
+        # store.ENDED_ROW_GRACE_SECONDS is a floor, not the effective
+        # value -- couple it explicitly to this poller's own interval so a
+        # longer-than-default interval (a single missed poll at that
+        # interval) can't silently disable the flicker-vs-new-session
+        # grace window in upsert_sessions.
+        grace_seconds = max(store.ENDED_ROW_GRACE_SECONDS, 3 * self.interval)
+        self.store.upsert_sessions(device_id, sessions_in, grace_seconds=grace_seconds)
         events = snapshot.get("events") or []
         if events:
             self.store.add_events(device_id, events)
