@@ -39,6 +39,14 @@ WEIGHTS: dict[str, float] = {
 DEFAULT_MAX_BYTES_PER_CALL = 64 * 1024 * 1024  # 64 MiB
 DEFAULT_DAYS = 30
 
+# A read counts as a "stall" when it was clipped by the byte budget and
+# still yielded zero complete lines (a single line longer than what this
+# attempt was allowed to read). After this many CONSECUTIVE stalls for
+# one file, _update_entry stops spending real I/O on it every call and
+# reports it as skipped/partial instead, so one pathological file can
+# never silently monopolize the whole budget forever. See _update_entry.
+MAX_CONSECUTIVE_STALLS = 3
+
 # Cap on the number of tracked files so a box with years of transcripts
 # can't grow the process without bound. Least-recently-stat'ed entries are
 # evicted first once this is exceeded.
@@ -176,6 +184,12 @@ def _new_entry(project, inode):
         # raced away) must stay absent, not appear as a bogus all-zero
         # session.
         "synced": False,
+        # Consecutive reads that were clipped by the budget and yielded
+        # zero complete lines (see _update_entry). Reset to 0 by any read
+        # that makes real progress. Once it reaches MAX_CONSECUTIVE_STALLS
+        # this file stops being read at all, on every subsequent call,
+        # until a genuine rotation/truncation gives it a fresh entry.
+        "stall_count": 0,
     }
 
 
@@ -295,16 +309,43 @@ def _merge_scratch(entry, scratch):
         bucket["output"] += day["output"]
 
 
-def _update_entry(path, project, max_bytes):
+def _update_entry(path, project, max_bytes, max_bytes_per_call):
     """Bring the cache entry for `path` up to date with what's on disk,
     parsing only newly appended complete lines, clipped to at most
-    `max_bytes` of new data (the caller's remaining per-call budget).
-    Returns (bytes_read, clipped). Raises OSError if the file can't be
-    stat'ed/opened/read; nothing is committed in that case, so a file
-    that has never been read successfully stays absent from rollup()'s
-    output (see the "synced" field) rather than appearing as a bogus
-    zero-valued session, and a file that WAS already synced keeps its
-    last-known-good totals instead of being wiped by a transient failure.
+    `max_bytes` of new data (the caller's remaining per-call budget),
+    except a file that stalled on a previous attempt gets at least a
+    full `max_bytes_per_call` this time (see the "no-progress reads"
+    paragraph below). Returns (bytes_read, clipped, gave_up). Raises
+    OSError if the file can't be stat'ed/opened/read; nothing is
+    committed in that case, so a file that has never been read
+    successfully stays absent from rollup()'s output (see the "synced"
+    field) rather than appearing as a bogus zero-valued session, and a
+    file that WAS already synced keeps its last-known-good totals
+    instead of being wiped by a transient failure.
+
+    No-progress reads: a single JSONL line longer than what a given
+    attempt is allowed to read can never resolve into a complete line,
+    so `bytes_read` is nonzero (Important 2, round 2) but `offset` never
+    advances. Left alone, this can consume this file's entire allotted
+    budget on every single call forever, and if that allotment happens
+    to be most or all of `max_bytes_per_call`, every OTHER file in the
+    same call is starved behind it too. Two mitigations, tracked via the
+    entry's "stall_count":
+    - A file with a prior stall (stall_count > 0, but still under
+      MAX_CONSECUTIVE_STALLS) gets max(max_bytes, max_bytes_per_call)
+      for this attempt, not just its fair-share `max_bytes`: enough to
+      finish an oversized-but-not-pathological line in one shot rather
+      than being clipped again at the exact same place by whatever
+      fraction of the shared budget happened to be left this time.
+    - Once stall_count reaches MAX_CONSECUTIVE_STALLS, no further read is
+      attempted at all (the caller is told to count this as skipped and
+      mark the result partial) until a genuine rotation or truncation
+      resets the entry (and its stall_count) from scratch: the file has
+      by then already been given two full-budget attempts and still
+      couldn't complete even one line, so continuing to retry it every
+      poll would just be spending real I/O with no chance of success.
+    A read that DOES make progress (at least one complete line) resets
+    stall_count to 0 immediately, however small that progress was.
 
     Does its OWN os.stat, inside the first locked block, rather than
     trusting the caller's pre-scan (size, mtime, inode): the pre-scan
@@ -358,25 +399,41 @@ def _update_entry(path, project, max_bytes):
 
         if size == entry["size"] and mtime == entry["mtime"]:
             _cache.move_to_end(path)
-            return 0, False  # unchanged since last read: nothing to do
+            return 0, False, False  # unchanged since last read: nothing to do
+
+        if entry["stall_count"] >= MAX_CONSECUTIVE_STALLS:
+            # Gave up on this file: MAX_CONSECUTIVE_STALLS consecutive
+            # reads, the last two already boosted to a full
+            # max_bytes_per_call each, still resolved zero complete
+            # lines. Stop spending real I/O on it every poll; it only
+            # gets another chance via the reset-on-rotation/truncation
+            # branch above, which starts a fresh entry (stall_count 0)
+            # from scratch.
+            _cache.move_to_end(path)
+            return 0, False, True
 
         start_offset = entry["offset"]
+        # A file that stalled last time gets at least a full
+        # max_bytes_per_call this attempt, not just its fair share of
+        # what's left in this call's shared budget: see the no-progress
+        # reads paragraph in the docstring above.
+        effective_max = max(max_bytes, max_bytes_per_call) if entry["stall_count"] > 0 else max_bytes
         # Cap the actual read at what the file really has pending, not
-        # the full per-call budget: f.read(n) can allocate close to n
-        # bytes up front even when far less is available, and with a
-        # generous max_bytes_per_call that can mean allocating tens of
-        # MB to read a 200-byte appendix. `clipped` below still compares
-        # against the caller's `max_bytes`, not this narrower read size,
-        # so a file that genuinely has more pending than the budget
-        # allows is still correctly flagged.
+        # the full (possibly boosted) allowance: f.read(n) can allocate
+        # close to n bytes up front even when far less is available, and
+        # with a generous max_bytes_per_call that can mean allocating
+        # tens of MB to read a 200-byte appendix. `clipped` below still
+        # compares against `effective_max`, not this narrower read size,
+        # so a file that genuinely has more pending than its allowance
+        # is still correctly flagged.
         pending = max(size - start_offset, 0)
-        read_cap = min(max_bytes, pending)
+        read_cap = min(effective_max, pending)
         seen_snapshot = set(entry["seen_keys"])
         session_id_snapshot = entry["session_id"]
 
     # --- disk I/O and parsing, no lock held, no shared state touched ---
     data = _read_new_bytes(path, start_offset, read_cap)  # may raise OSError
-    clipped = len(data) >= max_bytes
+    clipped = len(data) >= effective_max
 
     scratch = _new_entry(project, inode)
     scratch["seen_keys"] = seen_snapshot
@@ -407,7 +464,8 @@ def _update_entry(path, project, max_bytes):
             # double count or resurrect data a rotation already
             # discarded, so drop it; the next rollup() call will simply
             # re-read whatever this call didn't get to.
-            return 0, False
+            return 0, False, False
+        made_progress = pos > start_offset
         _merge_scratch(entry, scratch)
         entry["offset"] = pos
         # A clipped read stopped short of the file's true current EOF on
@@ -421,6 +479,16 @@ def _update_entry(path, project, max_bytes):
         entry["size"] = pos if clipped else start_offset + len(data)
         entry["mtime"] = mtime
         entry["synced"] = True
+        if made_progress:
+            entry["stall_count"] = 0
+        elif clipped:
+            # Clipped AND zero complete lines: a genuine no-progress
+            # stall (this attempt's allowance, possibly already the
+            # boosted max_bytes_per_call, wasn't enough), not the
+            # ordinary case of a partial trailing line waiting on the
+            # writer (that's unclipped: we read everything currently
+            # available and it just isn't a complete line yet).
+            entry["stall_count"] += 1
         _cache.move_to_end(path)
         # Charge the full number of bytes actually read against the
         # caller's budget, not just the span that resolved into complete
@@ -431,8 +499,8 @@ def _update_entry(path, project, max_bytes):
         # unfinished line, at real disk cost, on every future call too.
         # entry["offset"] not advancing past it is fine: the line is
         # still there, complete, waiting for a call with enough budget to
-        # finish it (see ClippedLineTest).
-        return len(data), clipped
+        # finish it (see ClippedLineTest / BudgetStallRecoveryTest).
+        return len(data), clipped, False
 
 
 def _evict_missing(discovered_paths):
@@ -499,9 +567,17 @@ def rollup(root=None, max_bytes_per_call=DEFAULT_MAX_BYTES_PER_CALL,
             partial = True
             continue
         try:
-            bytes_read, clipped = _update_entry(path, project, remaining)
+            bytes_read, clipped, gave_up = _update_entry(path, project, remaining, max_bytes_per_call)
         except OSError:
             skipped += 1
+            continue
+        if gave_up:
+            # MAX_CONSECUTIVE_STALLS consecutive no-progress reads: this
+            # file is not being attempted this call at all, so it must
+            # still be visible as an incomplete part of the snapshot,
+            # exactly like any other file that failed to open.
+            skipped += 1
+            partial = True
             continue
         total_bytes_read += bytes_read
         if clipped:
