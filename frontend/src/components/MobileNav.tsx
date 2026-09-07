@@ -2,9 +2,10 @@
 import { RT, FONT_MONO } from '../tokens';
 import { Icons } from './primitives';
 
-// MTab includes 'activity' as a state reachable only via the More sheet.
+// MTab includes 'activity' and 'cost' as states reachable only via the More
+// sheet: adding either to the primary bottom-nav grid below would crowd it.
 // The bottom-nav buttons only cover 'devices' | 'sessions' | 'scheduled'.
-export type MTab = 'devices' | 'sessions' | 'scheduled' | 'activity';
+export type MTab = 'devices' | 'sessions' | 'scheduled' | 'activity' | 'cost';
 
 // NavButtonId is restricted to what the 4 nav buttons represent.
 type NavButtonId = 'devices' | 'sessions' | 'scheduled' | 'more';
