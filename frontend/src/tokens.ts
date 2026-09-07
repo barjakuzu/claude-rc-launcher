@@ -48,11 +48,53 @@ export const tintEdge = (hue: number): string => `oklch(0.66 0.07 ${hue} / 0.32)
 
 // Format helpers.
 export const fmtK = (n: number): string => {
+  // A malformed backend payload (a string, undefined, NaN) must never
+  // render as the literal text "NaN"/"undefined"/"null", but it must also
+  // never render as "0": zero is a real value, this is a "we can't format
+  // this" fallback, so it uses the same unknown-value dash as fmtUsage.
+  if (typeof n !== 'number' || !Number.isFinite(n)) return '—';
   if (n >= 1_000_000) return (n / 1_000_000).toFixed(n >= 10_000_000 ? 0 : 1) + 'M';
   if (n >= 1000) return (n / 1000).toFixed(0) + 'K';
   return String(n);
 };
 export const fmtPct = (n: number): string => Math.round(n) + '%';
+
+// Effective-token usage label for a session/device `usage` field that is
+// null when unknown (never a fake 0). Part of Phase 3 wiring's usage
+// accounting. Takes the usage object itself (or a stand-in shaped like one)
+// so callers can pass `s.usage` directly and get the right tri-state
+// behavior:
+//   undefined -> null   (field not sent by this backend yet, render nothing)
+//   null      -> '—'    (backend confirmed no transcript data exists)
+//   object    -> fmtK(usage.effective)
+export const fmtUsage = (usage: { effective: number } | null | undefined): string | null => {
+  if (usage === undefined) return null;
+  if (usage === null) return '—';
+  return fmtK(usage.effective);
+};
+
+// Tri-state device usage_partial lookup: true (confirmed partial), false
+// (confirmed not partial), undefined (unknown, e.g. because /api/fleet
+// hasn't reported this device yet, or the field is absent on an older
+// backend). Never coerce this with `!!`: that turns "we don't know" into
+// "not partial", which is exactly backwards for a marker whose whole job
+// is flagging numbers that may be under-reporting.
+export function usagePartialFor(
+  devices: { id: string; usage_partial?: boolean }[],
+  deviceId: string,
+): boolean | undefined {
+  return devices.find((d) => d.id === deviceId)?.usage_partial;
+}
+
+// Adds an alpha channel to an existing RT/FN oklch(...) token string, for a
+// tinted background or border derived from a palette color. Keeps the
+// derived color tied to its source token instead of duplicating the
+// token's L/C/H values as a second literal that can drift out of sync, and
+// avoids appending a hex alpha suffix directly to an oklch() string (that
+// syntax only works on #rrggbb hex colors, not on functional notations, so
+// it silently produces invalid CSS that the browser drops).
+export const withAlpha = (oklchColor: string, alpha: number): string =>
+  oklchColor.replace(/\)$/, ` / ${alpha})`);
 
 // Tokens-bar color: green → amber → red as capacity fills.
 export const capColor = (pct: number): string => (pct >= 90 ? FN.red : pct >= 75 ? FN.amber : FN.green);

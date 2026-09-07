@@ -17,6 +17,7 @@ import { AllScheduled } from './components/AllScheduled';
 import { ConfigMatrixView } from './components/ConfigMatrix';
 import { Activity } from './components/Activity';
 import { ShareTunnel } from './components/ShareTunnel';
+import { CostView } from './components/CostView';
 import type { PanelTab } from './components/PanelTabs';
 import type { MTab } from './components/MobileNav';
 
@@ -34,7 +35,7 @@ export function App() {
   );
   const [moreOpen, setMoreOpen] = useState(false);
   const [shareOpen, setShareOpen] = useState(false);
-  const [desktopView, setDesktopView] = useState<'devices' | 'tasks' | 'sessions' | 'config'>('devices');
+  const [desktopView, setDesktopView] = useState<'devices' | 'tasks' | 'sessions' | 'cost' | 'config'>('devices');
 
   const pickMTab = (t: MTab) => {
     setMTab(t);
@@ -117,6 +118,9 @@ export function App() {
               {mTab === 'activity' && (
                 <Activity cards={cards} />
               )}
+              {mTab === 'cost' && (
+                <CostView onOpenDevice={handleOpenDevice} />
+              )}
             </>
           ) : openCard ? (
             // Device detail — full main area
@@ -142,7 +146,7 @@ export function App() {
                 flex: 'none', display: 'flex', gap: 4, padding: '10px 24px 0',
                 borderBottom: `1px solid ${RT.border}`,
               }}>
-                {(['devices', 'tasks', 'sessions', 'config'] as const).map((v) => (
+                {(['devices', 'tasks', 'sessions', 'cost', 'config'] as const).map((v) => (
                   <button
                     key={v}
                     onClick={() => setDesktopView(v)}
@@ -153,7 +157,7 @@ export function App() {
                       borderBottom: `2px solid ${desktopView === v ? RT.text : 'transparent'}`,
                       textTransform: 'capitalize',
                     }}
-                  >{v === 'devices' ? 'Devices' : v === 'tasks' ? 'Tasks' : v === 'sessions' ? 'Sessions' : 'Config'}</button>
+                  >{v === 'devices' ? 'Devices' : v === 'tasks' ? 'Tasks' : v === 'sessions' ? 'Sessions' : v === 'cost' ? 'Cost' : 'Config'}</button>
                 ))}
               </div>
               <div style={{ flex: 1, overflow: 'hidden', display: 'flex', minHeight: 0 }}>
@@ -163,6 +167,9 @@ export function App() {
                 {desktopView === 'tasks' && <AllScheduled cards={cards} />}
                 {desktopView === 'sessions' && (
                   <AllSessions onOpenDevice={handleOpenDevice} />
+                )}
+                {desktopView === 'cost' && (
+                  <CostView onOpenDevice={handleOpenDevice} />
                 )}
                 {desktopView === 'config' && <ConfigMatrixView cards={cards} />}
               </div>

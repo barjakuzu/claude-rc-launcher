@@ -53,6 +53,11 @@ export function MobileMoreSheet({
       onClick: () => { setMTab('activity'); onClose(); },
     },
     {
+      icon: Icons.chart,
+      label: 'Cost',
+      onClick: () => { setMTab('cost'); onClose(); },
+    },
+    {
       icon: Icons.terminal,
       label: 'Logs',
       subtitle: deviceOpen ? undefined : 'Open a device first',

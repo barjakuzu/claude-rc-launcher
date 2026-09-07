@@ -9,7 +9,7 @@
 // on `isExternal` alone, and degrade to read-only when they're absent —
 // mirrors SessionRow.tsx's semantics so both tabs behave identically.
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { RT, FONT_MONO, tintFor, hueForId, Z } from '../tokens';
+import { RT, FONT_MONO, tintFor, hueForId, Z, fmtUsage, usagePartialFor } from '../tokens';
 import { Icons, Dot, StatusPill, ExternalBadge } from './primitives';
 import { MobileHeader } from './MobileHeader';
 import { mobileActionBtn } from './mobileActionBtn';
@@ -141,6 +141,17 @@ export function AllSessions({ onOpenDevice }: AllSessionsProps) {
           const previewTarget = isAdopted ? s.tmux!.session_name : name;
           const rowRcUrl = s.rc_url ?? rcUrls[key];
           const canStopExternal = isExternal && s.pid != null;
+          // Effective (cumulative, cost-relevant) tokens: a different
+          // metric from s.tokens (live context-window fill below).
+          // null !== undefined here: null means the backend confirmed no
+          // transcript data exists and must show as a dash, never a fake 0;
+          // undefined means the field isn't sent yet and shows nothing.
+          const usageLabel = fmtUsage(s.usage);
+          // Tri-state, never coerced with `!!`: true marks a device whose
+          // usage snapshot is still converging (numbers under-report),
+          // undefined marks "we don't know yet" (e.g. fleet data not
+          // loaded). Both need a visible marker; only false renders none.
+          const usagePartial = usagePartialFor(devices, s.device_id);
 
           const openPreview = () => setPreview({ deviceId: s.device_id, name: previewTarget, sessionId: s.session_id, mode: s.mode });
 
@@ -187,6 +198,18 @@ export function AllSessions({ onOpenDevice }: AllSessionsProps) {
                   <>
                     <span style={{ color: RT.borderHi }}>·</span>
                     <span>{Math.round(s.tokens / 1000)}K</span>
+                  </>
+                )}
+                {usageLabel != null && (
+                  <>
+                    <span style={{ color: RT.borderHi }}>·</span>
+                    <span title="Cumulative effective tokens">{usageLabel} eff</span>
+                    {usagePartial === true && (
+                      <span title="This device's usage snapshot is partial (still converging after a restart)" style={{ color: RT.amber }}>~</span>
+                    )}
+                    {usagePartial === undefined && (
+                      <span title="Partial status unknown for this device (fleet data not loaded yet)" style={{ color: RT.textLow }}>?</span>
+                    )}
                   </>
                 )}
                 {offline && (
