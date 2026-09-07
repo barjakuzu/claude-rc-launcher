@@ -109,11 +109,16 @@ CREATE TABLE IF NOT EXISTS alerts (
 );
 """
 # session_usage, cost_daily and alerts (Phase 3 wiring, CONTRACT.md section
-# 2) are all brand-new tables, so CREATE TABLE IF NOT EXISTS above is safe
-# against the live hub.db as it stands today -- no ALTER TABLE / additive
-# migration needed for them. That pattern (_NEW_SESSION_COLUMNS /
-# _migrate_session_columns below) is only for adding columns to a table
-# that already exists on disk.
+# 2) were brand-new tables when this comment was first written, so CREATE
+# TABLE IF NOT EXISTS above was safe on its own. That is no longer
+# guaranteed for `alerts` specifically: any hub.db that has already run a
+# store.py from between that point and fix round 1 below has an `alerts`
+# table without target_type/name, and CREATE TABLE IF NOT EXISTS is a
+# no-op against it -- so those two columns are added the same additive way
+# as _NEW_SESSION_COLUMNS/_migrate_session_columns, not folded into the
+# CREATE TABLE above. `alerts` here therefore intentionally still reflects
+# only the ORIGINAL 10 columns, same as `sessions` above never gained
+# pid/tmux/rc_url/tokens/claude/status in its own CREATE TABLE either.
 
 # session_events natural key: (device_id, session_id, ts, event). A poller
 # cursor rewind re-submits the same rows; INSERT OR IGNORE against this
@@ -161,6 +166,31 @@ def _migrate_session_columns(conn):
             conn.execute(f"ALTER TABLE sessions ADD COLUMN {col} {coltype}")
 
 
+# Fix round 1 (CONTRACT.md amendment): an alert is a record of what was
+# observed at the moment it fired. The session it names may well have
+# ended, or the device gone offline, by the time anyone reads the alerts
+# table -- a runaway session that has since died is exactly the case that
+# matters most. Resolving `name`/`target_type` via a join against
+# `sessions`/`devices` at read time would lose that identity in precisely
+# that case, so both are stored directly on the row instead. Additive
+# (ALTER TABLE ADD COLUMN, only when absent) rather than folded into the
+# `alerts` CREATE TABLE above, because any hub.db that ran a store.py from
+# between the original alerts table (no target_type/name) and this fix
+# already has the table -- CREATE TABLE IF NOT EXISTS is a no-op against
+# it, so these columns would otherwise never appear there.
+_NEW_ALERT_COLUMNS = (
+    ("target_type", "TEXT"),  # "session" or "device", from the finding itself
+    ("name", "TEXT"),         # the session/device name at the moment the finding fired
+)
+
+
+def _migrate_alert_columns(conn):
+    existing = {row["name"] for row in conn.execute("PRAGMA table_info(alerts)")}
+    for col, coltype in _NEW_ALERT_COLUMNS:
+        if col not in existing:
+            conn.execute(f"ALTER TABLE alerts ADD COLUMN {col} {coltype}")
+
+
 def _json_or_none(value):
     return None if value is None else json.dumps(value)
 
@@ -199,6 +229,7 @@ class Store:
             init_conn.executescript(_SCHEMA)
             init_conn.commit()
             _migrate_session_columns(init_conn)
+            _migrate_alert_columns(init_conn)
             init_conn.commit()
             # De-duplicate any pre-existing rows (from a DB created before
             # this unique index existed) before creating the index, then
@@ -576,7 +607,17 @@ class Store:
         key at all; such findings are skipped and logged rather than
         raising, since evaluate() itself is documented to never raise and
         replace_alerts must not turn a malformed finding into a lost
-        poll cycle for every other finding in the same batch."""
+        poll cycle for every other finding in the same batch.
+
+        `target_type` and `name` (fix round 1) are stored on the row, not
+        resolved later via a join to sessions/devices: a session named by
+        an alert may well have ended (the runaway-that-has-since-died
+        case is exactly the one that matters) by the time anyone reads
+        the alerts table, and a join at read time would lose that
+        identity in precisely that case. Both are updated on every
+        re-observation, same as severity/message/value -- unlike
+        first_seen, there is no reason to freeze a finding's name/type to
+        whatever it happened to be the first time it fired."""
         def _do(conn):
             now = now_fn()
             current_keys = set()
@@ -590,14 +631,16 @@ class Store:
                 current_keys.add((device_id, session_id, rule))
                 conn.execute(
                     "INSERT INTO alerts (device_id, session_id, rule, severity, message, "
-                    "value, threshold, since, first_seen, last_seen) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?) "
+                    "value, threshold, since, first_seen, last_seen, target_type, name) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?) "
                     "ON CONFLICT(device_id, session_id, rule) DO UPDATE SET "
                     "severity=excluded.severity, message=excluded.message, "
                     "value=excluded.value, threshold=excluded.threshold, "
-                    "since=excluded.since, last_seen=excluded.last_seen",
+                    "since=excluded.since, last_seen=excluded.last_seen, "
+                    "target_type=excluded.target_type, name=excluded.name",
                     (device_id, session_id, rule, f.get("severity"), f.get("message"),
-                     f.get("value"), f.get("threshold"), f.get("since"), now, now))
+                     f.get("value"), f.get("threshold"), f.get("since"), now, now,
+                     f.get("target_type"), f.get("name")))
             existing_keys = [
                 (row["device_id"], row["session_id"], row["rule"])
                 for row in conn.execute("SELECT device_id, session_id, rule FROM alerts")]
@@ -751,12 +794,11 @@ class Store:
 
         Returns the raw alerts rows as dicts: device_id, session_id,
         rule, severity, message, value, threshold, since, first_seen,
-        last_seen. The alerts table (CONTRACT.md section 2) has no
-        `name` or `target_type` column -- those are cheap to derive
-        (target_type from session_id == "", name via a lookup against
-        fleet_view()/devices) and are left to the API layer rather than
-        duplicated into this table, since alerts persists only the
-        fields that must survive across polls."""
+        last_seen, target_type, name -- everything /api/alerts publishes,
+        with no join needed at read time (fix round 1: target_type/name
+        are stored on the row by replace_alerts, not resolved against
+        sessions/devices, since the session an alert names may well have
+        ended by the time this is read)."""
         conn = self._read_conn()
         try:
             rows = [dict(r) for r in conn.execute("SELECT * FROM alerts")]
