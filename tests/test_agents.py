@@ -333,6 +333,118 @@ class ListRcSessionsMergesExternalTest(unittest.TestCase):
         self.assertEqual(launcher_row["claude"]["waitingFor"], "permission_prompt")
         self.assertEqual(server._derive_session_state(launcher_row), "needs_attention")
 
+    def test_launcher_row_uses_claude_session_id_when_attached(self):
+        class FakeRun:
+            def __call__(self, cmd, **kw):
+                class R:
+                    returncode = 0
+                    stderr = ""
+                    stdout = "rc-portugal\n" if "list-sessions" in cmd else ""
+                return R()
+        self.sessions.subprocess.run = FakeRun()
+        self.sessions.get_session_env = lambda name, var: {
+            "RC_MODE": "c", "RC_WORKDIR": "/home/user/proj",
+            "RC_SESSION_ID": "known-uuid-1",
+        }.get(var)
+        agents.list_claude_sessions = lambda: [
+            {"session_id": "known-uuid-1", "name": "portugal", "cwd": "/home/user/proj",
+             "kind": "interactive", "status": "idle", "started_at": 1, "pid": 1,
+             "waiting_for": None, "state": None},
+        ]
+
+        result = self.sessions.list_rc_sessions()
+
+        launcher_row = next(s for s in result if s["name"] == "rc-portugal")
+        self.assertEqual(launcher_row["session_id"], "known-uuid-1")
+
+    def test_launcher_row_falls_back_to_rc_session_id_env_when_no_claude_row(self):
+        class FakeRun:
+            def __call__(self, cmd, **kw):
+                class R:
+                    returncode = 0
+                    stderr = ""
+                    stdout = "rc-portugal\n" if "list-sessions" in cmd else ""
+                return R()
+        self.sessions.subprocess.run = FakeRun()
+        self.sessions.get_session_env = lambda name, var: {
+            "RC_MODE": "c", "RC_WORKDIR": "/home/user/proj",
+            "RC_SESSION_ID": "env-uuid-9",
+        }.get(var)
+        agents.list_claude_sessions = lambda: []
+
+        result = self.sessions.list_rc_sessions()
+
+        launcher_row = next(s for s in result if s["name"] == "rc-portugal")
+        self.assertEqual(launcher_row["session_id"], "env-uuid-9")
+
+    def test_launcher_row_with_no_rc_session_id_gets_stable_synthetic_id(self):
+        """Pre-v3 case: a launcher (rc-*) tmux session with no
+        RC_SESSION_ID in its env and no matching claude row (e.g. claude
+        agents --json unavailable or the process hasn't registered yet)
+        must still get a stable top-level session_id, or
+        store.upsert_sessions would silently skip it and the fleet store
+        would end up holding only external sessions."""
+        class FakeRun:
+            def __call__(self, cmd, **kw):
+                class R:
+                    returncode = 0
+                    stderr = ""
+                    stdout = "rc-jobs-lin\n" if "list-sessions" in cmd else ""
+                return R()
+        self.sessions.subprocess.run = FakeRun()
+        self.sessions.get_session_env = lambda name, var: {
+            "RC_MODE": "c", "RC_WORKDIR": "/home/user/proj",
+        }.get(var)
+        agents.list_claude_sessions = lambda: []
+
+        result1 = self.sessions.list_rc_sessions()
+        result2 = self.sessions.list_rc_sessions()
+
+        row1 = next(s for s in result1 if s["name"] == "rc-jobs-lin")
+        row2 = next(s for s in result2 if s["name"] == "rc-jobs-lin")
+        self.assertTrue(row1["session_id"])
+        self.assertNotEqual(row1["session_id"], "")
+        # Stable across consecutive builds -- not a random id -- or the
+        # hub store would end and recreate the session on every poll.
+        self.assertEqual(row1["session_id"], row2["session_id"])
+        self.assertEqual(row1["session_id"], "tmux:rc-jobs-lin")
+
+    def test_pre_v3_pane_matched_row_gets_real_claude_session_id_not_synthetic(self):
+        """The pane-resolved match path (pre-v3 sessions with no
+        RC_SESSION_ID) must end up with the claude row's real session_id,
+        not the synthetic tmux:<name> fallback, once the claude row is
+        attached and RC_SESSION_ID is backfilled -- otherwise the next
+        poll (which matches by RC_SESSION_ID and gets the real id) would
+        look like a brand new session to the hub store."""
+        import panes as panes_mod
+        legacy_row = {
+            "session_id": "new-uuid-1", "name": "jobs-lin", "cwd": "/home/user/proj",
+            "kind": "interactive", "status": "idle", "started_at": 1,
+            "pid": 2567453, "waiting_for": None, "state": None,
+        }
+        pane = {"session_name": "rc-jobs-lin", "pane_id": "%5", "pane_pid": 2567448,
+                "window_index": "0"}
+
+        class FakeRun:
+            def __call__(self, cmd, **kw):
+                class R:
+                    returncode = 0
+                    stderr = ""
+                    stdout = "rc-jobs-lin\t1700000000\n" if "list-sessions" in cmd else ""
+                return R()
+        self.sessions.subprocess.run = FakeRun()
+        self.sessions.get_session_env = lambda name, var: {"RC_MODE": "c"}.get(var)
+        agents.list_claude_sessions = lambda: [legacy_row]
+        orig_pane_for_pid = panes_mod.pane_for_pid
+        panes_mod.pane_for_pid = lambda pid: pane
+        try:
+            result = self.sessions.list_rc_sessions()
+        finally:
+            panes_mod.pane_for_pid = orig_pane_for_pid
+
+        launcher_row = next(s for s in result if s["name"] == "rc-jobs-lin")
+        self.assertEqual(launcher_row["session_id"], "new-uuid-1")
+
 
 if __name__ == "__main__":
     unittest.main()

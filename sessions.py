@@ -313,6 +313,19 @@ def list_rc_sessions():
             claude_row = claude_rows_by_id.get(rc_session_id) if rc_session_id else None
             if claude_row:
                 _attach_claude_row(s, claude_row)
+            # Every row must carry a stable top-level session_id before it
+            # leaves the device -- the hub store's natural key -- or
+            # store.upsert_sessions silently skips it (see
+            # store.py:upsert_sessions), which would make the fleet store
+            # hold only external rows and drop every launcher session from
+            # the Sessions tab. Resolution order: the attached claude row's
+            # real session id, else RC_SESSION_ID from the tmux env, else a
+            # synthetic key derived from the tmux session name -- unique
+            # per device and stable for the life of the session (must not
+            # be random, or the store would end/recreate it every poll).
+            s["session_id"] = (
+                (s.get("claude") or {}).get("sessionId") or rc_session_id or f"tmux:{name}"
+            )
             sessions.append(s)
             launcher_rows_by_name[name] = s
 
@@ -333,6 +346,14 @@ def list_rc_sessions():
                 # next poll matches by id directly and get_transcript/
                 # restart_session work.
                 _attach_claude_row(launcher_row, row)
+                # This launcher row had no RC_SESSION_ID when its
+                # top-level session_id (above) was set, so it fell back to
+                # the synthetic tmux:<name> key. Now that its real claude
+                # session id is known, replace the synthetic key with it --
+                # same id the tmux env backfill below persists, so the next
+                # poll's RC_SESSION_ID match produces the identical id and
+                # the hub store sees one continuous session, not two.
+                launcher_row["session_id"] = row["session_id"]
                 subprocess.run(
                     ["tmux", "set-environment", "-t", pane["session_name"],
                      "RC_SESSION_ID", row["session_id"]],

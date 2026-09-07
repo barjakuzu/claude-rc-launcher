@@ -267,6 +267,46 @@ class StoreTest(unittest.TestCase):
         finally:
             migrated.close()
 
+    def test_realistic_pre_v3_launcher_row_round_trips_not_skipped(self):
+        """A launcher row as produced by sessions.list_rc_sessions() for a
+        session with no RC_SESSION_ID (the pre-v3 case, no claude row
+        attached either) now carries the synthetic tmux:<name>
+        session_id -- it must round-trip into fleet_view(), not be
+        silently skipped the way a session_id-less row is."""
+        self.store.upsert_device({"id": "local", "name": "hub", "role": "full",
+                                   "version": "1", "claude_version": "1"})
+        launcher_row = {
+            "session_id": "tmux:rc-jobs-lin", "name": "rc-jobs-lin", "mode": "c",
+            "url": None, "status": "unknown", "created_at": 1700000000,
+            "workdir": "/home/user/proj", "project": "proj", "cwd": "/home/user/proj",
+            "kind": "interactive",
+        }
+        result = self.store.upsert_sessions("local", [launcher_row], now_fn=lambda: 1010.0)
+        self.assertEqual(result["skipped"], 0)
+        view = self.store.fleet_view()
+        row = [s for s in view["sessions"] if s["session_id"] == "tmux:rc-jobs-lin"]
+        self.assertEqual(len(row), 1)
+        self.assertIsNone(row[0]["ended_at"])
+        self.assertEqual(row[0]["name"], "rc-jobs-lin")
+
+    def test_synthetic_launcher_session_id_stable_across_consecutive_upserts(self):
+        """The synthetic tmux:<name> id must stay identical across polls,
+        or the hub store would end and recreate the session every cycle
+        instead of tracking one continuous session."""
+        self.store.upsert_device({"id": "local", "name": "hub", "role": "full",
+                                   "version": "1", "claude_version": "1"})
+        row = {"session_id": "tmux:rc-jobs-lin", "name": "rc-jobs-lin", "cwd": "/tmp",
+               "kind": "interactive", "state": "idle"}
+        self.store.upsert_sessions("local", [row], now_fn=lambda: 1000.0)
+        view1 = self.store.fleet_view()
+        self.store.upsert_sessions("local", [row], now_fn=lambda: 1030.0)
+        view2 = self.store.fleet_view()
+        self.assertEqual(len(view1["sessions"]), 1)
+        self.assertEqual(len(view2["sessions"]), 1)
+        self.assertEqual(view1["sessions"][0]["session_id"], view2["sessions"][0]["session_id"])
+        self.assertEqual(view1["sessions"][0]["started_at"], view2["sessions"][0]["started_at"])
+        self.assertIsNone(view2["sessions"][0]["ended_at"])
+
     def test_add_events_rejects_rows_without_session_id(self):
         self.store.upsert_device({"id": "local", "name": "hub", "role": "full",
                                    "version": "1", "claude_version": "1"})
