@@ -782,6 +782,13 @@ class UsageCostAlertsTest(unittest.TestCase):
             self.assertIn("session_usage", tables)
             self.assertIn("cost_daily", tables)
             self.assertIn("alerts", tables)
+            # Fix round 1: target_type/name are on `alerts` from the start
+            # on a fresh database too, applied via the same additive-column
+            # path that handles a pre-existing alerts table (both run
+            # unconditionally in Store.__init__).
+            alert_cols = {row[1] for row in conn.execute("PRAGMA table_info(alerts)")}
+            self.assertIn("target_type", alert_cols)
+            self.assertIn("name", alert_cols)
         finally:
             conn.close()
 
@@ -904,14 +911,21 @@ class UsageCostAlertsTest(unittest.TestCase):
         self.assertEqual(len(alerts), 1)
         self.assertEqual(alerts[0]["first_seen"], 1000.0)
         self.assertEqual(alerts[0]["last_seen"], 1000.0)
+        # target_type/name (fix round 1) round-trip on the row itself, no
+        # join needed.
+        self.assertEqual(alerts[0]["target_type"], "session")
+        self.assertEqual(alerts[0]["name"], "rc-foo")
 
-        finding_updated = dict(finding, message="m1 updated", value=2.0)
+        finding_updated = dict(finding, message="m1 updated", value=2.0, name="rc-foo-renamed")
         self.store.replace_alerts([finding_updated], now_fn=lambda: 2000.0)
         alerts2 = self.store.live_alerts()
         self.assertEqual(len(alerts2), 1)
         self.assertEqual(alerts2[0]["first_seen"], 1000.0)  # unchanged
         self.assertEqual(alerts2[0]["last_seen"], 2000.0)   # moved
         self.assertEqual(alerts2[0]["message"], "m1 updated")
+        # name is NOT frozen like first_seen: it updates on every
+        # re-observation, same as severity/message/value.
+        self.assertEqual(alerts2[0]["name"], "rc-foo-renamed")
 
         # Stops firing (absent from the batch) -> deleted, not left stale.
         self.store.replace_alerts([], now_fn=lambda: 3000.0)
@@ -929,6 +943,8 @@ class UsageCostAlertsTest(unittest.TestCase):
         self.assertEqual(alerts[0]["session_id"], "")  # empty string, not NULL
         self.assertEqual(alerts[0]["first_seen"], 100.0)
         self.assertEqual(alerts[0]["last_seen"], 200.0)
+        self.assertEqual(alerts[0]["target_type"], "device")
+        self.assertEqual(alerts[0]["name"], "laptop")
 
     def test_replace_alerts_is_atomic_on_failure(self):
         good = {"rule": "token_rate", "severity": "alert", "device_id": "local",
@@ -1166,6 +1182,107 @@ class UsageCostAlertsMigrationTest(unittest.TestCase):
             dev = next(d for d in cost["devices"] if d["device_id"] == "local")
             self.assertEqual(dev["total_effective"], 5)
             self.assertEqual(len(migrated.live_alerts()), 1)
+        finally:
+            migrated.close()
+
+
+class AlertsTargetTypeNameColumnsTest(unittest.TestCase):
+    """Fix round 1 (CONTRACT.md amendment): target_type/name added to an
+    `alerts` table that already exists. Once any hub.db has run a store.py
+    from between the original alerts table (session_usage/cost_daily/alerts
+    all landing in the same release) and this fix, `alerts` is no longer
+    guaranteed brand-new -- CREATE TABLE IF NOT EXISTS is a no-op against
+    it, so this must be the same additive ALTER TABLE path as
+    _NEW_SESSION_COLUMNS/_migrate_session_columns, not a schema change."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_target_type_and_name_added_to_a_pre_existing_alerts_table(self):
+        old_db = os.path.join(self.tmp.name, "old.db")
+        conn = sqlite3.connect(old_db)
+        conn.executescript("""
+            CREATE TABLE devices (
+                id TEXT PRIMARY KEY, name TEXT, role TEXT, version TEXT,
+                claude_version TEXT, last_seen REAL, online INTEGER DEFAULT 0
+            );
+            CREATE TABLE sessions (
+                device_id TEXT, session_id TEXT, name TEXT, cwd TEXT, kind TEXT,
+                state TEXT, started_at REAL, ended_at REAL, last_seen REAL,
+                external INTEGER DEFAULT 0,
+                pid INTEGER, tmux TEXT, rc_url TEXT, tokens INTEGER, claude TEXT,
+                status TEXT,
+                PRIMARY KEY (device_id, session_id)
+            );
+            CREATE TABLE session_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, device_id TEXT, session_id TEXT,
+                ts REAL, event TEXT, extra_json TEXT
+            );
+            CREATE UNIQUE INDEX idx_events_unique
+                ON session_events(device_id, session_id, ts, event);
+            CREATE TABLE audit_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, actor TEXT, action TEXT,
+                target TEXT, device_id TEXT, detail TEXT
+            );
+            CREATE TABLE session_usage (
+                device_id TEXT, session_id TEXT,
+                input INTEGER, cache_read INTEGER, cache_write INTEGER,
+                output INTEGER, effective INTEGER,
+                last_ts REAL, updated_at REAL,
+                PRIMARY KEY (device_id, session_id)
+            );
+            CREATE TABLE cost_daily (
+                device_id TEXT, day TEXT, project TEXT,
+                input INTEGER, cache_read INTEGER, cache_write INTEGER,
+                output INTEGER, effective INTEGER, updated_at REAL,
+                PRIMARY KEY (device_id, day, project)
+            );
+            -- Pre-fix-round alerts: exactly the original 10 columns, no
+            -- target_type/name -- the shape this task's own first commit
+            -- produced, before this fix round.
+            CREATE TABLE alerts (
+                device_id TEXT, session_id TEXT, rule TEXT,
+                severity TEXT, message TEXT, value REAL, threshold REAL,
+                since REAL, first_seen REAL, last_seen REAL,
+                PRIMARY KEY (device_id, session_id, rule)
+            );
+        """)
+        conn.execute(
+            "INSERT INTO alerts (device_id, session_id, rule, severity, message, value, "
+            "threshold, since, first_seen, last_seen) VALUES "
+            "('local', 's1', 'token_rate', 'alert', 'old row', 5.0, 2.0, 100.0, 200.0, 300.0)")
+        conn.commit()
+        conn.close()
+        os.chmod(old_db, 0o600)
+
+        migrated = store.Store(old_db)
+        try:
+            alerts = migrated.live_alerts()
+            self.assertEqual(len(alerts), 1)
+            # The pre-existing row survives untouched; the two new columns
+            # come back as NULL for it (no data to backfill from).
+            self.assertEqual(alerts[0]["message"], "old row")
+            self.assertEqual(alerts[0]["first_seen"], 200.0)
+            self.assertIsNone(alerts[0]["target_type"])
+            self.assertIsNone(alerts[0]["name"])
+
+            # The columns are usable going forward: replace_alerts on the
+            # SAME key (device_id, session_id, rule) sets them and still
+            # preserves the pre-existing row's first_seen.
+            migrated.replace_alerts([
+                {"rule": "token_rate", "severity": "alert", "target_type": "session",
+                 "device_id": "local", "session_id": "s1", "name": "rc-old",
+                 "message": "updated", "value": 6.0, "threshold": 2.0, "since": 150.0},
+            ], now_fn=lambda: 400.0)
+            alerts2 = migrated.live_alerts()
+            self.assertEqual(len(alerts2), 1)
+            self.assertEqual(alerts2[0]["target_type"], "session")
+            self.assertEqual(alerts2[0]["name"], "rc-old")
+            self.assertEqual(alerts2[0]["first_seen"], 200.0)  # preserved
+            self.assertEqual(alerts2[0]["last_seen"], 400.0)
         finally:
             migrated.close()
 
