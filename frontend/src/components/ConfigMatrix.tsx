@@ -100,6 +100,7 @@ export function ConfigMatrixView({ cards }: { cards: DeviceCard[] }) {
             <th style={thStyle}>Rules</th>
             <th style={thStyle}>Hooks</th>
             <th style={thStyle}>RC@startup</th>
+            <th style={thStyle}>Base sync</th>
             <th style={thStyle}></th>
           </tr>
         </thead>
@@ -111,11 +112,9 @@ export function ConfigMatrixView({ cards }: { cards: DeviceCard[] }) {
             const report = isReport(entry) ? entry : null;
             const unreachable = isErrorEntry(entry);
             const isExpanded = expanded.has(c.id);
-            const commitSkewed = has('head differs from hub') || has('settings uncommitted')
-              || has('settings edited locally (blocks pull)');
-            const commitTone: 'red' | 'amber' =
-              has('head differs from hub') || has('settings edited locally (blocks pull)') ? 'red' : 'amber';
-            const drift = report?.settings.settings_drift;
+            const commitSkewed = has('head differs from hub');
+            const commitTone: 'red' | 'amber' = 'red';
+            const baseSync = report?.settings.base_sync;
             return (
               <Fragment key={c.id}>
                 <tr
@@ -126,7 +125,7 @@ export function ConfigMatrixView({ cards }: { cards: DeviceCard[] }) {
                     {report ? (isExpanded ? '▾ ' : '▸ ') : ''}{c.name}
                   </td>
                   {unreachable ? (
-                    <td colSpan={8} style={{ padding: '6px 10px', fontFamily: FONT_MONO, fontSize: 11.5, color: RT.textLow, fontStyle: 'italic' }}>
+                    <td colSpan={9} style={{ padding: '6px 10px', fontFamily: FONT_MONO, fontSize: 11.5, color: RT.textLow, fontStyle: 'italic' }}>
                       unreachable{(entry as { error: string }).error ? ` — ${(entry as { error: string }).error}` : ''}
                     </td>
                   ) : (
@@ -138,8 +137,11 @@ export function ConfigMatrixView({ cards }: { cards: DeviceCard[] }) {
                       <td style={cellStyle(has('external skills not installed (run bootstrap)'), 'amber')}>
                         {report ? `${report.skills.count} / ${report.skills.deps_missing.length} deps missing` : '—'}
                       </td>
-                      <td style={cellStyle(has('missing plugins'))}>
-                        {report ? `${report.plugins.missing.length} missing / ${report.plugins.extra.length} extra` : '—'}
+                      <td style={cellStyle(has('missing plugins') || has('plugins installed but disabled'), has('missing plugins') ? 'red' : 'amber')}>
+                        {report
+                          ? `${report.plugins.missing.length} missing / ${report.plugins.extra.length} extra`
+                            + (report.plugins.disabled.length ? `, ${report.plugins.disabled.length} disabled plugins` : '')
+                          : '—'}
                       </td>
                       <td style={{ padding: '6px 10px', fontFamily: FONT_MONO, fontSize: 11.5, color: RT.textDim }}>
                         {report ? `${report.rules.shared.length} shared / ${report.rules.local.length} local` : '—'}
@@ -147,6 +149,9 @@ export function ConfigMatrixView({ cards }: { cards: DeviceCard[] }) {
                       <td style={cellStyle(has('no hooks'))}>{report ? (report.settings.hooks_present ? 'yes' : 'no') : '—'}</td>
                       <td style={{ padding: '6px 10px', fontFamily: FONT_MONO, fontSize: 11.5, color: RT.textDim }}>
                         {report ? (report.settings.remote_control_at_startup ? 'yes' : 'no') : '—'}
+                      </td>
+                      <td style={cellStyle(has('settings out of date (run bootstrap)'), 'amber')}>
+                        {baseSync ? baseSync.kind : '—'}
                       </td>
                     </>
                   )}
@@ -165,7 +170,7 @@ export function ConfigMatrixView({ cards }: { cards: DeviceCard[] }) {
                 </tr>
                 {isExpanded && report && (
                   <tr key={`${c.id}-detail`} style={{ borderBottom: `1px solid ${RT.border}` }}>
-                    <td colSpan={11} style={{ padding: '4px 10px 14px 26px', fontFamily: FONT_MONO, fontSize: 10.5, color: RT.textLow, lineHeight: 1.7 }}>
+                    <td colSpan={12} style={{ padding: '4px 10px 14px 26px', fontFamily: FONT_MONO, fontSize: 10.5, color: RT.textLow, lineHeight: 1.7 }}>
                       <div>skills: {joinOrDash(report.skills.names)}</div>
                       <div>device-only skills: {joinOrDash(report.skills.device_only)}</div>
                       <div>plugins declared: {joinOrDash(report.plugins.declared)}</div>
@@ -182,12 +187,24 @@ export function ConfigMatrixView({ cards }: { cards: DeviceCard[] }) {
                           );
                         }) : '—'}
                       </div>
+                      {report.plugins.disabled.length > 0 && (
+                        <div style={{ color: RT.amber }}>disabled plugins: {joinOrDash(report.plugins.disabled)}</div>
+                      )}
                       <div>rules (shared): {joinOrDash(report.rules.shared)}</div>
                       <div>rules (local): {joinOrDash(report.rules.local)}</div>
-                      <div>effective model: {report.effective_model || '—'}</div>
-                      {drift && drift.kind && (
-                        <div style={{ color: drift.kind === 'local-edit' ? RT.red : RT.textLow }}>
-                          settings drift ({drift.kind}): {joinOrDash(drift.keys)}
+                      <div>
+                        effective model: {report.effective_model || '—'}
+                        {report.env_model_override && ` (env override: ${report.env_model_override})`}
+                      </div>
+                      {baseSync && (
+                        <div style={{ color: baseSync.kind === 'stale' ? RT.amber : RT.textLow }}>
+                          base sync ({baseSync.kind})
+                          {baseSync.kind === 'stale' && (
+                            <>
+                              {baseSync.missing.length > 0 && <>, missing: {joinOrDash(baseSync.missing)}</>}
+                              {baseSync.differing.length > 0 && <>, differing: {joinOrDash(baseSync.differing)}</>}
+                            </>
+                          )}
                         </div>
                       )}
                     </td>

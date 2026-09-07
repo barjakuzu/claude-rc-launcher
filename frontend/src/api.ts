@@ -26,12 +26,12 @@ export interface ConfigReport {
   settings: {
     hooks_present: boolean;
     remote_control_at_startup: boolean | null;
-    settings_symlinked: boolean;
     skills_symlinked: boolean;
     sha256: string | null;
-    settings_drift: { kind: 'ordering' | 'local-edit' | 'unknown' | null; keys: string[] };
+    base_sync: { kind: 'in-sync' | 'stale' | 'unknown'; missing: string[]; differing: string[] };
   };
   effective_model: string | null;
+  env_model_override?: string;
   claude_local_md: boolean;
   generated_at: number;
   errors: string[];
