@@ -54,6 +54,20 @@ export const fmtK = (n: number): string => {
 };
 export const fmtPct = (n: number): string => Math.round(n) + '%';
 
+// Effective-token usage label for a session/device `usage` field that is
+// null when unknown (never a fake 0). Part of Phase 3 wiring's usage
+// accounting. Takes the usage object itself (or a stand-in shaped like one)
+// so callers can pass `s.usage` directly and get the right tri-state
+// behavior:
+//   undefined -> null   (field not sent by this backend yet, render nothing)
+//   null      -> '—'    (backend confirmed no transcript data exists)
+//   object    -> fmtK(usage.effective)
+export const fmtUsage = (usage: { effective: number } | null | undefined): string | null => {
+  if (usage === undefined) return null;
+  if (usage === null) return '—';
+  return fmtK(usage.effective);
+};
+
 // Tokens-bar color: green → amber → red as capacity fills.
 export const capColor = (pct: number): string => (pct >= 90 ? FN.red : pct >= 75 ? FN.amber : FN.green);
 

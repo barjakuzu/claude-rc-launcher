@@ -151,6 +151,8 @@ export const Icons: Record<string, IconFn> = {
   spinner: (p) => <I {...p}><path d="M21 12a9 9 0 1 1-9-9" opacity=".25" /><path d="M21 12a9 9 0 0 0-9-9" /></I>,
   filter: (p) => <I {...p}><path d="M4 5h16l-6 8v6l-4-2v-4L4 5z" /></I>,
   edit: (p) => <I {...p}><path d="M12 20h9" /><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z" /></I>,
+  alertTriangle: (p) => <I {...p}><path d="M12 3.5l9.3 16.1a1 1 0 0 1-.87 1.5H3.57a1 1 0 0 1-.87-1.5L12 3.5z" /><path d="M12 9.5v4.5M12 17.2h.01" /></I>,
+  chart: (p) => <I {...p}><rect x="4" y="10" width="4" height="10" rx="1" /><rect x="10" y="6" width="4" height="14" rx="1" /><rect x="16" y="13" width="4" height="7" rx="1" /></I>,
 };
 
 // Status pill — uses the RT palette mapping from the V4 panel.

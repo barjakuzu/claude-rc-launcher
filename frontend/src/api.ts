@@ -54,6 +54,23 @@ export interface FleetDevice {
   claude_version: string | null;
   last_seen: number | null;
   online: number;
+  /** True when this device's usage snapshot is incomplete (Phase 3 wiring,
+   * CONTRACT.md section 3): a consumer must not treat a low number here as
+   * authoritative. Absent on a backend that doesn't send it yet. */
+  usage_partial?: boolean;
+}
+
+// Cumulative token accounting for one session, joined from the hub's
+// session_usage table (CONTRACT.md sections 1/3). `null` means no
+// transcript data exists for the session (distinct from all-zero usage),
+// so it must render as a dash, never as 0.
+export interface SessionUsage {
+  input: number;
+  cache_read: number;
+  cache_write: number;
+  output: number;
+  effective: number;
+  last_ts: number;
 }
 
 export interface FleetSession {
@@ -83,11 +100,115 @@ export interface FleetSession {
   /** Backend mode string ('sh' sessions have no transcript). */
   mode?: string;
   claude?: { pid?: number | null; state?: string | null } | Record<string, unknown>;
+  /** Cumulative token usage for this session (CONTRACT.md section 3).
+   * `undefined` on a backend that doesn't send it yet; `null` when the
+   * backend sent it but has no transcript data for this session (the two
+   * are different and must be told apart: never render `null` as 0). */
+  usage?: SessionUsage | null;
+  /** Seconds since `usage.last_ts`, or null. Undefined when the backend
+   * doesn't send it yet. */
+  usage_age_seconds?: number | null;
 }
 
 export interface FleetView {
   devices: FleetDevice[];
   sessions: FleetSession[];
+}
+
+// ─── Cost + alerts (Phase 3 wiring, CONTRACT.md sections 3/5) ────────────────
+// /api/cost and /api/alerts do not exist on the backend yet (a parallel lane
+// is building them), so fetchCost/fetchAlerts below throw on a 404 or any
+// non-2xx response so callers can degrade honestly instead of showing a
+// spinner that never resolves or a fake zero.
+
+export interface CostDailyBucket {
+  day: string;
+  effective: number;
+  input: number;
+  cache_read: number;
+  cache_write: number;
+  output: number;
+}
+
+export interface CostDevice {
+  device_id: string;
+  name: string;
+  total_effective: number;
+  /** Newest day first. */
+  daily: CostDailyBucket[];
+}
+
+export interface CostProject {
+  device_id: string;
+  project: string;
+  effective: number;
+}
+
+export interface CostTotals {
+  effective: number;
+  input: number;
+  cache_read: number;
+  cache_write: number;
+  output: number;
+}
+
+export interface CostReport {
+  generated_at: number;
+  days: number;
+  devices: CostDevice[];
+  /** Sorted by effective descending, capped at 50 entries. */
+  projects: CostProject[];
+  totals: CostTotals;
+}
+
+export interface AlertFinding {
+  rule: string;
+  severity: string;
+  target_type: string;
+  device_id: string;
+  session_id: string;
+  name: string;
+  message: string;
+  value: number;
+  threshold: number;
+  since: number;
+  first_seen: number;
+  last_seen: number;
+}
+
+export interface AlertsSummary {
+  alert: number;
+  warn: number;
+  rules: Record<string, number>;
+}
+
+export interface AlertsReport {
+  generated_at: number;
+  summary: AlertsSummary;
+  alerts: AlertFinding[];
+  /** guard.LAST_LOAD_ERROR: a broken guard.json surfaces here instead of
+   * silently falling back to defaults. Must be shown to the user, not
+   * swallowed. */
+  config_error: string | null;
+}
+
+// Deliberately bypasses req()'s "always call r.json()" behavior: these two
+// routes don't exist yet, and a 404 that returns an HTML error page (rather
+// than JSON) would otherwise surface as a confusing JSON-parse error instead
+// of a clean "not available" state.
+async function reqStrict<T>(path: string): Promise<T> {
+  const r = await fetch('/rc' + path);
+  if (r.status === 401) { window.location.href = '/login'; throw new Error('auth'); }
+  if (!r.ok) throw new Error(`request failed: ${r.status}`);
+  return r.json() as Promise<T>;
+}
+
+export async function fetchCost(days = 30): Promise<CostReport> {
+  return reqStrict<CostReport>(`/api/cost?days=${days}`);
+}
+
+export async function fetchAlerts(): Promise<AlertsReport> {
+  return reqStrict<AlertsReport>('/api/alerts');
 }
 
 export interface SessionEvent {
