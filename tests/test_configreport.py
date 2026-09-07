@@ -142,6 +142,15 @@ class CollectConfigReportTest(unittest.TestCase):
         dumped = json.dumps(report)
         self.assertNotIn("super-secret-token-do-not-read", dumped)
 
+    def test_device_only_excludes_gitignored_skill_not_present_on_this_device(self):
+        # .gitignore is a SHARED file: it also lists a skill that lives on
+        # a different device only. This device must not claim it.
+        with open(os.path.join(self.cfg, ".gitignore"), "a") as f:
+            f.write("/skills/camoufox-browse/\n")
+        report = configreport.collect_config_report(home=self.home, run=_stub_run)
+        self.assertIn("google-workspace", report["skills"]["device_only"])
+        self.assertNotIn("camoufox-browse", report["skills"]["device_only"])
+
     def test_agents_and_rules_empty_local_not_error(self):
         report = configreport.collect_config_report(home=self.home, run=_stub_run)
         self.assertIn("claude", report["agents"])

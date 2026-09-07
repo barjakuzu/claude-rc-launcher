@@ -134,7 +134,8 @@ def _broken_link_targets_external(cfg_dir, link_path):
 def _skills_report(cfg_dir, errors):
     skills_dir = os.path.join(cfg_dir, "skills")
     names = _dir_names(skills_dir)
-    device_only = set(_device_only_names_from_gitignore(cfg_dir, errors))
+    gitignore_names = set(_device_only_names_from_gitignore(cfg_dir, errors))
+    device_only = gitignore_names & set(names)
     dangling, deps_missing = [], []
     for n in names:
         entry = os.path.join(skills_dir, n)
