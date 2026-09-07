@@ -1240,5 +1240,144 @@ class MiscTest(UsageTestCase):
             self.assertEqual(usage._default_root(), os.path.expanduser("~/.claude/projects"))
 
 
+class DailyByProjectTest(UsageTestCase):
+    """daily_by_project: same per-day totals as daily, split out by
+    project instead of summed across all of them."""
+
+    def test_groups_by_day_and_project_independently(self):
+        proj2 = os.path.join(self.root, "-tmp-otherproj")
+        os.makedirs(proj2)
+        path1 = self._session_path(session_id="s-in-proj1")
+        self._write(path1, _line(_usage_row(
+            session_id="s-in-proj1", msg_id="m1",
+            ts="2026-09-06T08:00:00.000Z", input_tokens=1, output=1)))
+        path2 = os.path.join(proj2, "s-in-proj2.jsonl")
+        self._write(path2, _line(_usage_row(
+            session_id="s-in-proj2", msg_id="m2",
+            ts="2026-09-06T09:00:00.000Z", input_tokens=2, output=2)))
+
+        data = usage.rollup(root=self.root)
+        rows = {(r["day"], r["project"]): r for r in data["daily_by_project"]}
+
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[("2026-09-06", PROJECT_DIR)]["input"], 1)
+        self.assertEqual(rows[("2026-09-06", PROJECT_DIR)]["output"], 1)
+        self.assertEqual(rows[("2026-09-06", PROJECT_DIR)]["effective"],
+                          usage.effective(input=1, output=1))
+        self.assertEqual(rows[("2026-09-06", "-tmp-otherproj")]["input"], 2)
+        self.assertEqual(rows[("2026-09-06", "-tmp-otherproj")]["output"], 2)
+
+    def test_two_sessions_same_project_same_day_sum_together(self):
+        path1 = self._session_path(session_id="s1")
+        self._write(path1, _line(_usage_row(
+            session_id="s1", msg_id="m1", ts="2026-09-06T08:00:00.000Z",
+            input_tokens=1, output=1)))
+        path2 = self._session_path(session_id="s2")
+        self._write(path2, _line(_usage_row(
+            session_id="s2", msg_id="m2", ts="2026-09-06T09:00:00.000Z",
+            input_tokens=4, output=4)))
+
+        data = usage.rollup(root=self.root)
+        rows = [r for r in data["daily_by_project"]
+                if r["day"] == "2026-09-06" and r["project"] == PROJECT_DIR]
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["input"], 5)
+        self.assertEqual(rows[0]["output"], 5)
+
+    def test_sparse_no_entry_for_a_day_never_seen(self):
+        path = self._session_path()
+        self._write(path, _line(_usage_row(ts="2026-09-06T08:00:00.000Z", input_tokens=1, output=1)))
+        data = usage.rollup(root=self.root)
+        days_seen = {r["day"] for r in data["daily_by_project"]}
+        self.assertEqual(days_seen, {"2026-09-06"})
+
+    def test_honours_days_window_like_daily(self):
+        path = self._session_path()
+        recent_row = _usage_row(msg_id="m-recent", ts="2026-09-06T08:00:00.000Z",
+                                 input_tokens=1, output=1)
+        old_row = _usage_row(msg_id="m-old", ts="2026-06-01T00:00:00.000Z",
+                              input_tokens=2, output=2)
+        self._write(path, _line(recent_row) + _line(old_row))
+        fixed_now = datetime.datetime(2026, 9, 7, tzinfo=datetime.timezone.utc).timestamp()
+
+        data = usage.rollup(root=self.root, now_fn=lambda: fixed_now, days=30)
+        days_seen = {r["day"] for r in data["daily_by_project"]}
+        self.assertIn("2026-09-06", days_seen)
+        self.assertNotIn("2026-06-01", days_seen)
+
+    def test_days_30_yields_exactly_30_distinct_days(self):
+        path = self._session_path()
+        fixed_now_dt = datetime.datetime(2026, 9, 7, tzinfo=datetime.timezone.utc)
+        fixed_now = fixed_now_dt.timestamp()
+        lines = []
+        for i in range(35):
+            day = fixed_now_dt - datetime.timedelta(days=i)
+            ts = day.strftime("%Y-%m-%dT00:00:00.000Z")
+            lines.append(_line(_usage_row(
+                msg_id="m%d" % i, request_id="r%d" % i, ts=ts, input_tokens=1, output=1)))
+        self._write(path, "".join(lines))
+        data = usage.rollup(root=self.root, now_fn=lambda: fixed_now, days=30)
+        days_seen = {r["day"] for r in data["daily_by_project"]}
+        self.assertEqual(len(days_seen), 30)
+
+    def test_subagent_usage_rolls_into_parents_project_not_a_subagents_project(self):
+        parent_id = "sess-parent"
+        parent_path = self._session_path(session_id=parent_id)
+        self._write(parent_path, _line(_usage_row(
+            session_id=parent_id, msg_id="p1", ts="2026-09-06T08:00:00.000Z",
+            input_tokens=1, output=1)))
+        sub_path = self._subagent_path(parent_id, "agent-abc")
+        self._write(sub_path, _line(_usage_row(
+            session_id=parent_id, msg_id="a1", ts="2026-09-06T09:00:00.000Z",
+            input_tokens=2, output=2)))
+
+        data = usage.rollup(root=self.root)
+        rows = [r for r in data["daily_by_project"] if r["day"] == "2026-09-06"]
+
+        self.assertEqual(len(rows), 1)  # parent + subagent merge into ONE project row
+        self.assertEqual(rows[0]["project"], PROJECT_DIR)
+        self.assertEqual(rows[0]["input"], 3)
+        self.assertEqual(rows[0]["output"], 3)
+
+    def test_summed_across_projects_matches_daily(self):
+        # daily must stay exactly as it is: summing daily_by_project's
+        # rows for one day across every project must reproduce daily's
+        # own total for that day.
+        proj2 = os.path.join(self.root, "-tmp-otherproj")
+        os.makedirs(proj2)
+        path1 = self._session_path(session_id="s-in-proj1")
+        self._write(path1, _line(_usage_row(
+            session_id="s-in-proj1", msg_id="m1",
+            ts="2026-09-06T08:00:00.000Z", input_tokens=1, cache_read=10,
+            cache_write=100, output=1)))
+        path2 = os.path.join(proj2, "s-in-proj2.jsonl")
+        self._write(path2, _line(_usage_row(
+            session_id="s-in-proj2", msg_id="m2",
+            ts="2026-09-06T09:00:00.000Z", input_tokens=2, cache_read=20,
+            cache_write=200, output=2)))
+
+        data = usage.rollup(root=self.root)
+        rows = [r for r in data["daily_by_project"] if r["day"] == "2026-09-06"]
+        summed = {
+            "input": sum(r["input"] for r in rows),
+            "cache_read": sum(r["cache_read"] for r in rows),
+            "cache_write": sum(r["cache_write"] for r in rows),
+            "output": sum(r["output"] for r in rows),
+            "effective": sum(r["effective"] for r in rows),
+        }
+        self.assertEqual(summed["input"], data["daily"]["2026-09-06"]["input"])
+        self.assertEqual(summed["cache_read"], data["daily"]["2026-09-06"]["cache_read"])
+        self.assertEqual(summed["cache_write"], data["daily"]["2026-09-06"]["cache_write"])
+        self.assertEqual(summed["output"], data["daily"]["2026-09-06"]["output"])
+        self.assertEqual(summed["effective"], data["daily"]["2026-09-06"]["effective"])
+
+    def test_unparsable_timestamp_never_produces_a_row(self):
+        path = self._session_path()
+        self._write(path, _line(_usage_row(ts="not-a-timestamp", input_tokens=5, output=1)))
+        data = usage.rollup(root=self.root)
+        self.assertEqual(data["daily_by_project"], [])
+
+
 if __name__ == "__main__":
     unittest.main()
