@@ -843,20 +843,20 @@ class PhantomEmptySessionTest(UsageTestCase):
 
 
 class BudgetStallRecoveryTest(UsageTestCase):
-    """Round 3/4: a single line larger than what one call's fair share of
-    the budget allows must still eventually complete, once a call comes
-    along that can offer it the full max_bytes_per_call. Two files:
-    "sess-a" has something small to read and is kept newer-mtime
-    (processed first) so on a call where it has new content it eats into
-    the shared budget ahead of "sess-b"; "sess-b" is one line just big
-    enough to fit in a full max_bytes_per_call on its own, but NOT in
-    what's left over once "sess-a" goes first and spends some of it.
-    Call 1: "sess-a" has new content, "sess-b" stalls (round 4: the
-    allowance is now clamped to what this call actually has left, so a
-    stall while something else is competing for the SAME call's budget
-    is deferred, not force-completed at "sess-a"'s expense). Call 2:
-    "sess-a" is unchanged (nothing new, fast-pathed, costs nothing), so
-    "sess-b" gets the full budget to itself and completes."""
+    """Round 3/4/5: a single line larger than what one call's fair share
+    of the budget allows must still eventually complete, once a call
+    comes along that can offer it the full max_bytes_per_call. This is
+    the HARDER case (round 4 had relaxed it to "sess-a" going idle for
+    the retry; round 5's own review flagged that as no longer proving
+    anything once the defer branch could starve a stalled file
+    indefinitely): "sess-a" keeps having new content, and stays the
+    newest-mtime file, on EVERY call, including the one where "sess-b"
+    finally completes. Without round 5's stall-priority fix (processing
+    a stalled file first, ahead of even the newest file, so it actually
+    reaches a call offering the full allowance), "sess-b" would never
+    naturally see a full budget as long as "sess-a" keeps competing
+    (StarvationByNewerFileTest is the dedicated, more direct
+    reproduction of that failure)."""
 
     def setUp(self):
         super().setUp()
@@ -867,33 +867,90 @@ class BudgetStallRecoveryTest(UsageTestCase):
         line = _line(_usage_row(session_id="sess-a", msg_id="a%d" % n, request_id="ra%d" % n,
                                  input_tokens=1, output=1))
         self._write(self.path_a, line, mode="a")
+        os.utime(self.path_a, (2_000_000_100 + n, 2_000_000_100 + n))  # always newest
         return len(line.encode("utf-8"))
 
-    def test_stalled_file_completes_once_a_call_offers_the_full_budget(self):
+    def test_stalled_file_completes_even_while_a_newer_file_stays_continuously_active(self):
         row_b = _usage_row(session_id="sess-b", msg_id="big-b", input_tokens=3, output=3)
         line_b = _line(row_b)
         self._write(self.path_b, line_b)
         size_b = len(line_b.encode("utf-8"))
+        os.utime(self.path_b, (2_000_000_000, 2_000_000_000))
 
         a_chunk = self._append_a(0)
-        os.utime(self.path_b, (2_000_000_000, 2_000_000_000))
-        os.utime(self.path_a, (2_000_000_100, 2_000_000_100))  # newer: processed first
 
-        # Enough for "sess-b" alone, not enough once "sess-a" (processed
-        # first) has already spent a_chunk of it this call.
+        # Enough for "sess-b" alone, not enough once "sess-a" (newer
+        # mtime, so processed first absent stall priority) has already
+        # spent a_chunk of it.
         budget = size_b + max(a_chunk // 2, 1)
         self.assertLess(budget - a_chunk, size_b)
 
         first = usage.rollup(root=self.root, max_bytes_per_call=budget)
-        self.assertIn("sess-a", first["sessions"])  # unaffected by B's trouble
-        self.assertNotIn("sess-b", first["sessions"])  # B stalled: not enough room
+        self.assertNotIn("sess-b", first["sessions"])  # stalled: not enough room
 
-        # "sess-a" has nothing new this time, so it costs nothing:
-        # "sess-b" gets the entire budget to itself and completes.
-        second = usage.rollup(root=self.root, max_bytes_per_call=budget)
-        self.assertIn("sess-b", second["sessions"])
-        self.assertEqual(second["sessions"]["sess-b"]["messages"], 1)
-        self.assertEqual(second["sessions"]["sess-b"]["input"], 3)
+        # "sess-a" keeps getting new content, and stays newest, on every
+        # subsequent call too: "sess-b" must still land within a handful
+        # of calls (a bounded loop, not an exact call count, since the
+        # precise timing depends on rotation/ordering details this test
+        # shouldn't need to hardcode).
+        for n in range(1, 5):
+            self._append_a(n)
+            data = usage.rollup(root=self.root, max_bytes_per_call=budget)
+            if "sess-b" in data["sessions"]:
+                self.assertEqual(data["sessions"]["sess-b"]["messages"], 1)
+                self.assertEqual(data["sessions"]["sess-b"]["input"], 3)
+                return
+        self.fail("sess-b never completed while sess-a stayed continuously active")
+
+
+class StarvationByNewerFileTest(UsageTestCase):
+    """Round 5, the Major: a stalled file must not be deferred forever
+    just because some newer-mtime file keeps having a little new content
+    every call. Before this fix, the defer branch in _update_entry
+    triggered whenever ANY earlier (newer-mtime) file read even one
+    byte, so a stalled file positioned behind a continuously active
+    newer file was deferred on every single call, indefinitely:
+    measured at 300 of 300 consecutive calls, stall_count stuck at 1
+    forever (a defer never increments it), never counted in "skipped",
+    only "partial" -- the same ambiguous signal ordinary clipping also
+    sets, so a kill guard reading a frozen, wildly wrong number had no
+    way to tell it apart from "the tree's just busy"."""
+
+    def test_stalled_file_is_not_starved_by_a_continuously_active_newer_file(self):
+        path_a = self._session_path(session_id="sess-a")
+        path_b = self._session_path(session_id="sess-b")
+
+        row_b = _usage_row(session_id="sess-b", msg_id="big-b", input_tokens=5, output=5)
+        line_b = _line(row_b)
+        self._write(path_b, line_b)
+        size_b = len(line_b.encode("utf-8"))
+        os.utime(path_b, (2_000_000_000, 2_000_000_000))
+
+        a_chunk_line = _line(_usage_row(
+            session_id="sess-a", msg_id="a0", request_id="ra0", input_tokens=1, output=1))
+        a_chunk = len(a_chunk_line.encode("utf-8"))
+
+        # Fits the full budget on its own; not what's left once "sess-a"
+        # (always newer-mtime, always with new content) goes first.
+        budget = size_b + max(a_chunk // 2, 1)
+        self.assertLess(budget - a_chunk, size_b)
+
+        landed = False
+        for n in range(30):  # comfortably more than needed; nowhere near the measured 300
+            line = _line(_usage_row(
+                session_id="sess-a", msg_id="a%d" % n, request_id="ra%d" % n,
+                input_tokens=1, output=1))
+            self._write(path_a, line, mode="a")
+            os.utime(path_a, (2_000_000_100 + n, 2_000_000_100 + n))
+            data = usage.rollup(root=self.root, max_bytes_per_call=budget)
+            if "sess-b" in data["sessions"]:
+                landed = True
+                self.assertEqual(data["sessions"]["sess-b"]["messages"], 1)
+                self.assertEqual(data["sessions"]["sess-b"]["input"], 5)
+                break
+
+        self.assertTrue(
+            landed, "sess-b was starved indefinitely behind a continuously active newer file")
 
 
 class GiveUpAfterMaxStallsTest(UsageTestCase):
@@ -938,32 +995,48 @@ class GiveUpAfterMaxStallsTest(UsageTestCase):
 
 
 class OtherFilesUnaffectedByStallTest(UsageTestCase):
-    """Round 3: other files must keep getting correctly accounted across
-    every call, including past the point where a misbehaving file has
-    given up, not just before it."""
+    """Round 3/5: other files must not be permanently blocked by a
+    misbehaving file, including past the point where it has given up.
+
+    Round 5's stall-priority fix (see StarvationByNewerFileTest) means a
+    still-actively-retrying stalled file now goes FIRST each call it's
+    prioritized, and since its own retry allowance is the full
+    max_bytes_per_call, a failed priority attempt can consume an entire
+    call's budget, leaving nothing for "sess-a" THAT call. That's an
+    accepted, bounded tradeoff of the round 5 fix: what must still hold
+    is that "sess-a" is never stuck forever. Once "sess-b" gives up (its
+    line exceeds max_bytes_per_call itself, so it always will, within
+    MAX_CONSECUTIVE_STALLS calls) it stops competing for any budget at
+    all, and "sess-a" catches back up."""
 
     def test_other_files_still_get_accounted_while_one_misbehaves(self):
         path_a = self._session_path(session_id="sess-a")
         path_b = self._session_path(session_id="sess-b")
 
         # Padded well past max_bytes_per_call, by a wide margin: this
-        # line must never complete, boosted or not. max_bytes_per_call
-        # itself is chosen comfortably larger than "sess-a"'s own
-        # (unpadded, ordinary-sized) lines, so "sess-a" is never clipped.
+        # line must never complete, however much budget it's given.
         line_b = _padded_line(2000, session_id="sess-b", msg_id="big", input_tokens=1, output=1)
         self._write(path_b, line_b)
         max_bytes_per_call = 1000
         self.assertLess(max_bytes_per_call, len(line_b.encode("utf-8")))
 
-        for i in range(usage.MAX_CONSECUTIVE_STALLS + 2):
+        total_iterations = usage.MAX_CONSECUTIVE_STALLS + 2
+        data = None
+        for i in range(total_iterations):
             self._write(path_a, _line(_usage_row(
                 session_id="sess-a", msg_id="a%d" % i, request_id="ra%d" % i,
                 input_tokens=1, output=1)), mode="a")
             os.utime(path_a, (2_000_001_000 + i, 2_000_001_000 + i))
             data = usage.rollup(root=self.root, max_bytes_per_call=max_bytes_per_call)
-            self.assertIn("sess-a", data["sessions"])
-            self.assertEqual(data["sessions"]["sess-a"]["messages"], i + 1)
             self.assertNotIn("sess-b", data["sessions"])
+
+        # By the last call, "sess-b" has long since given up (it stalls
+        # out within MAX_CONSECUTIVE_STALLS calls every time, and stops
+        # spending any further budget once it does), so "sess-a" has had
+        # the chance to catch up on every line it ever appended, even
+        # the ones skipped on calls where "sess-b" was still consuming
+        # the whole budget trying (and failing) to complete.
+        self.assertEqual(data["sessions"]["sess-a"]["messages"], total_iterations)
 
 
 class StallCounterResetTest(UsageTestCase):
