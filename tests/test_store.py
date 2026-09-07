@@ -561,15 +561,21 @@ class RecreatedSessionStartedAtTest(unittest.TestCase):
 
 
 class FlickeredRowStartedAtTest(unittest.TestCase):
-    """Fix round 2, Minor 2: a row can drop out of a single poll's `rows`
-    without the underlying session having stopped (e.g. `claude agents
-    --json` timing out, which empties every external row for that poll --
-    see agents._fetch_rows). The end-of-sweep in upsert_sessions marks it
-    ended_at=now regardless. If the row reappears within
-    store.ENDED_ROW_GRACE_SECONDS and still has no usable reported
-    started_at, its own (recently-ended) started_at must be kept -- not
-    reset to `now` -- or a flaky claude build would restart a real
-    session's clock on every hiccup."""
+    """Fix round 2, Minor 2 (narrowed by fix round 3, Item 1): a row can
+    drop out of a single poll's `rows` without the underlying session
+    having stopped (e.g. `claude agents --json` timing out, which empties
+    every EXTERNAL row for that poll -- see agents._fetch_rows). The
+    end-of-sweep in upsert_sessions marks it ended_at=now regardless. If
+    an EXTERNAL row reappears within the grace window and still has no
+    usable reported started_at, its own (recently-ended) started_at must
+    be kept -- not reset to `now` -- or a flaky claude build would restart
+    a real session's clock on every hiccup.
+
+    The grace window applies to external rows only: a launcher
+    (tmux-derived) row does not go missing from `rows` the way an
+    external row does, so if one is reported with no usable started_at
+    right after ending, that is presumed to be a genuinely new session,
+    not a flicker -- see the launcher-row tests below."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -582,12 +588,13 @@ class FlickeredRowStartedAtTest(unittest.TestCase):
         self.store.close()
         self.tmp.cleanup()
 
-    def test_flickered_row_within_grace_window_keeps_its_started_at(self):
+    def test_flickered_external_row_within_grace_window_keeps_its_started_at(self):
         old_now = 1757000000.0
         old_started = old_now - 12 * 86400  # a 12-day-old session
         self.store.upsert_sessions("local", [
-            {"session_id": "s1", "name": "rc-a", "cwd": "/tmp", "kind": "interactive",
-             "state": "idle", "started_at": old_started},
+            {"session_id": "s1", "name": "hand-started", "cwd": "/tmp",
+             "kind": "external", "external": True, "state": "idle",
+             "started_at": old_started},
         ], now_fn=lambda: old_now)
 
         # A flicker: the row drops out of one poll (marks it ended)...
@@ -598,8 +605,8 @@ class FlickeredRowStartedAtTest(unittest.TestCase):
         self.assertLess(store.ENDED_ROW_GRACE_SECONDS, 3600)  # sanity: grace is short
         flicker_now = ended_at + 15.0
         self.store.upsert_sessions("local", [
-            {"session_id": "s1", "name": "rc-a", "cwd": "/tmp", "kind": "interactive",
-             "state": "idle"},  # no started_at reported
+            {"session_id": "s1", "name": "hand-started", "cwd": "/tmp",
+             "kind": "external", "external": True, "state": "idle"},  # no started_at reported
         ], now_fn=lambda: flicker_now)
 
         result = self.store.fleet_view()
@@ -610,8 +617,9 @@ class FlickeredRowStartedAtTest(unittest.TestCase):
         start = 1757000000.0
         old_started = start - 12 * 86400
         self.store.upsert_sessions("local", [
-            {"session_id": "s1", "name": "rc-a", "cwd": "/tmp", "kind": "interactive",
-             "state": "idle", "started_at": old_started},
+            {"session_id": "s1", "name": "hand-started", "cwd": "/tmp",
+             "kind": "external", "external": True, "state": "idle",
+             "started_at": old_started},
         ], now_fn=lambda: start)
 
         t = start
@@ -620,7 +628,8 @@ class FlickeredRowStartedAtTest(unittest.TestCase):
             self.store.upsert_sessions("local", [], now_fn=lambda: t)  # flicker: row vanishes
             t += 15.0
             self.store.upsert_sessions("local", [
-                {"session_id": "s1", "name": "rc-a", "cwd": "/tmp", "kind": "interactive",
+                {"session_id": "s1", "name": "hand-started", "cwd": "/tmp",
+                 "kind": "external", "external": True,
                  "state": "idle"},  # reappears, still no usable started_at
             ], now_fn=lambda: t)
 
@@ -628,6 +637,58 @@ class FlickeredRowStartedAtTest(unittest.TestCase):
         self.assertEqual(len(result["sessions"]), 1)
         self.assertEqual(result["sessions"][0]["started_at"], old_started)
         self.assertIsNone(result["sessions"][0]["ended_at"])
+
+    def test_launcher_row_within_grace_window_does_not_inherit_stale_started_at(self):
+        """Fix round 3, Item 1's exact scenario: a tmux-derived (launcher,
+        non-external) id recreated moments after ending, reporting no
+        started_at, must NOT inherit the dead row's age even though the
+        gap is well within the grace window -- that would be a false
+        runaway/false-kill risk, the one direction of error this feature
+        exists to avoid. It gets its own clock (now) instead."""
+        old_now = 1757000000.0
+        old_started = old_now - 20 * 86400  # a 20-day-old session
+        self.store.upsert_sessions("local", [
+            {"session_id": "tmux:rc-alpha", "name": "rc-alpha", "cwd": "/tmp",
+             "kind": "interactive", "state": "idle", "started_at": old_started},
+        ], now_fn=lambda: old_now)
+        ended_at = old_now + 10.0
+        self.store.upsert_sessions("local", [], now_fn=lambda: ended_at)
+
+        # Recreated 30 seconds later -- well within the grace window --
+        # but with no usable reported started_at.
+        new_now = ended_at + 30.0
+        self.store.upsert_sessions("local", [
+            {"session_id": "tmux:rc-alpha", "name": "rc-alpha", "cwd": "/tmp",
+             "kind": "interactive", "state": "idle"},  # no started_at reported
+        ], now_fn=lambda: new_now)
+
+        result = self.store.fleet_view()
+        self.assertEqual(result["sessions"][0]["started_at"], new_now)
+
+    def test_external_flag_is_read_from_the_stored_row_not_the_current_poll(self):
+        """The trustworthiness check reads the EXISTING (already stored)
+        row's external flag, not whatever the current (reported-invalid)
+        poll's row happens to claim -- a poll with no usable started_at
+        cannot retroactively make a launcher row's dead value trustworthy
+        by mislabeling it external on the way back in."""
+        old_now = 1757000000.0
+        old_started = old_now - 20 * 86400
+        self.store.upsert_sessions("local", [
+            {"session_id": "tmux:rc-alpha", "name": "rc-alpha", "cwd": "/tmp",
+             "kind": "interactive", "state": "idle", "started_at": old_started},
+        ], now_fn=lambda: old_now)  # stored as external=False
+        ended_at = old_now + 10.0
+        self.store.upsert_sessions("local", [], now_fn=lambda: ended_at)
+
+        new_now = ended_at + 30.0
+        self.store.upsert_sessions("local", [
+            {"session_id": "tmux:rc-alpha", "name": "rc-alpha", "cwd": "/tmp",
+             "kind": "external", "external": True,
+             "state": "idle"},  # claims external now, still no started_at
+        ], now_fn=lambda: new_now)
+
+        result = self.store.fleet_view()
+        self.assertEqual(result["sessions"][0]["started_at"], new_now)
 
 
 class SessionsStatusColumnTest(unittest.TestCase):

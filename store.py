@@ -45,11 +45,16 @@ def _valid_started_at(value):
 # that poll, which the end-of-sweep below marks ended_at=now even though
 # nothing really ended. If the very next poll(s) also report an invalid
 # started_at (an older `claude` build simply omitting startedAt, say), a
-# recently-ended row's own started_at is still the honest answer -- it's
-# the same session flickering, not a new one reusing the id. A row that's
-# been ended for longer than this grace window IS treated as a new session
-# (see upsert_sessions): fleetpoll's default poll interval is 30s, so this
-# covers a couple of missed polls' worth of jitter/backoff without
+# recently-ended EXTERNAL row's own started_at is still the honest answer
+# -- it's the same session flickering, not a new one reusing the id. A row
+# that's been ended for longer than this grace window IS treated as a new
+# session (see upsert_sessions). This is a FLOOR, not the effective value:
+# upsert_sessions takes a `grace_seconds` argument so the real value stays
+# coupled to the caller's actual poll interval (see fleetpoll.py, which
+# passes max(ENDED_ROW_GRACE_SECONDS, 3 * self.interval) -- a
+# longer-than-default interval must widen the window, or a single missed
+# poll would silently disable the fix). 90s is 3x fleetpoll's own default
+# 30s interval: a couple of missed polls' worth of jitter/backoff without
 # resurrecting a genuinely dead session's clock onto its replacement.
 ENDED_ROW_GRACE_SECONDS = 90
 
@@ -271,11 +276,18 @@ class Store:
             conn.execute("UPDATE devices SET online=0 WHERE id=?", (device_id,))
         return self._write(_do)
 
-    def upsert_sessions(self, device_id, rows, now_fn=time.time):
+    def upsert_sessions(self, device_id, rows, now_fn=time.time,
+                         grace_seconds=ENDED_ROW_GRACE_SECONDS):
         """Replace this device's live-session view: rows present are
         upserted; rows in the DB for this device but absent from `rows`
         get ended_at set, exactly once (only rows that were still live,
         ended_at IS NULL, transition).
+
+        `grace_seconds` is how long a recently-ended EXTERNAL row's
+        started_at stays trustworthy -- see below. Defaults to
+        ENDED_ROW_GRACE_SECONDS (a floor); the real caller (fleetpoll.py)
+        passes max(ENDED_ROW_GRACE_SECONDS, 3 * its own poll interval) so
+        a longer-than-default interval can't silently disable the fix.
 
         started_at resolution (reported = r's started_at; existing = the
         started_at of a stored row for this (device_id, session_id), only
@@ -304,26 +316,42 @@ class Store:
         - reported invalid, no trustworthy existing value: now.
 
         "Trustworthy existing" means a row that is either still live
-        (ended_at IS NULL) or was ended within ENDED_ROW_GRACE_SECONDS of
-        `now`. A row can go missing from a single poll's `rows` without
-        the underlying session having actually stopped (a `claude agents
-        --json` timeout drops every external row for that poll -- see
-        agents._fetch_rows), which the end-of-sweep below marks
-        ended_at=now even though nothing really ended; if the very next
-        poll(s) also report an invalid started_at, the recently-ended
-        row's own started_at is still the honest answer for the SAME
-        session flickering. A row ended longer ago than the grace window
-        is instead treated as a genuinely new session reusing the id (the
-        common case: a synthetic tmux:<name> id reassigned once a tmux
-        session of that name is recreated) and gets its own clock -- its
-        stale started_at must not be inherited, whether kept outright or
-        (as it was before this fix) min()'d against a real reported value.
+        (ended_at IS NULL, any kind), or is EXTERNAL and was ended within
+        `grace_seconds` of `now`. A row can go missing from a single
+        poll's `rows` without the underlying session having actually
+        stopped (a `claude agents --json` timeout drops every external
+        row for that poll -- see agents._fetch_rows), which the
+        end-of-sweep below marks ended_at=now even though nothing really
+        ended; if the very next poll(s) also report an invalid
+        started_at, the recently-ended row's own started_at is still the
+        honest answer for the SAME session flickering. This grace window
+        applies only to external rows: a launcher (tmux-derived) row does
+        not go missing from `rows` the way an external row does (tmux
+        list-sessions either shows it or it's genuinely gone), so a
+        launcher row reported with no usable started_at right after
+        ending is presumed to be a genuinely new session -- inheriting a
+        stale launcher row's started_at even for a few seconds would be
+        exactly the false-runaway/false-kill risk this whole feature
+        exists to avoid, which the grace window must never reintroduce.
+        Any row (external or not) ended longer ago than the grace window
+        is treated as a genuinely new session reusing the id (the common
+        case: a synthetic tmux:<name> id reassigned once a tmux session
+        of that name is recreated) and gets its own clock -- its stale
+        started_at must not be inherited, whether kept outright or (as it
+        was before this fix) min()'d against a real reported value.
 
         A row without `session_id` is not a valid natural key (falling back
         to `name` risks colliding two distinct sessions, or an accidental
         rename ending one and starting another) -- such rows are skipped
         entirely: not upserted, and not counted as "seen" for the end-of-
-        session sweep. Returns {"skipped": <count>}."""
+        session sweep. Returns {"skipped": <count>}.
+
+        Note: two rows sharing a session_id within the SAME `rows` batch
+        (nothing produces this today -- every real caller keys its rows by
+        session_id upstream) resolve in list order, last one wins, since
+        "reported wins outright" makes each duplicate's INSERT/ON CONFLICT
+        independent of the others. This is intentionally not min()'d back
+        to order-independence; see fix round 3 notes for why."""
         def _do(conn):
             now = now_fn()
             seen_ids = set()
@@ -343,12 +371,13 @@ class Store:
                     started_at = reported_valid
                 else:
                     existing = conn.execute(
-                        "SELECT started_at, ended_at FROM sessions "
+                        "SELECT started_at, ended_at, external FROM sessions "
                         "WHERE device_id=? AND session_id=?",
                         (device_id, sid)).fetchone()
                     trustworthy = existing is not None and (
                         existing["ended_at"] is None
-                        or (now - existing["ended_at"]) <= ENDED_ROW_GRACE_SECONDS
+                        or (existing["external"]
+                            and (now - existing["ended_at"]) <= grace_seconds)
                     )
                     existing_started = existing["started_at"] if trustworthy else None
                     existing_valid = (
