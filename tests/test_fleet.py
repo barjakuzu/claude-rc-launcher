@@ -6,8 +6,18 @@ from unittest.mock import patch
 
 import fleet
 
+# A realistic "now" (matching the day strings used throughout these
+# tests, all on or before 2026-09-07) rather than an arbitrary small
+# epoch value: fleet.py's future-date guard (see _usage_daily_rows /
+# _usage_daily_by_project_rows) compares day strings against today's
+# UTC date derived from `now`, and a tiny epoch value (e.g. 5000.0,
+# which is 1970-01-01) would make every 2026 day string look
+# "future-dated" and get silently filtered before a test ever exercises
+# the code path it's trying to cover.
+_FIXED_NOW = datetime.datetime(2026, 9, 7, 12, 0, 0, tzinfo=datetime.timezone.utc).timestamp()
 
-def _empty_rollup(now=5000.0):
+
+def _empty_rollup(now=_FIXED_NOW):
     """A rollup() result with no transcript data at all: every test that
     doesn't care about usage specifically gets this so build_fleet's
     usage-shaped output stays deterministic instead of touching the real
@@ -15,6 +25,7 @@ def _empty_rollup(now=5000.0):
     return {
         "sessions": {},
         "daily": {},
+        "daily_by_project": [],
         "generated_at": now,
         "files": 0,
         "bytes_read": 0,
@@ -56,6 +67,7 @@ class BuildFleetTest(unittest.TestCase):
         self.assertEqual(result["errors"], [])
         self.assertIsNone(result["sessions"][0]["usage"])
         self.assertEqual(result["usage_daily"], [])
+        self.assertEqual(result["usage_daily_by_project"], [])
         self.assertEqual(
             result["usage_meta"],
             {"files": 0, "skipped": 0, "partial": False, "generated_at": 5000.0})
@@ -89,6 +101,7 @@ class BuildFleetTest(unittest.TestCase):
         self.assertIsNone(row["usage"])
         self.assertNotEqual(row["session_id"], "s1")
         self.assertNotEqual(row["name"], "rc-secret-project")
+        self.assertNotIn("usage_daily_by_project", result)
         ev = result["events"][0]
         self.assertEqual(set(ev.keys()), {"ts", "event"})
 
@@ -224,6 +237,7 @@ class BuildFleetTest(unittest.TestCase):
                 },
             },
             "daily": {},
+            "daily_by_project": [],
             "generated_at": 5000.0,
             "files": 1, "bytes_read": 10, "skipped": 0, "partial": False,
         }
@@ -277,7 +291,7 @@ class BuildFleetTest(unittest.TestCase):
                     "models": {}, "messages": 1,
                 },
             },
-            "daily": {}, "generated_at": 5000.0,
+            "daily": {}, "daily_by_project": [], "generated_at": 5000.0,
             "files": 1, "bytes_read": 1, "skipped": 0, "partial": False,
         }
 
@@ -304,11 +318,11 @@ class BuildFleetTest(unittest.TestCase):
             day = (base - datetime.timedelta(days=i)).isoformat()
             daily[day] = {"input": i, "cache_read": 0, "cache_write": 0, "output": 0, "effective": i}
         rollup.return_value = {
-            "sessions": {}, "daily": daily, "generated_at": 5000.0,
+            "sessions": {}, "daily": daily, "daily_by_project": [], "generated_at": 5000.0,
             "files": 35, "bytes_read": 0, "skipped": 0, "partial": False,
         }
 
-        result = fleet.build_fleet(role="full", now_fn=lambda: 5000.0)
+        result = fleet.build_fleet(role="full", now_fn=lambda: _FIXED_NOW)
 
         self.assertEqual(len(result["usage_daily"]), 30)
         self.assertEqual(result["usage_daily"][0]["day"], base.isoformat())
@@ -317,6 +331,43 @@ class BuildFleetTest(unittest.TestCase):
             (base - datetime.timedelta(days=29)).isoformat())
         days = [row["day"] for row in result["usage_daily"]]
         self.assertEqual(days, sorted(days, reverse=True))
+
+    @patch("fleet.usage.rollup")
+    @patch("fleet.events.prune")
+    @patch("fleet.events.read_events")
+    @patch("fleet.sessions.list_rc_sessions")
+    @patch("fleet.compat.get_caps")
+    @patch("fleet.devices.get_local_name")
+    def test_future_dated_days_are_dropped_not_just_deprioritised(
+            self, get_name, get_caps, list_sess, read_ev, prune, rollup):
+        # Fix round 1, Minor: a device with clock skew reporting days
+        # after "today" must not have those bogus days evict real ones
+        # out of the capped 30-day usage_daily window.
+        get_name.return_value = "hub"
+        get_caps.return_value = {}
+        list_sess.return_value = []
+        read_ev.return_value = ([], None)
+
+        base = datetime.date(2026, 9, 7)  # "today" per _FIXED_NOW
+        daily = {}
+        for i in range(30):  # 30 real days, oldest at i=29
+            day = (base - datetime.timedelta(days=i)).isoformat()
+            daily[day] = {"input": 1, "cache_read": 0, "cache_write": 0, "output": 0, "effective": 1}
+        for i in range(1, 6):  # 5 future-dated days (clock skew)
+            day = (base + datetime.timedelta(days=i)).isoformat()
+            daily[day] = {"input": 9, "cache_read": 0, "cache_write": 0, "output": 0, "effective": 9}
+        rollup.return_value = {
+            "sessions": {}, "daily": daily, "daily_by_project": [], "generated_at": 5000.0,
+            "files": 35, "bytes_read": 0, "skipped": 0, "partial": False,
+        }
+
+        result = fleet.build_fleet(role="full", now_fn=lambda: _FIXED_NOW)
+
+        days = [row["day"] for row in result["usage_daily"]]
+        self.assertEqual(len(days), 30)
+        self.assertEqual(days[0], base.isoformat())  # newest real day, not a future one
+        self.assertEqual(days[-1], (base - datetime.timedelta(days=29)).isoformat())  # oldest real day preserved
+        self.assertTrue(all(d <= base.isoformat() for d in days))
 
     @patch("fleet.usage.rollup")
     @patch("fleet.events.prune")
@@ -342,11 +393,15 @@ class BuildFleetTest(unittest.TestCase):
             "daily": {
                 "2026-09-07": {"input": 1, "cache_read": 2, "cache_write": 3, "output": 4, "effective": 50},
             },
+            "daily_by_project": [
+                {"day": "2026-09-07", "project": "-home-alice-super-secret-client",
+                 "input": 1, "cache_read": 2, "cache_write": 3, "output": 4, "effective": 50},
+            ],
             "generated_at": 5000.0,
             "files": 1, "bytes_read": 1, "skipped": 0, "partial": False,
         }
 
-        result = fleet.build_fleet(role="metadata", now_fn=lambda: 5000.0)
+        result = fleet.build_fleet(role="metadata", now_fn=lambda: _FIXED_NOW)
 
         self.assertEqual(result["sessions"][0]["usage"], {"effective": 50})
         self.assertEqual(result["usage_daily"], [{"day": "2026-09-07", "effective": 50}])
@@ -354,8 +409,43 @@ class BuildFleetTest(unittest.TestCase):
         self.assertEqual(
             result["usage_meta"],
             {"files": 1, "skipped": 0, "partial": False, "generated_at": 5000.0})
+        # A project name is the cwd by another name: the whole key is
+        # dropped under metadata role, not merely reduced.
+        self.assertNotIn("usage_daily_by_project", result)
         payload = json.dumps(result)
         self.assertNotIn("super-secret-client", payload)
+
+    @patch("fleet.usage.rollup")
+    @patch("fleet.events.prune")
+    @patch("fleet.events.read_events")
+    @patch("fleet.sessions.list_rc_sessions")
+    @patch("fleet.compat.get_caps")
+    @patch("fleet.devices.get_local_name")
+    def test_usage_daily_by_project_full_role_shape(
+            self, get_name, get_caps, list_sess, read_ev, prune, rollup):
+        get_name.return_value = "hub"
+        get_caps.return_value = {}
+        list_sess.return_value = []
+        read_ev.return_value = ([], None)
+        rollup.return_value = {
+            "sessions": {}, "daily": {},
+            "daily_by_project": [
+                {"day": "2026-09-06", "project": "-var-www",
+                 "input": 1, "cache_read": 2, "cache_write": 3, "output": 4, "effective": 43},
+                {"day": "2026-09-07", "project": "-home-alice-proj",
+                 "input": 5, "cache_read": 6, "cache_write": 7, "output": 8, "effective": 90},
+            ],
+            "generated_at": 5000.0, "files": 2, "bytes_read": 1, "skipped": 0, "partial": False,
+        }
+
+        result = fleet.build_fleet(role="full", now_fn=lambda: _FIXED_NOW)
+
+        self.assertEqual(result["usage_daily_by_project"], [
+            {"day": "2026-09-07", "project": "-home-alice-proj",
+             "input": 5, "cache_read": 6, "cache_write": 7, "output": 8, "effective": 90},
+            {"day": "2026-09-06", "project": "-var-www",
+             "input": 1, "cache_read": 2, "cache_write": 3, "output": 4, "effective": 43},
+        ])
 
     @patch("fleet.usage.rollup")
     @patch("fleet.events.prune")
@@ -375,7 +465,10 @@ class BuildFleetTest(unittest.TestCase):
 
         self.assertIsNone(result["sessions"][0]["usage"])
         self.assertEqual(result["usage_daily"], [])
-        self.assertIsNone(result["usage_meta"])
+        self.assertEqual(result["usage_daily_by_project"], [])
+        self.assertEqual(
+            result["usage_meta"],
+            {"files": 0, "skipped": 0, "partial": True, "generated_at": 5000.0})
         self.assertEqual(len(result["errors"]), 1)
         self.assertIn("boom /home/alice detail", result["errors"][0])
 
@@ -386,6 +479,61 @@ class BuildFleetTest(unittest.TestCase):
         self.assertNotIn("boom", result_meta["errors"][0])
         self.assertNotIn("/home/alice", result_meta["errors"][0])
         self.assertIsNone(result_meta["sessions"][0]["usage"])
+        self.assertEqual(
+            result_meta["usage_meta"],
+            {"files": 0, "skipped": 0, "partial": True, "generated_at": 5000.0})
+        self.assertNotIn("usage_daily_by_project", result_meta)
+
+    @patch("fleet.usage.rollup")
+    @patch("fleet.events.prune")
+    @patch("fleet.events.read_events")
+    @patch("fleet.sessions.list_rc_sessions")
+    @patch("fleet.compat.get_caps")
+    @patch("fleet.devices.get_local_name")
+    def test_every_malformed_rollup_return_leaves_build_fleet_working(
+            self, get_name, get_caps, list_sess, read_ev, prune, rollup):
+        # Fix round 1, Important 1: build_fleet's try/except must guard
+        # CONSUMPTION of usage.rollup()'s result, not just the call.
+        get_name.return_value = "hub"
+        get_caps.return_value = {}
+        list_sess.return_value = [{"name": "rc-foo", "session_id": "s1", "state": "idle"}]
+        read_ev.return_value = ([], None)
+
+        malformed = [
+            None,
+            [],
+            "not a dict",
+            {},
+            {"sessions": None},
+            {"sessions": []},
+            {"sessions": {"s1": "not-a-dict"}},
+            {"sessions": {"s1": {"input": 1}}},  # missing cache_read/cache_write/output/effective/last_ts
+            {"sessions": {}, "daily": None},
+            {"sessions": {}, "daily": []},
+            {"sessions": {}, "daily": {"2026-09-07": "not-a-dict"}},
+            {"sessions": {}, "daily": {"2026-09-07": {"input": 1}}},  # missing effective etc
+            {"sessions": {}, "daily": {}, "daily_by_project": None},
+            {"sessions": {}, "daily": {}, "daily_by_project": {}},
+            {"sessions": {}, "daily": {}, "daily_by_project": ["not-a-dict"]},
+            {"sessions": {}, "daily": {}, "daily_by_project": [{"day": "2026-09-07"}]},  # missing project
+            {"sessions": {}, "daily": {}, "daily_by_project": [], "files": 1},  # missing skipped/partial/generated_at
+            {"sessions": {}, "daily": {}, "daily_by_project": []},  # missing files/skipped/partial/generated_at
+        ]
+
+        for i, bad in enumerate(malformed):
+            with self.subTest(i=i, bad=repr(bad)[:60]):
+                fleet._cache.clear()
+                rollup.return_value = bad
+                result = fleet.build_fleet(role="full", now_fn=lambda: _FIXED_NOW)
+                self.assertIsNone(result["sessions"][0]["usage"])
+                self.assertEqual(result["usage_daily"], [])
+                self.assertEqual(result["usage_daily_by_project"], [])
+                self.assertEqual(
+                    result["usage_meta"],
+                    {"files": 0, "skipped": 0, "partial": True, "generated_at": _FIXED_NOW})
+                self.assertTrue(
+                    any(e.startswith("usage:") for e in result["errors"]),
+                    "expected a usage error, got %r" % (result["errors"],))
 
     @patch("fleet.usage.rollup")
     @patch("fleet.events.prune")
@@ -423,7 +571,7 @@ class BuildFleetTest(unittest.TestCase):
         list_sess.return_value = []
         read_ev.return_value = ([], None)
         rollup.return_value = {
-            "sessions": {}, "daily": {}, "generated_at": 5000.0,
+            "sessions": {}, "daily": {}, "daily_by_project": [], "generated_at": 5000.0,
             "files": 10, "bytes_read": 999, "skipped": 2, "partial": True,
         }
 
