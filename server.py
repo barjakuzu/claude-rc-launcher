@@ -1177,9 +1177,23 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if config.RC_ROLE == "metadata":
             clean = self.path.split('?')[0]
             local_path = clean[3:] if clean.startswith("/rc") else clean
-            if (local_path not in METADATA_ALLOWED_GET_PATHS and local_path not in ("/", "/legacy")
-                    and not local_path.startswith("/static/") and not local_path.startswith("/rc/static/")
-                    or local_path.endswith("/ws") or local_path.endswith("/preview")):
+            # "/" and "/legacy" serve the dashboard shell itself (static
+            # HTML that then calls the allowed JSON endpoints from the
+            # browser) -- there's no session data in the page markup, so
+            # they're safe to allow through even though they aren't in
+            # METADATA_ALLOWED_GET_PATHS.
+            is_dashboard_shell = local_path in ("/", "/legacy")
+            is_static_asset = (local_path.startswith("/static/")
+                                or local_path.startswith("/rc/static/"))
+            is_allowed_route = local_path in METADATA_ALLOWED_GET_PATHS
+            not_generally_allowed = (
+                not is_allowed_route and not is_dashboard_shell and not is_static_asset)
+            # /ws (terminal socket) and /preview (transcript/pane replay)
+            # carry live session content and must always be refused, even
+            # for an otherwise-allowed path prefix.
+            is_session_content = (
+                local_path.endswith("/ws") or local_path.endswith("/preview"))
+            if not_generally_allowed or is_session_content:
                 return self._json({"ok": False, "message": "This device is metadata-role only"}, 403)
 
         # Route to a remote device if one is selected.

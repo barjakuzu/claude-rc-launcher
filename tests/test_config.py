@@ -110,6 +110,46 @@ class RcRoleTest(unittest.TestCase):
             os.environ.pop("RC_HASH_SALT", None)
             importlib.reload(config)
 
+    def test_concurrent_first_run_agrees_on_one_salt(self):
+        # Minor fix: two processes starting at once (e.g. the launcher
+        # and a hook invocation on first run) must not each generate and
+        # append a *different* RC_HASH_SALT= line -- readers taking the
+        # first line would then disagree on session-id hashing depending
+        # on which line landed first. The flock-guarded generate path
+        # must make every concurrent caller agree on a single salt.
+        import threading
+
+        orig_salt_env = os.environ.pop("RC_HASH_SALT", None)
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                env_file = os.path.join(tmp, "env")
+                orig_env_file = config._ENV_FILE
+                config._ENV_FILE = env_file
+                try:
+                    results = []
+                    barrier = threading.Barrier(8)
+
+                    def worker():
+                        barrier.wait()
+                        results.append(config._load_or_create_hash_salt())
+
+                    threads = [threading.Thread(target=worker) for _ in range(8)]
+                    for t in threads:
+                        t.start()
+                    for t in threads:
+                        t.join()
+
+                    self.assertEqual(len(results), 8)
+                    self.assertEqual(len(set(results)), 1, results)
+                    with open(env_file) as f:
+                        content = f.read()
+                    self.assertEqual(content.count("RC_HASH_SALT="), 1)
+                finally:
+                    config._ENV_FILE = orig_env_file
+        finally:
+            if orig_salt_env is not None:
+                os.environ["RC_HASH_SALT"] = orig_salt_env
+
 
 if __name__ == "__main__":
     unittest.main()

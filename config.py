@@ -107,34 +107,68 @@ os.makedirs(os.path.join(RC_HOME, "logs"), exist_ok=True)
 _ENV_FILE = os.path.join(RC_HOME, "env")
 
 
+def _read_hash_salt_from(path):
+    try:
+        with open(path) as f:
+            for line in f:
+                if line.startswith("RC_HASH_SALT="):
+                    return line.strip().split("=", 1)[1]
+    except OSError:
+        pass
+    return None
+
+
 def _load_or_create_hash_salt():
     """RC_HASH_SALT, generated once into ~/.claude-rc/env (0600) if
     absent -- mirrors devices.py's device-name file pattern. Read order:
-    explicit env var, then the persisted file, then generate fresh."""
+    explicit env var, then the persisted file, then generate fresh.
+
+    The generate-and-append path is guarded by an flock on the env file
+    so two processes starting concurrently (e.g. the launcher and a
+    hook invocation on first run) can't each generate and append a
+    *different* salt -- readers taking the first RC_HASH_SALT= line
+    would then disagree with each other on session-id hashing depending
+    on which line landed first. Only one process wins the lock and
+    writes; the other blocks, then re-reads under the same lock and
+    picks up what the winner wrote instead of writing its own."""
     env_var = os.environ.get("RC_HASH_SALT", "").strip()
     if env_var:
         return env_var
-    existing = None
-    try:
-        with open(_ENV_FILE) as f:
-            for line in f:
-                if line.startswith("RC_HASH_SALT="):
-                    existing = line.strip().split("=", 1)[1]
-                    break
-    except OSError:
-        pass
+
+    existing = _read_hash_salt_from(_ENV_FILE)
     if existing:
         return existing
+
     import secrets
     salt = secrets.token_hex(32)
     line = f"RC_HASH_SALT={salt}\n"
     try:
-        fd = os.open(_ENV_FILE, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-        with os.fdopen(fd, "a") as f:
+        fd = os.open(_ENV_FILE, os.O_RDWR | os.O_CREAT, 0o600)
+    except OSError:
+        return salt
+    try:
+        try:
+            import fcntl
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        except (ImportError, OSError):
+            pass  # no advisory locking available -- best effort, as before
+        # Re-check under the lock: another process may have won the race
+        # to create the salt between our unlocked read above and here.
+        winner = _read_hash_salt_from(_ENV_FILE)
+        if winner:
+            return winner
+        with os.fdopen(os.dup(fd), "a") as f:
             f.write(line)
         os.chmod(_ENV_FILE, 0o600)
     except OSError:
         pass
+    finally:
+        try:
+            import fcntl
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except (ImportError, OSError):
+            pass
+        os.close(fd)
     return salt
 
 

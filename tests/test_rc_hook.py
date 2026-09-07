@@ -244,6 +244,24 @@ class RetentionTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertFalse(os.path.exists(old_path))
 
+    def test_retention_boundary_uses_utc_not_local_time(self):
+        # Spool filenames are dated with time.gmtime() (UTC). A file just
+        # inside the retention window measured in UTC must survive --
+        # a local-time (mktime) interpretation of the same date string
+        # would be off by the host's UTC offset and could put this on
+        # the wrong side of the cutoff near a day boundary.
+        import calendar
+        yesterday_str = time.strftime("%Y-%m-%d", time.gmtime(time.time() - 86400))
+        path = os.path.join(self.events_root, f"{yesterday_str}.jsonl")
+        with open(path, "w") as f:
+            f.write('{"ts": 1, "event": "Stop", "session_id": "a", "extra": {}}\n')
+
+        file_epoch_utc = calendar.timegm(time.strptime(yesterday_str, "%Y-%m-%d"))
+        now = file_epoch_utc + rc_hook.RETENTION_SECONDS - 3600
+        code = self._run(now)
+        self.assertEqual(code, 0)
+        self.assertTrue(os.path.exists(path), "file within retention was pruned early")
+
     def test_never_fails_when_events_dir_unwritable(self):
         os.chmod(self.events_root, 0o500)
         try:

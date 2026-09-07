@@ -24,6 +24,7 @@ Worst case on disk: today's file (up to ROTATE_SIZE_BYTES) + yesterday's
 rotated ".1" file (up to ROTATE_SIZE_BYTES) + up to RETENTION_DAYS more
 same-day files that haven't hit the rotation cap yet.
 """
+import calendar
 import hashlib
 import io
 import json
@@ -188,7 +189,12 @@ def _prune_old(root, now_fn):
                 else:
                     continue
                 try:
-                    file_epoch = time.mktime(time.strptime(date_str, "%Y-%m-%d"))
+                    # Filenames are dated with time.gmtime() (UTC); mktime()
+                    # interprets the parsed struct as local time instead, so
+                    # near a day boundary this could over/under-prune by up
+                    # to the local UTC offset. calendar.timegm() treats the
+                    # struct as UTC, matching how the filename was written.
+                    file_epoch = calendar.timegm(time.strptime(date_str, "%Y-%m-%d"))
                 except ValueError:
                     continue
                 if now - file_epoch > RETENTION_SECONDS:
