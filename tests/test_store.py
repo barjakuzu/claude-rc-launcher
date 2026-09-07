@@ -1130,6 +1130,135 @@ class UsageCostAlertsTest(unittest.TestCase):
         self.assertIn("p-in", projects)
         self.assertNotIn("p-out", projects)
 
+    # -- cost_view.sessions (W4/integration, CONTRACT.md amendment) -------
+
+    def test_cost_view_sessions_includes_an_ended_session(self):
+        self.store.upsert_device({"id": "local", "name": "hub", "role": "full",
+                                   "version": "1", "claude_version": "1"})
+        self.store.upsert_sessions("local", [
+            {"session_id": "s1", "name": "rc-live", "cwd": "/var/www/live",
+             "kind": "launcher", "state": "busy", "started_at": 1000},
+        ], now_fn=lambda: 1000.0)
+        self.store.upsert_session_usage("local", [
+            {"session_id": "s1", "effective": 500, "last_ts": 1000.0},
+        ])
+        # A big session that has since ENDED -- upsert_sessions with an
+        # empty rows list for this device ends every previously-live row,
+        # same mechanism a real poll uses when a session stops appearing.
+        self.store.upsert_sessions("local", [], now_fn=lambda: 2000.0)
+        self.store.upsert_session_usage("local", [
+            {"session_id": "s1", "effective": 999999, "last_ts": 1999.0},
+        ])
+        view = self.store.cost_view(days=30)
+        row = next(r for r in view["sessions"] if r["session_id"] == "s1")
+        self.assertTrue(row["ended"])
+        self.assertEqual(row["effective"], 999999)
+        self.assertEqual(row["name"], "rc-live")
+        self.assertEqual(row["project"], "-var-www-live")
+
+    def test_cost_view_sessions_sorted_descending_and_capped_at_50(self):
+        self.store.upsert_device({"id": "local", "name": "hub", "role": "full",
+                                   "version": "1", "claude_version": "1"})
+        self.store.upsert_sessions("local", [
+            {"session_id": f"s{i}", "name": f"rc-{i}", "cwd": "/tmp",
+             "kind": "launcher", "state": "idle", "started_at": 1000}
+            for i in range(60)
+        ], now_fn=lambda: 1000.0)
+        self.store.upsert_session_usage("local", [
+            {"session_id": f"s{i}", "effective": i, "last_ts": 1000.0}
+            for i in range(60)
+        ])
+        view = self.store.cost_view(days=30)
+        self.assertEqual(len(view["sessions"]), 50)
+        effectives = [r["effective"] for r in view["sessions"]]
+        self.assertEqual(effectives, sorted(effectives, reverse=True))
+        self.assertEqual(effectives[0], 59)
+
+    def test_cost_view_sessions_name_null_for_an_orphaned_usage_row(self):
+        # session_usage row with no matching sessions row at all -- e.g. a
+        # session row pruned out from under it. A LEFT JOIN must still
+        # surface the usage row, with name/project/ended coming back as
+        # the "nothing known" values rather than the row disappearing.
+        self.store.upsert_device({"id": "local", "name": "hub", "role": "full",
+                                   "version": "1", "claude_version": "1"})
+        self.store.upsert_session_usage("local", [
+            {"session_id": "orphan", "effective": 42, "last_ts": 1000.0},
+        ])
+        view = self.store.cost_view(days=30)
+        row = next(r for r in view["sessions"] if r["session_id"] == "orphan")
+        self.assertIsNone(row["name"])
+        self.assertEqual(row["project"], "")
+        self.assertFalse(row["ended"])
+        self.assertEqual(row["effective"], 42)
+
+    def test_cost_view_sessions_not_limited_to_the_days_window(self):
+        # Unlike devices/projects, `sessions` has no `day` column to
+        # filter by (session_usage holds lifetime totals, not a daily
+        # series) -- a days=1 request must still return every session.
+        self.store.upsert_device({"id": "local", "name": "hub", "role": "full",
+                                   "version": "1", "claude_version": "1"})
+        self.store.upsert_session_usage("local", [
+            {"session_id": "s1", "effective": 10, "last_ts": 1000.0},
+        ])
+        view = self.store.cost_view(days=1)
+        self.assertEqual(len(view["sessions"]), 1)
+
+    # -- last_event_ts_map -------------------------------------------------
+
+    def test_last_event_ts_map_returns_max_ts_per_session(self):
+        self.store.add_events("local", [
+            {"session_id": "s1", "ts": 100.0, "event": "Notification"},
+            {"session_id": "s1", "ts": 300.0, "event": "SubagentStop"},
+            {"session_id": "s1", "ts": 200.0, "event": "Notification"},
+            {"session_id": "s2", "ts": 50.0, "event": "Notification"},
+        ])
+        m = self.store.last_event_ts_map()
+        self.assertEqual(m[("local", "s1")], 300.0)
+        self.assertEqual(m[("local", "s2")], 50.0)
+        self.assertNotIn(("local", "s3"), m)
+
+    # -- devices.usage_partial ----------------------------------------------
+
+    def test_upsert_device_usage_partial_round_trips(self):
+        self.store.upsert_device({"id": "local", "name": "hub", "role": "full",
+                                   "version": "1", "claude_version": "1",
+                                   "usage_partial": True})
+        view = self.store.fleet_view()
+        dev = next(d for d in view["devices"] if d["id"] == "local")
+        self.assertEqual(dev["usage_partial"], 1)
+
+    def test_upsert_device_usage_partial_defaults_false_on_a_new_row(self):
+        self.store.upsert_device({"id": "local", "name": "hub", "role": "full",
+                                   "version": "1", "claude_version": "1"})
+        view = self.store.fleet_view()
+        dev = next(d for d in view["devices"] if d["id"] == "local")
+        self.assertEqual(dev["usage_partial"], 0)
+
+    def test_upsert_device_usage_partial_not_provided_keeps_prior_value(self):
+        self.store.upsert_device({"id": "local", "name": "hub", "role": "full",
+                                   "version": "1", "claude_version": "1",
+                                   "usage_partial": True})
+        # A later update that doesn't mention usage_partial at all (e.g. a
+        # caller that doesn't know the fact) must not clobber it back to
+        # false.
+        self.store.upsert_device({"id": "local", "name": "hub", "role": "full",
+                                   "version": "2", "claude_version": "1"})
+        view = self.store.fleet_view()
+        dev = next(d for d in view["devices"] if d["id"] == "local")
+        self.assertEqual(dev["usage_partial"], 1)
+        self.assertEqual(dev["version"], "2")
+
+    def test_upsert_device_usage_partial_can_be_cleared_explicitly(self):
+        self.store.upsert_device({"id": "local", "name": "hub", "role": "full",
+                                   "version": "1", "claude_version": "1",
+                                   "usage_partial": True})
+        self.store.upsert_device({"id": "local", "name": "hub", "role": "full",
+                                   "version": "1", "claude_version": "1",
+                                   "usage_partial": False})
+        view = self.store.fleet_view()
+        dev = next(d for d in view["devices"] if d["id"] == "local")
+        self.assertEqual(dev["usage_partial"], 0)
+
     # -- replace_alerts --------------------------------------------------
 
     def test_replace_alerts_preserves_first_seen_moves_last_seen_and_deletes_stale(self):
@@ -1528,6 +1657,51 @@ class UsageCostAlertsMigrationTest(unittest.TestCase):
             dev = next(d for d in cost["devices"] if d["device_id"] == "local")
             self.assertEqual(dev["total_effective"], 5)
             self.assertEqual(len(migrated.live_alerts()), 1)
+        finally:
+            migrated.close()
+
+
+class DeviceUsagePartialColumnTest(unittest.TestCase):
+    """W4/integration: usage_partial added to a `devices` table that
+    already exists, same additive ALTER TABLE path as every other new
+    column in this file."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_usage_partial_added_to_a_pre_existing_devices_table(self):
+        old_db = os.path.join(self.tmp.name, "old.db")
+        conn = sqlite3.connect(old_db)
+        conn.executescript("""
+            CREATE TABLE devices (
+                id TEXT PRIMARY KEY, name TEXT, role TEXT, version TEXT,
+                claude_version TEXT, last_seen REAL, online INTEGER DEFAULT 0
+            );
+        """)
+        conn.execute(
+            "INSERT INTO devices (id, name, role, version, claude_version, "
+            "last_seen, online) VALUES ('local', 'hub', 'full', '1', '1', 100.0, 1)")
+        conn.commit()
+        conn.close()
+        os.chmod(old_db, 0o600)
+
+        migrated = store.Store(old_db)
+        try:
+            view = migrated.fleet_view()
+            dev = next(d for d in view["devices"] if d["id"] == "local")
+            # The pre-existing row survives untouched; the new column
+            # comes back NULL for it (no data to backfill from).
+            self.assertIsNone(dev["usage_partial"])
+
+            migrated.upsert_device({"id": "local", "name": "hub", "role": "full",
+                                     "version": "2", "claude_version": "1",
+                                     "usage_partial": True})
+            view2 = migrated.fleet_view()
+            dev2 = next(d for d in view2["devices"] if d["id"] == "local")
+            self.assertEqual(dev2["usage_partial"], 1)
         finally:
             migrated.close()
 

@@ -299,8 +299,50 @@ def _migrate_alert_columns(conn):
             conn.execute(f"ALTER TABLE alerts ADD COLUMN {col} {coltype}")
 
 
+# Phase 3 wiring (W4/integration): GET /api/fleet publishes `usage_partial`
+# per device (CONTRACT.md section 3) and the guard poll-loop enrichment
+# step needs the SAME fact to decide whether a device's sessions are safe
+# to hand cost rules (CONTRACT.md's "guard must not fire cost rules on
+# partial data" amendment). Neither server.py nor fleetpoll.py can share an
+# in-process FleetPoller instance (app.py constructs one and never stores
+# it anywhere else), so the fact has to live somewhere both can reach it
+# from just a Store handle -- the devices table, alongside every other
+# per-device fact this store already tracks. Additive (only ALTER TABLE ADD
+# COLUMN when absent), same pattern as _NEW_SESSION_COLUMNS/_NEW_ALERT_COLUMNS.
+_NEW_DEVICE_COLUMNS = (
+    ("usage_partial", "INTEGER"),
+)
+
+
+def _migrate_device_columns(conn):
+    existing = {row["name"] for row in conn.execute("PRAGMA table_info(devices)")}
+    for col, coltype in _NEW_DEVICE_COLUMNS:
+        if col not in existing:
+            conn.execute(f"ALTER TABLE devices ADD COLUMN {col} {coltype}")
+
+
 def _json_or_none(value):
     return None if value is None else json.dumps(value)
+
+
+def _encode_cwd_as_project(cwd):
+    """Claude Code's ~/.claude/projects/<encoded> directory-name encoding
+    for a project cwd: both '/' and '.' become '-' (same rule
+    sessions._encode_project_dir applies device-side). Duplicated here,
+    not imported, on purpose: store.py has no dependency on any other
+    project module (it is deliberately stdlib-only -- see the module
+    docstring), and importing sessions.py just for this one pure string
+    transform would drag in subprocess/tmux/agents/panes/config for a
+    hub-side aggregation query. CONTRACT.md's amendment for
+    cost_view().sessions needs a `project` label per session, but
+    session_usage carries no project column (cost_daily's project is
+    keyed by day, not by session) -- so it is derived here from the
+    session's own stored `cwd`, the exact same string usage.rollup()
+    would have encoded on the device that reported it. A metadata-role
+    session never reports cwd at all (fleet.py's _redact_session drops
+    it), so this returns "" for it -- matching cost_daily's own
+    empty-string convention for "no project reported"."""
+    return (cwd or "").replace("/", "-").replace(".", "-")
 
 
 def _parse_json_or_none(value):
@@ -338,6 +380,7 @@ class Store:
             init_conn.commit()
             _migrate_session_columns(init_conn)
             _migrate_alert_columns(init_conn)
+            _migrate_device_columns(init_conn)
             init_conn.commit()
             # De-duplicate any pre-existing rows (from a DB created before
             # this unique index existed) before creating the index, then
@@ -426,15 +469,28 @@ class Store:
     # -- writes --------------------------------------------------------
 
     def upsert_device(self, row, now_fn=time.time):
+        """`row` may carry an optional `usage_partial` (bool or None) -- the
+        device's own usage_meta.partial from its latest fleet snapshot
+        (CONTRACT.md section 1/3). None (the default: most callers, e.g.
+        _mark_unreachable's offline placeholder, don't know this fact and
+        don't pass the key at all) means "leave whatever is already
+        stored alone" rather than resetting a known-partial device back to
+        false on every unrelated field update -- COALESCE against the
+        existing column value on conflict, and default to 0 (not-partial)
+        only for a genuinely new row that has never reported anything."""
         def _do(conn):
+            raw_partial = row.get("usage_partial")
+            partial_val = None if raw_partial is None else (1 if raw_partial else 0)
             conn.execute(
-                "INSERT INTO devices (id, name, role, version, claude_version, last_seen, online) "
-                "VALUES (?, ?, ?, ?, ?, ?, 1) "
+                "INSERT INTO devices (id, name, role, version, claude_version, last_seen, "
+                "online, usage_partial) VALUES (?, ?, ?, ?, ?, ?, 1, COALESCE(?, 0)) "
                 "ON CONFLICT(id) DO UPDATE SET name=excluded.name, role=excluded.role, "
                 "version=excluded.version, claude_version=excluded.claude_version, "
-                "last_seen=excluded.last_seen, online=1",
+                "last_seen=excluded.last_seen, online=1, "
+                "usage_partial=COALESCE(?, usage_partial)",
                 (row["id"], row.get("name", row["id"]), row.get("role", "full"),
-                 row.get("version"), row.get("claude_version"), now_fn()))
+                 row.get("version"), row.get("claude_version"), now_fn(),
+                 partial_val, partial_val))
         return self._write(_do)
 
     def mark_device_offline(self, device_id):
@@ -961,6 +1017,24 @@ class Store:
                   ...sorted by total_effective descending]
         projects: [{"device_id","project","effective"}, ...sorted by
                    effective descending, capped at 50]
+        sessions: [{"device_id","session_id","name","project","effective",
+                   "last_ts","ended"}, ...sorted by effective descending,
+                   capped at 50] -- CONTRACT.md amendment ("/api/cost
+                   gains a sessions array"): drawn from session_usage
+                   LEFT JOINed to sessions (not INNER -- see below) so a
+                   large ENDED session still appears, unlike /api/fleet
+                   which only ever has live sessions. `project` is
+                   derived from the session's own cwd (see
+                   _encode_cwd_as_project); `name` is null when the
+                   sessions row is gone (a LEFT JOIN, not an INNER JOIN,
+                   is what makes that possible instead of silently
+                   dropping the row -- CONTRACT.md's own wording, "name
+                   may be null for a session whose row has been pruned",
+                   only makes sense against a LEFT JOIN). Note this array
+                   is NOT scoped to the `days` window the way devices/
+                   projects are: session_usage holds one row per session
+                   (lifetime totals, most recently updated), not a daily
+                   series, so there is no `day` column to filter by here.
 
         No now_fn parameter (per CONTRACT.md): cost_daily.day is a
         calendar-date string, not an epoch, written once per real day by
@@ -1021,7 +1095,56 @@ class Store:
                  for (device_id, project), effective in by_project.items()),
                 key=lambda p: p["effective"], reverse=True)[:50]
 
-            return {"devices": devices_out, "projects": projects_out, "generated_at": now}
+            # LEFT JOIN (not INNER): a session_usage row must still be
+            # returned even if its `sessions` counterpart is momentarily
+            # absent, so `name`/`cwd`/`ended_at` come back NULL rather than
+            # the whole row vanishing -- see the docstring above. ORDER BY
+            # + LIMIT in SQL rather than sorting the full table in Python:
+            # NULL `effective` (an all-sparse session_usage row) sorts last
+            # in DESC order, so it naturally falls out of the top 50
+            # instead of needing a separate filter.
+            session_rows = conn.execute(
+                "SELECT su.device_id AS device_id, su.session_id AS session_id, "
+                "su.effective AS effective, su.last_ts AS last_ts, "
+                "s.name AS name, s.cwd AS cwd, s.ended_at AS ended_at "
+                "FROM session_usage su LEFT JOIN sessions s "
+                "ON s.device_id = su.device_id AND s.session_id = su.session_id "
+                "ORDER BY su.effective DESC LIMIT 50")
+            sessions_out = [
+                {
+                    "device_id": r["device_id"],
+                    "session_id": r["session_id"],
+                    "name": r["name"],
+                    "project": _encode_cwd_as_project(r["cwd"]),
+                    "effective": r["effective"],
+                    "last_ts": r["last_ts"],
+                    "ended": bool(r["ended_at"]),
+                }
+                for r in session_rows
+            ]
+
+            return {"devices": devices_out, "projects": projects_out,
+                    "sessions": sessions_out, "generated_at": now}
+        finally:
+            conn.close()
+
+    def last_event_ts_map(self):
+        """{(device_id, session_id): max(ts)} across every session_events
+        row. Built for the guard poll-loop enrichment step (CONTRACT.md
+        section 4): the `stalled` rule needs each live session's most
+        recent event timestamp, and computing that per-session (one query
+        per session, once per poll cycle) doesn't scale the way one
+        aggregate GROUP BY query does. A session with no events at all
+        simply has no key in the returned dict -- callers use .get() and
+        treat that the same as "no event timestamp available", exactly
+        the way a missing usage row already means "no data" elsewhere in
+        this file."""
+        conn = self._read_conn()
+        try:
+            rows = conn.execute(
+                "SELECT device_id, session_id, MAX(ts) AS ts FROM session_events "
+                "GROUP BY device_id, session_id")
+            return {(r["device_id"], r["session_id"]): r["ts"] for r in rows}
         finally:
             conn.close()
 
