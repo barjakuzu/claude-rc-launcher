@@ -333,11 +333,15 @@ mkdir -p "$RC_HOME/bin"
 mkdir -p "$RC_HOME/events"
 chmod 700 "$RC_HOME/bin"
 chmod 700 "$RC_HOME/events"
-cp "$SCRIPT_DIR/hooks/rc-hook" "$RC_HOME/bin/rc-hook"
-chmod 700 "$RC_HOME/bin/rc-hook"
-ok "Installed hook spooler at $RC_HOME/bin/rc-hook"
-echo "  To enable fleet event visibility, merge docs/hooks/settings.snippet.json"
-echo "  into your ~/.claude/settings.json (see README.md 'Hook events')."
+if [ -f "$APP_DIR/hooks/rc-hook" ]; then
+    cp "$APP_DIR/hooks/rc-hook" "$RC_HOME/bin/rc-hook"
+    chmod 700 "$RC_HOME/bin/rc-hook"
+    ok "Installed hook spooler at $RC_HOME/bin/rc-hook"
+    echo "  To enable fleet event visibility, merge docs/hooks/settings.snippet.json"
+    echo "  into your ~/.claude/settings.json (see README.md 'Hook events')."
+else
+    echo "Note: hooks/rc-hook not found in $APP_DIR, skipping hook spooler install."
+fi
 
 # ── PATH setup ──────────────────────────────────────────────────────
 
