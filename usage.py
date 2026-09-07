@@ -64,6 +64,19 @@ MAX_CACHE_ENTRIES = 2000
 _cache = collections.OrderedDict()
 _lock = threading.Lock()
 
+# Round-robins which currently-stalled file (stall_count > 0) gets
+# processed FIRST in a rollup() call, ahead of the normal newest-mtime-
+# first order. Without this, a stalled file sits wherever its mtime
+# happens to sort it: if even one newer file has anything new to read
+# that call, this file's own remaining share of the budget drops below
+# a full max_bytes_per_call and it's deferred (see _update_entry) again,
+# every single call, forever, as long as that newer file stays active.
+# Giving one stalled file the front of the queue each call guarantees it
+# actually reaches a call where the full allowance is available. An
+# int, not a path: cheap, and a stable mapping isn't needed since this
+# is a fairness heuristic, not a correctness guarantee. See rollup().
+_stall_priority_cursor = 0
+
 
 def _as_int(value):
     """Coerce a raw usage field to int. Missing/non-int/negative values
@@ -191,9 +204,10 @@ def _new_entry(project, inode):
         # is no bigger than "stall_bytes" below (round 4: giving up is
         # budget-relative, not permanent -- see _update_entry).
         "stall_count": 0,
-        # The allowance (max_bytes_per_call, once boosted) that most
-        # recently failed to make progress. A later call offering more
-        # than this retries even past MAX_CONSECUTIVE_STALLS.
+        # The allowance (equal to max_bytes_per_call, at the call where
+        # it failed) that most recently failed to make progress. A later
+        # call offering more than this retries even past
+        # MAX_CONSECUTIVE_STALLS.
         "stall_bytes": 0,
     }
 
@@ -318,9 +332,10 @@ def _update_entry(path, project, max_bytes, max_bytes_per_call):
     """Bring the cache entry for `path` up to date with what's on disk,
     parsing only newly appended complete lines, clipped to at most
     `max_bytes` of new data (the caller's remaining per-call budget),
-    except a file that stalled on a previous attempt gets at least a
-    full `max_bytes_per_call` this time (see the "no-progress reads"
-    paragraph below). Returns (bytes_read, clipped, gave_up). Raises
+    except a file that stalled on a previous attempt is only attempted
+    at all when a full `max_bytes_per_call` is still available this call
+    (see the "no-progress reads" paragraph below); nothing ever grants
+    it more than `max_bytes`. Returns (bytes_read, clipped, gave_up). Raises
     OSError if the file can't be stat'ed/opened/read; nothing is
     committed in that case, so a file that has never been read
     successfully stays absent from rollup()'s output (see the "synced"
@@ -566,6 +581,27 @@ def _enforce_cache_cap():
         _cache.popitem(last=False)
 
 
+def _pick_stall_priority_path(file_entries):
+    """The one currently-stalled file (stall_count > 0) among
+    `file_entries` to process FIRST this rollup() call, or None if none
+    of them are stalled. Rotates (a module-level cursor) across however
+    many qualify right now, so repeated calls eventually give every
+    stalled file a turn at the front of the queue, not just whichever
+    one happens to have the newest mtime (which could be none of them,
+    forever, while some other file keeps being newer)."""
+    global _stall_priority_cursor
+    with _lock:
+        stalled = sorted(
+            path for path, _project, _size, _mtime, _inode in file_entries
+            if path in _cache and _cache[path]["stall_count"] > 0
+        )
+        if not stalled:
+            return None
+        idx = _stall_priority_cursor % len(stalled)
+        _stall_priority_cursor += 1
+        return stalled[idx]
+
+
 def rollup(root=None, max_bytes_per_call=DEFAULT_MAX_BYTES_PER_CALL,
            now_fn=time.time, days=DEFAULT_DAYS):
     """Per-session and per-day token rollups for every transcript under
@@ -585,7 +621,15 @@ def rollup(root=None, max_bytes_per_call=DEFAULT_MAX_BYTES_PER_CALL,
     sessions stay current even when the budget forces the rest to fall
     back to their last-known cached totals or a single file's read to be
     clipped short of its true pending data, in which case the result's
-    "partial" is True.
+    "partial" is True. The one exception to newest-mtime-first: one
+    currently-stalled file, if any (see _update_entry), is processed
+    FIRST regardless of its mtime, rotating across calls (see
+    _pick_stall_priority_path). A stalled file is only ever attempted
+    when it can be offered a full max_bytes_per_call; without going
+    first, a stalled file whose mtime doesn't happen to be the newest
+    would see its own remaining share shrink below that the moment ANY
+    newer file has anything to read, deferring it again on every single
+    call for as long as that newer file stays active, indefinitely.
     """
     root = _default_root() if root is None else root
     file_entries, discover_skipped = _discover_files(root)
@@ -604,7 +648,18 @@ def rollup(root=None, max_bytes_per_call=DEFAULT_MAX_BYTES_PER_CALL,
     # and its own fresh os.stat (the pre-scan's size/mtime/inode below are
     # used only for this ordering and for discovered_paths/LRU purposes,
     # never trusted for _update_entry's own truncation/change decisions).
-    for path, project, _size, _mtime, _inode in file_entries:
+    # One exception: a rotating, currently-stalled file (if any) is moved
+    # to the very front, ahead of even the newest file, so it actually
+    # gets a call where nothing has spent any of the shared budget yet
+    # (see _pick_stall_priority_path and the docstring above).
+    priority_path = _pick_stall_priority_path(file_entries)
+    processing_order = file_entries
+    if priority_path is not None:
+        processing_order = (
+            [e for e in file_entries if e[0] == priority_path]
+            + [e for e in file_entries if e[0] != priority_path]
+        )
+    for path, project, _size, _mtime, _inode in processing_order:
         remaining = max_bytes_per_call - total_bytes_read
         if remaining <= 0:
             partial = True
@@ -759,5 +814,7 @@ def session_usage(session_id, root=None):
 def reset_cache():
     """Test hook; also lets a caller force a full re-read of every file
     on the next rollup()/session_usage() call."""
+    global _stall_priority_cursor
     with _lock:
         _cache.clear()
+        _stall_priority_cursor = 0
