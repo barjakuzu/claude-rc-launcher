@@ -138,10 +138,15 @@ def _merge_rules(raw):
                     else:
                         # Numeric threshold. bool is technically a subclass
                         # of int in Python - excluded explicitly so a stray
-                        # `true` doesn't silently become 1.
-                        if isinstance(value, bool) or not isinstance(value, (int, float)):
+                        # `true` doesn't silently become 1. json.loads
+                        # accepts bare NaN/Infinity/-Infinity, so isfinite
+                        # is required too - a NaN threshold would compare
+                        # as never-exceeded yet still surface in messages
+                        # like "over the nan h limit".
+                        if (isinstance(value, bool) or not isinstance(value, (int, float))
+                                or not math.isfinite(value)):
                             problems.append(
-                                f"rules.{rule_name}.{key} must be a number, "
+                                f"rules.{rule_name}.{key} must be a finite number, "
                                 f"kept default")
                         else:
                             target[key] = value
@@ -206,10 +211,12 @@ def load_rules(path=None):
             with open(resolved, "r") as f:
                 raw = json.load(f)
         except Exception as e:
-            # Basename only: the full path would carry the home directory
-            # (and so the username) into a string that may end up in an
-            # API response.
-            LAST_LOAD_ERROR = f"failed to parse {os.path.basename(resolved)}: {e}"
+            # Basename only, and the exception TYPE only, never str(e):
+            # an OSError's own message re-embeds the full path (e.g.
+            # "[Errno 21] Is a directory: '/home/alice/.claude-rc/guard.json'"),
+            # which would reintroduce the exact username leak the basename
+            # switch above was meant to close.
+            LAST_LOAD_ERROR = f"failed to parse {os.path.basename(resolved)}: {type(e).__name__}"
             return default_rules()
 
         merged, error = _merge_rules(raw)
@@ -243,7 +250,7 @@ def _fmt_count(n):
         return f"{sign}{a / 1_000_000_000:.1f} B"
     if a >= 999_950:
         return f"{sign}{a / 1_000_000:.1f} M"
-    if a >= 1_000:
+    if a >= 999.95:
         return f"{sign}{a / 1_000:.1f} k"
     if a == int(a):
         return f"{sign}{int(a)}"
@@ -263,6 +270,20 @@ def _fmt_hours(h):
 # Finding construction
 # ---------------------------------------------------------------------------
 
+def _finite_or_none(v):
+    """NaN/inf never reach a finding's numeric fields. json.dumps writes a
+    NaN as the bare token `NaN` (not valid JSON), which browser
+    JSON.parse rejects outright - one poisoned session would break the
+    entire alerts response, not just its own row. Most rules already
+    reject a non-finite input before ever computing value/threshold/since,
+    but not all: token_total's `since` is the session's started_at, which
+    token_total itself doesn't need and so never validates, and
+    device_offline can fire (and set `since`) off the online flag alone
+    with a NaN last_seen. Rather than chase every such path individually,
+    every numeric field is sanitized once, here, at construction."""
+    return v if _is_number(v) else None
+
+
 def _session_finding(rule, severity, s, message, value, threshold, since):
     return {
         "rule": rule,
@@ -272,9 +293,9 @@ def _session_finding(rule, severity, s, message, value, threshold, since):
         "session_id": s.get("session_id"),
         "name": s.get("name"),
         "message": message,
-        "value": value,
-        "threshold": threshold,
-        "since": since,
+        "value": _finite_or_none(value),
+        "threshold": _finite_or_none(threshold),
+        "since": _finite_or_none(since),
     }
 
 
@@ -287,9 +308,9 @@ def _device_finding(rule, severity, d, message, value, threshold, since):
         "session_id": None,
         "name": d.get("name"),
         "message": message,
-        "value": value,
-        "threshold": threshold,
-        "since": since,
+        "value": _finite_or_none(value),
+        "threshold": _finite_or_none(threshold),
+        "since": _finite_or_none(since),
     }
 
 
@@ -556,12 +577,22 @@ def evaluate(snapshot, rules=None, now_fn=time.time):
     # current name matches one of the given entries. A name is not unique
     # the way an id is, so one name entry can pull in more than one
     # device's id; that is intended, not a bug.
+    #
+    # Match against a frozen snapshot of the CONFIGURED entries, not the
+    # live ignore_devices set being built: matching against the live set
+    # would let an id just added by a name match feed back in as a name to
+    # test against a later device, an order-dependent bug (device A: id
+    # "dev-a" name "Dev Alpha"; device B: id "dev-b" name "dev-a" - iterate
+    # [A, B] and B's id gets pulled in by A's added id; iterate [B, A] and
+    # it doesn't), which would silently drop or keep a real runaway finding
+    # depending only on list order in the snapshot.
+    configured_ignore_devices = frozenset(ignore_devices)
     for d in devices:
         if not isinstance(d, dict):
             continue
         dname = d.get("name")
         did = d.get("id")
-        if isinstance(dname, str) and dname in ignore_devices and did is not None:
+        if isinstance(dname, str) and dname in configured_ignore_devices and did is not None:
             try:
                 ignore_devices.add(did)
             except TypeError:
