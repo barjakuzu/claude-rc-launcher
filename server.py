@@ -129,6 +129,26 @@ SSE_HEARTBEAT_SECONDS = 20
 # content. See docs/DEVICES.md.
 METADATA_ALLOWED_GET_PATHS = {"/fleet", "/version", "/stats", "/config-report"}
 METADATA_REFUSED_POST_PATHS_PREFIXES = ("/start", "/keys", "/resize", "/enable-rc", "/schedules")
+# Session-scoped routes are shaped "/sessions/<id>/<action>" — a prefix
+# match on METADATA_REFUSED_POST_PATHS_PREFIXES never matches these, since
+# the path starts with "/sessions/" not "/keys" etc. Gate on the action
+# suffix instead. Exact-path routes with no session id in between are
+# matched directly.
+METADATA_REFUSED_POST_PATH_SUFFIXES = ("/keys", "/resize", "/enable-rc", "/preview-bye")
+METADATA_REFUSED_POST_EXACT_PATHS = (
+    "/resume/start", "/tunnel/start", "/tunnel/stop", "/devices/rename", "/update",
+)
+
+
+def _metadata_post_refused(local_path):
+    """True if a metadata-role device must refuse this POST path with 403."""
+    if local_path.startswith(METADATA_REFUSED_POST_PATHS_PREFIXES):
+        return True
+    if local_path in METADATA_REFUSED_POST_EXACT_PATHS:
+        return True
+    if local_path.startswith("/sessions/") and local_path.endswith(METADATA_REFUSED_POST_PATH_SUFFIXES):
+        return True
+    return False
 # ThreadingHTTPServer spins up one thread per open connection; an
 # unbounded number of open /api/fleet/stream connections is an easy way
 # to exhaust threads. Above this many concurrent subscribers, new
@@ -1602,7 +1622,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if config.RC_ROLE == "metadata":
             clean = self.path.split('?')[0]
             local_path = clean[3:] if clean.startswith("/rc") else clean
-            if local_path.startswith(METADATA_REFUSED_POST_PATHS_PREFIXES) or local_path in (
+            if _metadata_post_refused(local_path) or local_path in (
                     "/stop", "/stop-all", "/restart", "/unstick", "/ws", "/preview"):
                 return self._json({"ok": False, "message": "This device is metadata-role only"}, 403)
 

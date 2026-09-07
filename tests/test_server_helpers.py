@@ -1210,6 +1210,83 @@ class MetadataRoleGatingTest(unittest.TestCase):
             ("/start", "/keys", "/resize", "/enable-rc", "/schedules"))
 
 
+class MetadataPostRefusedHelperTest(unittest.TestCase):
+    """Unit tests for the pure route-classification helper."""
+
+    REFUSED_PATHS = (
+        "/sessions/abc/keys",
+        "/sessions/abc/resize",
+        "/sessions/abc/enable-rc",
+        "/sessions/abc/preview-bye",
+        "/resume/start",
+        "/tunnel/start",
+        "/tunnel/stop",
+        "/devices/rename",
+        "/update",
+    )
+
+    def test_refuses_every_spec_path(self):
+        for path in self.REFUSED_PATHS:
+            self.assertTrue(server._metadata_post_refused(path), path)
+
+    def test_allows_read_only_paths(self):
+        for path in ("/fleet", "/version", "/stats", "/config-report", "/status"):
+            self.assertFalse(server._metadata_post_refused(path), path)
+
+
+class MetadataPostGateEndToEndTest(unittest.TestCase):
+    """Full do_POST round trip through the RC_ROLE=metadata gate."""
+
+    PATHS = MetadataPostRefusedHelperTest.REFUSED_PATHS
+
+    def setUp(self):
+        self._role = server.config.RC_ROLE
+
+    def tearDown(self):
+        server.config.RC_ROLE = self._role
+
+    def _make_handler(self, path):
+        h = server.Handler.__new__(server.Handler)
+        h.path = path
+        h.headers = {}
+        h.client_address = ("127.0.0.1", 12345)
+        h.rfile = io.BytesIO(b"")
+        h.wfile = io.BytesIO()
+        return h
+
+    def test_every_path_returns_403_under_metadata_role(self):
+        server.config.RC_ROLE = "metadata"
+        for path in self.PATHS:
+            with mock.patch.object(server, "_check_auth", return_value=True):
+                h = self._make_handler(path)
+                captured = {}
+
+                def fake_json(data, code=200, _captured=captured):
+                    _captured["code"] = code
+                    return None
+
+                h._json = fake_json
+                h.do_POST()
+                self.assertEqual(captured.get("code"), 403, path)
+
+    def test_every_path_bypasses_gate_under_full_role(self):
+        server.config.RC_ROLE = "full"
+
+        class _ReachedRouting(Exception):
+            pass
+
+        for path in self.PATHS:
+            with mock.patch.object(server, "_check_auth", return_value=True):
+                h = self._make_handler(path)
+
+                def fake_target_device():
+                    raise _ReachedRouting()
+
+                h._target_device = fake_target_device
+                with self.assertRaises(_ReachedRouting, msg=path):
+                    h.do_POST()
+
+
 class SseCapacityTest(unittest.TestCase):
     def setUp(self):
         server.FLEET_CHANGE_SUBSCRIBERS.clear()
