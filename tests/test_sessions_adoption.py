@@ -307,3 +307,64 @@ class PaneMatchedRcRowMergeTest(unittest.TestCase):
         self.assertEqual(id_rows[0]["claude"], pane_rows[0]["claude"])
         self.assertEqual(id_rows[0]["waiting_for"], pane_rows[0]["waiting_for"])
         self.assertEqual(id_rows[0]["status"], pane_rows[0]["status"])
+
+
+class AttachClaudeRowStartedAtTest(unittest.TestCase):
+    """_attach_claude_row sets the launcher row's top-level started_at from
+    the (already-normalized, epoch seconds) claude row started_at, honestly
+    combined with tmux's own created_at -- see sessions._attach_claude_row
+    for the reasoning (tmux session creation can precede the claude
+    process, and a session restarted in place keeps its older tmux time)."""
+
+    def test_sets_started_at_from_claude_row_when_no_tmux_created_at(self):
+        launcher_row = {"name": "rc-portugal", "created_at": None}
+        claude_row = {"started_at": 500.0}
+        sessions._attach_claude_row(launcher_row, claude_row)
+        self.assertEqual(launcher_row["started_at"], 500.0)
+
+    def test_prefers_earlier_claude_started_at_over_later_tmux_created_at(self):
+        launcher_row = {"name": "rc-portugal", "created_at": 1000.0}
+        claude_row = {"started_at": 500.0}
+        sessions._attach_claude_row(launcher_row, claude_row)
+        self.assertEqual(launcher_row["started_at"], 500.0)
+
+    def test_prefers_earlier_tmux_created_at_over_later_claude_started_at(self):
+        # Opposite ordering from the case above -- tmux's created_at is
+        # the earlier (more honest) value this time.
+        launcher_row = {"name": "rc-portugal", "created_at": 200.0}
+        claude_row = {"started_at": 900.0}
+        sessions._attach_claude_row(launcher_row, claude_row)
+        self.assertEqual(launcher_row["started_at"], 200.0)
+
+    def test_does_not_overwrite_a_known_started_at_with_none(self):
+        launcher_row = {"name": "rc-portugal", "created_at": None, "started_at": 700.0}
+        claude_row = {"started_at": None}
+        sessions._attach_claude_row(launcher_row, claude_row)
+        self.assertEqual(launcher_row["started_at"], 700.0)
+
+    def test_leaves_started_at_unset_when_neither_source_has_a_value(self):
+        launcher_row = {"name": "rc-portugal", "created_at": None}
+        claude_row = {"started_at": None}
+        sessions._attach_claude_row(launcher_row, claude_row)
+        self.assertNotIn("started_at", launcher_row)
+
+
+class LauncherRowWithoutClaudeMatchStartedAtTest(unittest.TestCase):
+    """A launcher (rc-*) tmux session with no matching claude row (not
+    started yet, or `claude agents --json` unavailable) must still get a
+    usable started_at -- falling back to tmux's own created_at rather than
+    being left blank, or an age-based rule could never fire for it."""
+
+    def setUp(self):
+        sessions._adoption_url_cache.clear()
+
+    def test_falls_back_to_created_at(self):
+        run_result = mock.Mock(returncode=0, stdout="rc-portugal\t1700000000\n")
+        with mock.patch("sessions.subprocess.run", return_value=run_result), \
+             mock.patch("sessions.agents.list_claude_sessions", return_value=[]), \
+             mock.patch("sessions.get_session_env", return_value=None):
+            rows = sessions.list_rc_sessions()
+
+        launcher_row = next(r for r in rows if r["name"] == "rc-portugal")
+        self.assertEqual(launcher_row["started_at"], 1700000000)
+        self.assertEqual(launcher_row["created_at"], 1700000000)
