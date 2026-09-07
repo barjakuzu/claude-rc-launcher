@@ -8,6 +8,7 @@ export interface UpdateResult {
 // Per-device config parity report (configreport.py's collect_config_report).
 export interface ConfigReport {
   claude_version: string | null;
+  launcher_version: string | null;
   claude_config: {
     path: string;
     head: string | null;

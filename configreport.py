@@ -274,6 +274,7 @@ def collect_config_report(home=None, run=subprocess.run):
 
     return {
         "claude_version": claude_version,
+        "launcher_version": config.VERSION,
         "claude_config": _git_state(cfg_dir, run, errors),
         "skills": _skills_report(cfg_dir, errors),
         "agents": _file_stems(os.path.join(cfg_dir, "agents")),

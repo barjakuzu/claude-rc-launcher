@@ -108,7 +108,7 @@ export function AllSessions({ onOpenDevice }: AllSessionsProps) {
   return (
     <div style={{ flex: 1, overflow: 'auto', display: 'flex', flexDirection: 'column' }}>
       <MobileHeader
-        subtitle={`${sessions.length} session${sessions.length !== 1 ? 's' : ''} · across ${deviceCount} device${deviceCount !== 1 ? 's' : ''}${connectionNote}`}
+        subtitle={`${sessions.length} total session${sessions.length !== 1 ? 's' : ''} · across ${deviceCount} device${deviceCount !== 1 ? 's' : ''}${connectionNote}`}
         title="Sessions"
         right={
           <button style={{ background: RT.panel, border: `1px solid ${RT.border}`, borderRadius: 7, width: 34, height: 34, display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }}>

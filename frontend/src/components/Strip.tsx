@@ -21,7 +21,7 @@ export function Strip({ cards }: StripProps) {
   type Cell = { label: string; value: string; sub?: string; dot?: string; bar?: number };
   const cells: Cell[] = [
     { label: 'Online',   value: `${onlineCount}/${cards.length}`, sub: `${offlineCount} offline`, dot: RT.green },
-    { label: 'Sessions', value: String(totalSessions),             sub: 'active' },
+    { label: 'Sessions', value: String(totalSessions),             sub: 'running' },
     { label: 'Tokens',   value: fmtK(totalTokens) },
     { label: 'Load',     value: `${avgLoad}%`,                    bar: avgLoad },
   ];

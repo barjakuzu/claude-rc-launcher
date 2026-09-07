@@ -92,9 +92,10 @@ class CardFromPartsLauncherVersionTest(unittest.TestCase):
 
 class BuildConfigMatrixTest(unittest.TestCase):
     def _report(self, head="abc123", dirty=False, dirty_files=None, deps_missing=None,
-                missing=None, hooks=True, version="2.1.263"):
+                missing=None, hooks=True, version="2.1.263", launcher_version="2.1.10"):
         return {
             "claude_version": version,
+            "launcher_version": launcher_version,
             "claude_config": {"head": head, "dirty": dirty, "dirty_files": dirty_files or []},
             "skills": {"deps_missing": deps_missing or [], "dangling": [], "device_only": []},
             "plugins": {"missing": missing or [], "extra": []},
@@ -144,6 +145,20 @@ class BuildConfigMatrixTest(unittest.TestCase):
             hub, [{"id": "dev2", "base_url": "http://x"}], fetch=lambda d: None)
         self.assertEqual(matrix["skew"]["dev2"], ["unreachable"])
         self.assertEqual(matrix["devices"]["dev2"], {"error": "unreachable"})
+
+    def test_launcher_version_mismatch_flagged(self):
+        hub = self._report(launcher_version="2.1.10")
+        other = self._report(head="abc123", launcher_version="2.1.9")
+        matrix = overview.build_config_matrix(
+            hub, [{"id": "dev2", "base_url": "http://x"}], fetch=lambda d: other)
+        self.assertIn("launcher version differs", matrix["skew"]["dev2"])
+
+    def test_launcher_version_match_not_flagged(self):
+        hub = self._report(launcher_version="2.1.10")
+        other = self._report(head="abc123", launcher_version="2.1.10")
+        matrix = overview.build_config_matrix(
+            hub, [{"id": "dev2", "base_url": "http://x"}], fetch=lambda d: other)
+        self.assertNotIn("launcher version differs", matrix["skew"]["dev2"])
 
     def test_matching_device_has_no_skew(self):
         hub = self._report()

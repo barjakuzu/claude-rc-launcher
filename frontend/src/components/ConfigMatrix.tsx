@@ -92,6 +92,7 @@ export function ConfigMatrixView({ cards }: { cards: DeviceCard[] }) {
           <tr style={{ borderBottom: `1px solid ${RT.border}` }}>
             <th style={thStyle}>Device</th>
             <th style={thStyle}>Claude</th>
+            <th style={thStyle}>Launcher</th>
             <th style={thStyle}>Commit</th>
             <th style={thStyle}>Dirty</th>
             <th style={thStyle}>Skills</th>
@@ -122,12 +123,13 @@ export function ConfigMatrixView({ cards }: { cards: DeviceCard[] }) {
                     {report ? (isExpanded ? '▾ ' : '▸ ') : ''}{c.name}
                   </td>
                   {unreachable ? (
-                    <td colSpan={7} style={{ padding: '6px 10px', fontFamily: FONT_MONO, fontSize: 11.5, color: RT.textLow, fontStyle: 'italic' }}>
+                    <td colSpan={8} style={{ padding: '6px 10px', fontFamily: FONT_MONO, fontSize: 11.5, color: RT.textLow, fontStyle: 'italic' }}>
                       unreachable{(entry as { error: string }).error ? ` — ${(entry as { error: string }).error}` : ''}
                     </td>
                   ) : (
                     <>
                       <td style={cellStyle(has('claude version differs'))}>{report?.claude_version ?? '—'}</td>
+                      <td style={cellStyle(has('launcher version differs'))}>{report?.launcher_version ?? '—'}</td>
                       <td style={cellStyle(commitSkewed, commitTone)}>{report?.claude_config.short_head ?? '—'}</td>
                       <td style={cellStyle(has('dirty'))}>{report ? (report.claude_config.dirty ? 'yes' : 'no') : '—'}</td>
                       <td style={cellStyle(has('external skills not installed (run bootstrap)'), 'amber')}>
@@ -160,7 +162,7 @@ export function ConfigMatrixView({ cards }: { cards: DeviceCard[] }) {
                 </tr>
                 {isExpanded && report && (
                   <tr key={`${c.id}-detail`} style={{ borderBottom: `1px solid ${RT.border}` }}>
-                    <td colSpan={10} style={{ padding: '4px 10px 14px 26px', fontFamily: FONT_MONO, fontSize: 10.5, color: RT.textLow, lineHeight: 1.7 }}>
+                    <td colSpan={11} style={{ padding: '4px 10px 14px 26px', fontFamily: FONT_MONO, fontSize: 10.5, color: RT.textLow, lineHeight: 1.7 }}>
                       <div>skills: {joinOrDash(report.skills.names)}</div>
                       <div>device-only skills: {joinOrDash(report.skills.device_only)}</div>
                       <div>plugins declared: {joinOrDash(report.plugins.declared)}</div>

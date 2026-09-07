@@ -76,7 +76,7 @@ def fetch_config_report(device):
         return None
 
 
-def _derive_skew(report, hub_head, hub_version):
+def _derive_skew(report, hub_head, hub_version, hub_launcher_version=None):
     if report is None or "error" in report:
         return ["unreachable"]
     reasons = []
@@ -97,17 +97,24 @@ def _derive_skew(report, hub_head, hub_version):
     version = report.get("claude_version")
     if version and hub_version and version != hub_version:
         reasons.append("claude version differs")
+    launcher_version = report.get("launcher_version")
+    if launcher_version and hub_launcher_version and launcher_version != hub_launcher_version:
+        reasons.append("launcher version differs")
     return reasons
 
 
 def build_config_matrix(hub_report, devices, fetch=fetch_config_report):
     hub_head = (hub_report.get("claude_config") or {}).get("head")
     hub_version = hub_report.get("claude_version")
+    hub_launcher_version = hub_report.get("launcher_version")
     reports = {"local": hub_report}
     if devices:
         with ThreadPoolExecutor(max_workers=min(8, len(devices))) as ex:
             fetched = list(ex.map(fetch, devices))
         for device, rpt in zip(devices, fetched):
             reports[device["id"]] = rpt if rpt is not None else {"error": "unreachable"}
-    skew = {dev_id: _derive_skew(rpt, hub_head, hub_version) for dev_id, rpt in reports.items()}
+    skew = {
+        dev_id: _derive_skew(rpt, hub_head, hub_version, hub_launcher_version)
+        for dev_id, rpt in reports.items()
+    }
     return {"devices": reports, "hub_head": hub_head, "skew": skew}
