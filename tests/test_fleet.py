@@ -1,3 +1,5 @@
+import datetime
+import json
 import time
 import unittest
 from unittest.mock import patch
@@ -5,23 +7,41 @@ from unittest.mock import patch
 import fleet
 
 
+def _empty_rollup(now=5000.0):
+    """A rollup() result with no transcript data at all: every test that
+    doesn't care about usage specifically gets this so build_fleet's
+    usage-shaped output stays deterministic instead of touching the real
+    filesystem through an unmocked usage.rollup."""
+    return {
+        "sessions": {},
+        "daily": {},
+        "generated_at": now,
+        "files": 0,
+        "bytes_read": 0,
+        "skipped": 0,
+        "partial": False,
+    }
+
+
 class BuildFleetTest(unittest.TestCase):
     def setUp(self):
         fleet._cache.clear()
         fleet._last_prune_at = None
 
+    @patch("fleet.usage.rollup")
     @patch("fleet.events.prune")
     @patch("fleet.events.read_events")
     @patch("fleet.sessions.list_rc_sessions")
     @patch("fleet.compat.get_caps")
     @patch("fleet.devices.get_local_name")
-    def test_full_role_carries_everything(self, get_name, get_caps, list_sess, read_ev, prune):
+    def test_full_role_carries_everything(self, get_name, get_caps, list_sess, read_ev, prune, rollup):
         get_name.return_value = "hub"
         get_caps.return_value = {"version": "2.1.263", "agents_json": True}
         list_sess.return_value = [
             {"name": "rc-foo", "session_id": "s1", "cwd": "/home/alice/proj", "state": "idle"},
         ]
         read_ev.return_value = ([{"ts": 1, "event": "Stop", "session_id": "s1", "extra": {}}], "f.jsonl:10")
+        rollup.return_value = _empty_rollup(5000.0)
 
         result = fleet.build_fleet(role="full", now_fn=lambda: 5000.0)
 
@@ -34,13 +54,19 @@ class BuildFleetTest(unittest.TestCase):
         self.assertEqual(result["cursor"], "f.jsonl:10")
         self.assertEqual(result["generated_at"], 5000.0)
         self.assertEqual(result["errors"], [])
+        self.assertIsNone(result["sessions"][0]["usage"])
+        self.assertEqual(result["usage_daily"], [])
+        self.assertEqual(
+            result["usage_meta"],
+            {"files": 0, "skipped": 0, "partial": False, "generated_at": 5000.0})
 
+    @patch("fleet.usage.rollup")
     @patch("fleet.events.prune")
     @patch("fleet.events.read_events")
     @patch("fleet.sessions.list_rc_sessions")
     @patch("fleet.compat.get_caps")
     @patch("fleet.devices.get_local_name")
-    def test_metadata_role_strips_cwd_tmux_claude_and_hashes(self, get_name, get_caps, list_sess, read_ev, prune):
+    def test_metadata_role_strips_cwd_tmux_claude_and_hashes(self, get_name, get_caps, list_sess, read_ev, prune, rollup):
         get_name.return_value = "work-mac"
         get_caps.return_value = {"version": "2.1.263", "agents_json": True}
         list_sess.return_value = [{
@@ -48,6 +74,7 @@ class BuildFleetTest(unittest.TestCase):
             "state": "idle", "tmux": {"pane_id": "%1"}, "claude": {"pid": 123}, "tokens": 5000,
         }]
         read_ev.return_value = ([{"ts": 1, "event": "SessionStart", "session_id": "s1", "extra": {"source": "startup"}}], "f.jsonl:5")
+        rollup.return_value = _empty_rollup(5000.0)
 
         result = fleet.build_fleet(role="metadata", now_fn=lambda: 5000.0)
 
@@ -58,22 +85,25 @@ class BuildFleetTest(unittest.TestCase):
         self.assertNotIn("tokens", row)
         self.assertEqual(
             set(row.keys()),
-            {"session_id", "name", "state", "started_at", "kind", "status"})
+            {"session_id", "name", "state", "started_at", "kind", "status", "usage"})
+        self.assertIsNone(row["usage"])
         self.assertNotEqual(row["session_id"], "s1")
         self.assertNotEqual(row["name"], "rc-secret-project")
         ev = result["events"][0]
         self.assertEqual(set(ev.keys()), {"ts", "event"})
 
+    @patch("fleet.usage.rollup")
     @patch("fleet.events.prune")
     @patch("fleet.events.read_events")
     @patch("fleet.sessions.list_rc_sessions")
     @patch("fleet.compat.get_caps")
     @patch("fleet.devices.get_local_name")
-    def test_cached_for_5_seconds_per_since_and_role(self, get_name, get_caps, list_sess, read_ev, prune):
+    def test_cached_for_5_seconds_per_since_and_role(self, get_name, get_caps, list_sess, read_ev, prune, rollup):
         get_name.return_value = "hub"
         get_caps.return_value = {}
         list_sess.return_value = []
         read_ev.return_value = ([], None)
+        rollup.return_value = _empty_rollup(1000.0)
         now = {"t": 1000.0}
         fleet.build_fleet(role="full", since=None, now_fn=lambda: now["t"])
         now["t"] = 1002.0
@@ -83,17 +113,19 @@ class BuildFleetTest(unittest.TestCase):
         fleet.build_fleet(role="full", since=None, now_fn=lambda: now["t"])
         self.assertEqual(list_sess.call_count, 2)
 
+    @patch("fleet.usage.rollup")
     @patch("fleet.events.prune")
     @patch("fleet.events.read_events")
     @patch("fleet.sessions.list_rc_sessions")
     @patch("fleet.compat.get_caps")
     @patch("fleet.devices.get_local_name")
     def test_metadata_role_errors_carry_only_exception_type_name(
-            self, get_name, get_caps, list_sess, read_ev, prune):
+            self, get_name, get_caps, list_sess, read_ev, prune, rollup):
         get_name.return_value = "hub"
         get_caps.return_value = {}
         list_sess.side_effect = OSError("/home/alice/secret/path: permission denied")
         read_ev.return_value = ([], None)
+        rollup.return_value = _empty_rollup(5000.0)
 
         result = fleet.build_fleet(role="metadata", now_fn=lambda: 5000.0)
 
@@ -102,33 +134,37 @@ class BuildFleetTest(unittest.TestCase):
         self.assertNotIn("/home/alice", result["errors"][0])
         self.assertNotIn("permission denied", result["errors"][0])
 
+    @patch("fleet.usage.rollup")
     @patch("fleet.events.prune")
     @patch("fleet.events.read_events")
     @patch("fleet.sessions.list_rc_sessions")
     @patch("fleet.compat.get_caps")
     @patch("fleet.devices.get_local_name")
     def test_full_role_errors_keep_exception_text(
-            self, get_name, get_caps, list_sess, read_ev, prune):
+            self, get_name, get_caps, list_sess, read_ev, prune, rollup):
         get_name.return_value = "hub"
         get_caps.return_value = {}
         list_sess.side_effect = OSError("boom detail")
         read_ev.return_value = ([], None)
+        rollup.return_value = _empty_rollup(5000.0)
 
         result = fleet.build_fleet(role="full", now_fn=lambda: 5000.0)
 
         self.assertEqual(len(result["errors"]), 1)
         self.assertIn("boom detail", result["errors"][0])
 
+    @patch("fleet.usage.rollup")
     @patch("fleet.events.prune")
     @patch("fleet.events.read_events")
     @patch("fleet.sessions.list_rc_sessions")
     @patch("fleet.compat.get_caps")
     @patch("fleet.devices.get_local_name")
-    def test_cache_keeps_only_newest_entry_per_role(self, get_name, get_caps, list_sess, read_ev, prune):
+    def test_cache_keeps_only_newest_entry_per_role(self, get_name, get_caps, list_sess, read_ev, prune, rollup):
         get_name.return_value = "hub"
         get_caps.return_value = {}
         list_sess.return_value = []
         read_ev.return_value = ([], None)
+        rollup.return_value = _empty_rollup(1000.0)
 
         fleet.build_fleet(role="full", since=None, now_fn=lambda: 1000.0)
         fleet.build_fleet(role="full", since="cursor-a", now_fn=lambda: 1000.0)
@@ -138,16 +174,18 @@ class BuildFleetTest(unittest.TestCase):
         self.assertEqual(len(full_keys), 1)
         self.assertEqual(full_keys[0], ("cursor-b", "full"))
 
+    @patch("fleet.usage.rollup")
     @patch("fleet.events.prune")
     @patch("fleet.events.read_events")
     @patch("fleet.sessions.list_rc_sessions")
     @patch("fleet.compat.get_caps")
     @patch("fleet.devices.get_local_name")
-    def test_prune_invoked_at_most_once_per_hour(self, get_name, get_caps, list_sess, read_ev, prune):
+    def test_prune_invoked_at_most_once_per_hour(self, get_name, get_caps, list_sess, read_ev, prune, rollup):
         get_name.return_value = "hub"
         get_caps.return_value = {}
         list_sess.return_value = []
         read_ev.return_value = ([], None)
+        rollup.return_value = _empty_rollup(1000.0)
 
         now = {"t": 1000.0}
         fleet.build_fleet(role="full", since="a", now_fn=lambda: now["t"])
@@ -160,6 +198,266 @@ class BuildFleetTest(unittest.TestCase):
         now["t"] = 1000.0 + fleet.PRUNE_INTERVAL_SECONDS + 1
         fleet.build_fleet(role="full", since="c", now_fn=lambda: now["t"])
         self.assertEqual(prune.call_count, 2)
+
+    # -- usage wiring -----------------------------------------------------
+
+    @patch("fleet.usage.rollup")
+    @patch("fleet.events.prune")
+    @patch("fleet.events.read_events")
+    @patch("fleet.sessions.list_rc_sessions")
+    @patch("fleet.compat.get_caps")
+    @patch("fleet.devices.get_local_name")
+    def test_session_with_transcript_data_gets_contract_shape(
+            self, get_name, get_caps, list_sess, read_ev, prune, rollup):
+        get_name.return_value = "hub"
+        get_caps.return_value = {}
+        list_sess.return_value = [{"name": "rc-foo", "session_id": "s1", "state": "idle"}]
+        read_ev.return_value = ([], None)
+        rollup.return_value = {
+            "sessions": {
+                "s1": {
+                    "session_id": "s1", "project": "-home-alice-proj",
+                    "input": 7214, "cache_read": 323420876, "cache_write": 4446439,
+                    "output": 423997, "effective": 43361000,
+                    "first_ts": 100.0, "last_ts": 1788786360.5,
+                    "models": {"claude-x": 3}, "messages": 3,
+                },
+            },
+            "daily": {},
+            "generated_at": 5000.0,
+            "files": 1, "bytes_read": 10, "skipped": 0, "partial": False,
+        }
+
+        result = fleet.build_fleet(role="full", now_fn=lambda: 5000.0)
+
+        self.assertEqual(result["sessions"][0]["usage"], {
+            "input": 7214, "cache_read": 323420876, "cache_write": 4446439,
+            "output": 423997, "effective": 43361000, "last_ts": 1788786360.5,
+        })
+
+    @patch("fleet.usage.rollup")
+    @patch("fleet.events.prune")
+    @patch("fleet.events.read_events")
+    @patch("fleet.sessions.list_rc_sessions")
+    @patch("fleet.compat.get_caps")
+    @patch("fleet.devices.get_local_name")
+    def test_session_with_no_transcript_data_gets_none_not_zeros(
+            self, get_name, get_caps, list_sess, read_ev, prune, rollup):
+        get_name.return_value = "hub"
+        get_caps.return_value = {}
+        list_sess.return_value = [{"name": "rc-foo", "session_id": "s1", "state": "idle"}]
+        read_ev.return_value = ([], None)
+        rollup.return_value = _empty_rollup(5000.0)
+
+        result = fleet.build_fleet(role="full", now_fn=lambda: 5000.0)
+
+        self.assertIsNone(result["sessions"][0]["usage"])
+
+    @patch("fleet.usage.rollup")
+    @patch("fleet.events.prune")
+    @patch("fleet.events.read_events")
+    @patch("fleet.sessions.list_rc_sessions")
+    @patch("fleet.compat.get_caps")
+    @patch("fleet.devices.get_local_name")
+    def test_tmux_derived_session_id_gets_none_without_raising(
+            self, get_name, get_caps, list_sess, read_ev, prune, rollup):
+        get_name.return_value = "hub"
+        get_caps.return_value = {}
+        list_sess.return_value = [{"name": "rc-foo", "session_id": "tmux:rc-foo", "state": "idle"}]
+        read_ev.return_value = ([], None)
+        # A real transcript session exists under its own UUID, unrelated
+        # to the tmux-derived id the adopted row carries.
+        rollup.return_value = {
+            "sessions": {
+                "11111111-1111-1111-1111-111111111111": {
+                    "session_id": "11111111-1111-1111-1111-111111111111",
+                    "project": "-home-alice-proj",
+                    "input": 1, "cache_read": 1, "cache_write": 1, "output": 1,
+                    "effective": 8, "first_ts": 1.0, "last_ts": 2.0,
+                    "models": {}, "messages": 1,
+                },
+            },
+            "daily": {}, "generated_at": 5000.0,
+            "files": 1, "bytes_read": 1, "skipped": 0, "partial": False,
+        }
+
+        result = fleet.build_fleet(role="full", now_fn=lambda: 5000.0)
+
+        self.assertIsNone(result["sessions"][0]["usage"])
+
+    @patch("fleet.usage.rollup")
+    @patch("fleet.events.prune")
+    @patch("fleet.events.read_events")
+    @patch("fleet.sessions.list_rc_sessions")
+    @patch("fleet.compat.get_caps")
+    @patch("fleet.devices.get_local_name")
+    def test_usage_daily_capped_at_30_and_newest_first(
+            self, get_name, get_caps, list_sess, read_ev, prune, rollup):
+        get_name.return_value = "hub"
+        get_caps.return_value = {}
+        list_sess.return_value = []
+        read_ev.return_value = ([], None)
+
+        base = datetime.date(2026, 9, 7)
+        daily = {}
+        for i in range(35):
+            day = (base - datetime.timedelta(days=i)).isoformat()
+            daily[day] = {"input": i, "cache_read": 0, "cache_write": 0, "output": 0, "effective": i}
+        rollup.return_value = {
+            "sessions": {}, "daily": daily, "generated_at": 5000.0,
+            "files": 35, "bytes_read": 0, "skipped": 0, "partial": False,
+        }
+
+        result = fleet.build_fleet(role="full", now_fn=lambda: 5000.0)
+
+        self.assertEqual(len(result["usage_daily"]), 30)
+        self.assertEqual(result["usage_daily"][0]["day"], base.isoformat())
+        self.assertEqual(
+            result["usage_daily"][-1]["day"],
+            (base - datetime.timedelta(days=29)).isoformat())
+        days = [row["day"] for row in result["usage_daily"]]
+        self.assertEqual(days, sorted(days, reverse=True))
+
+    @patch("fleet.usage.rollup")
+    @patch("fleet.events.prune")
+    @patch("fleet.events.read_events")
+    @patch("fleet.sessions.list_rc_sessions")
+    @patch("fleet.compat.get_caps")
+    @patch("fleet.devices.get_local_name")
+    def test_metadata_role_redacts_usage_and_drops_project_name(
+            self, get_name, get_caps, list_sess, read_ev, prune, rollup):
+        get_name.return_value = "hub"
+        get_caps.return_value = {}
+        list_sess.return_value = [{"name": "rc-foo", "session_id": "s1", "state": "idle"}]
+        read_ev.return_value = ([], None)
+        rollup.return_value = {
+            "sessions": {
+                "s1": {
+                    "session_id": "s1", "project": "-home-alice-super-secret-client",
+                    "input": 1, "cache_read": 2, "cache_write": 3, "output": 4,
+                    "effective": 50, "first_ts": 1.0, "last_ts": 2.0,
+                    "models": {}, "messages": 1,
+                },
+            },
+            "daily": {
+                "2026-09-07": {"input": 1, "cache_read": 2, "cache_write": 3, "output": 4, "effective": 50},
+            },
+            "generated_at": 5000.0,
+            "files": 1, "bytes_read": 1, "skipped": 0, "partial": False,
+        }
+
+        result = fleet.build_fleet(role="metadata", now_fn=lambda: 5000.0)
+
+        self.assertEqual(result["sessions"][0]["usage"], {"effective": 50})
+        self.assertEqual(result["usage_daily"], [{"day": "2026-09-07", "effective": 50}])
+        # usage_meta is sent unchanged under metadata role (counts only).
+        self.assertEqual(
+            result["usage_meta"],
+            {"files": 1, "skipped": 0, "partial": False, "generated_at": 5000.0})
+        payload = json.dumps(result)
+        self.assertNotIn("super-secret-client", payload)
+
+    @patch("fleet.usage.rollup")
+    @patch("fleet.events.prune")
+    @patch("fleet.events.read_events")
+    @patch("fleet.sessions.list_rc_sessions")
+    @patch("fleet.compat.get_caps")
+    @patch("fleet.devices.get_local_name")
+    def test_usage_rollup_raising_does_not_break_build_fleet(
+            self, get_name, get_caps, list_sess, read_ev, prune, rollup):
+        get_name.return_value = "hub"
+        get_caps.return_value = {}
+        list_sess.return_value = [{"name": "rc-foo", "session_id": "s1", "state": "idle"}]
+        read_ev.return_value = ([], None)
+        rollup.side_effect = RuntimeError("boom /home/alice detail")
+
+        result = fleet.build_fleet(role="full", now_fn=lambda: 5000.0)
+
+        self.assertIsNone(result["sessions"][0]["usage"])
+        self.assertEqual(result["usage_daily"], [])
+        self.assertIsNone(result["usage_meta"])
+        self.assertEqual(len(result["errors"]), 1)
+        self.assertIn("boom /home/alice detail", result["errors"][0])
+
+        fleet._cache.clear()
+        result_meta = fleet.build_fleet(role="metadata", now_fn=lambda: 5000.0)
+        self.assertEqual(len(result_meta["errors"]), 1)
+        self.assertIn("RuntimeError", result_meta["errors"][0])
+        self.assertNotIn("boom", result_meta["errors"][0])
+        self.assertNotIn("/home/alice", result_meta["errors"][0])
+        self.assertIsNone(result_meta["sessions"][0]["usage"])
+
+    @patch("fleet.usage.rollup")
+    @patch("fleet.events.prune")
+    @patch("fleet.events.read_events")
+    @patch("fleet.sessions.list_rc_sessions")
+    @patch("fleet.compat.get_caps")
+    @patch("fleet.devices.get_local_name")
+    def test_cache_honoured_usage_rollup_called_once_per_window(
+            self, get_name, get_caps, list_sess, read_ev, prune, rollup):
+        get_name.return_value = "hub"
+        get_caps.return_value = {}
+        list_sess.return_value = []
+        read_ev.return_value = ([], None)
+        rollup.return_value = _empty_rollup(1000.0)
+
+        now = {"t": 1000.0}
+        fleet.build_fleet(role="full", since=None, now_fn=lambda: now["t"])
+        now["t"] = 1002.0
+        fleet.build_fleet(role="full", since=None, now_fn=lambda: now["t"])
+        self.assertEqual(rollup.call_count, 1)
+        now["t"] = 1006.0
+        fleet.build_fleet(role="full", since=None, now_fn=lambda: now["t"])
+        self.assertEqual(rollup.call_count, 2)
+
+    @patch("fleet.usage.rollup")
+    @patch("fleet.events.prune")
+    @patch("fleet.events.read_events")
+    @patch("fleet.sessions.list_rc_sessions")
+    @patch("fleet.compat.get_caps")
+    @patch("fleet.devices.get_local_name")
+    def test_partial_rollup_surfaces_in_usage_meta(
+            self, get_name, get_caps, list_sess, read_ev, prune, rollup):
+        get_name.return_value = "hub"
+        get_caps.return_value = {}
+        list_sess.return_value = []
+        read_ev.return_value = ([], None)
+        rollup.return_value = {
+            "sessions": {}, "daily": {}, "generated_at": 5000.0,
+            "files": 10, "bytes_read": 999, "skipped": 2, "partial": True,
+        }
+
+        result = fleet.build_fleet(role="full", now_fn=lambda: 5000.0)
+
+        self.assertEqual(
+            result["usage_meta"],
+            {"files": 10, "skipped": 2, "partial": True, "generated_at": 5000.0})
+
+    @patch("fleet.usage.rollup")
+    @patch("fleet.events.prune")
+    @patch("fleet.events.read_events")
+    @patch("fleet.sessions.list_rc_sessions")
+    @patch("fleet.compat.get_caps")
+    @patch("fleet.devices.get_local_name")
+    def test_rollup_called_once_with_explicit_budget_regardless_of_session_count(
+            self, get_name, get_caps, list_sess, read_ev, prune, rollup):
+        get_name.return_value = "hub"
+        get_caps.return_value = {}
+        list_sess.return_value = [
+            {"name": "rc-a", "session_id": "s1", "state": "idle"},
+            {"name": "rc-b", "session_id": "s2", "state": "idle"},
+            {"name": "rc-c", "session_id": "s3", "state": "idle"},
+        ]
+        read_ev.return_value = ([], None)
+        rollup.return_value = _empty_rollup(5000.0)
+
+        fleet.build_fleet(role="full", now_fn=lambda: 5000.0)
+
+        self.assertEqual(rollup.call_count, 1)
+        _, kwargs = rollup.call_args
+        self.assertEqual(kwargs["max_bytes_per_call"], fleet.usage.DEFAULT_MAX_BYTES_PER_CALL)
+        self.assertEqual(kwargs["now_fn"](), 5000.0)
+        self.assertEqual(kwargs["days"], fleet.USAGE_DAILY_MAX_DAYS)
 
 
 if __name__ == "__main__":
