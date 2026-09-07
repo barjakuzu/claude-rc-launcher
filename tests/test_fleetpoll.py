@@ -992,6 +992,109 @@ class GuardInvocationTest(unittest.TestCase):
         self.assertEqual(self.store.live_alerts(), [])
 
 
+class LimitsIngestTest(unittest.TestCase):
+    """CONTRACT.md sections 3-4: fleet.build_fleet()'s `limits` key is
+    persisted per device via store.upsert_account_limits(), same ingest
+    pass as sessions/usage/cost above."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = _fake_store(self.tmp.name)
+
+    def tearDown(self):
+        self.store.close()
+        self.tmp.cleanup()
+
+    def _limits_payload(self, available=True, fetched_at=1000.0):
+        return {
+            "available": available, "fetched_at": fetched_at,
+            "five_hour": {"percent": 56.0, "resets_at": "r"} if available else None,
+            "seven_day": {"percent": 80.0, "resets_at": "r"} if available else None,
+            "scoped": [], "spend": None, "extra_usage": None,
+            "error": None if available else "CredentialsUnavailable",
+        }
+
+    @patch("fleetpoll.fleet.build_fleet")
+    @patch("fleetpoll.devices.load_devices")
+    @patch("fleetpoll.devices.get_local_name")
+    def test_limits_key_persisted_to_account_limits(self, get_name, load_devices, build_fleet):
+        get_name.return_value = "hub"
+        load_devices.return_value = []
+        build_fleet.return_value = {
+            "device_name": "hub", "role": "full", "version": "1", "claude_version": "1",
+            "sessions": [], "events": [], "cursor": None, "generated_at": 1000.0,
+            "errors": [], "limits": self._limits_payload(),
+        }
+        poller = fleetpoll.FleetPoller(self.store, http_get=MagicMock())
+        poller.poll_once()
+
+        view = self.store.limits_view()
+        self.assertEqual(len(view["rows"]), 1)
+        self.assertEqual(view["rows"][0]["device_id"], "local")
+        self.assertTrue(view["rows"][0]["available"])
+        self.assertEqual(view["primary_device_id"], "local")
+
+    @patch("fleetpoll.fleet.build_fleet")
+    @patch("fleetpoll.devices.load_devices")
+    @patch("fleetpoll.devices.get_local_name")
+    def test_missing_limits_key_never_writes_a_row(self, get_name, load_devices, build_fleet):
+        # A legacy/pre-fleet snapshot (see _poll_remote_legacy) has no
+        # "limits" key at all -- this must be a silent no-op, not a
+        # fabricated unavailable row.
+        get_name.return_value = "hub"
+        load_devices.return_value = []
+        build_fleet.return_value = {
+            "device_name": "hub", "role": "full", "version": "1", "claude_version": "1",
+            "sessions": [], "events": [], "cursor": None, "generated_at": 1000.0, "errors": [],
+        }
+        poller = fleetpoll.FleetPoller(self.store, http_get=MagicMock())
+        poller.poll_once()
+
+        self.assertEqual(self.store.limits_view()["rows"], [])
+
+    @patch("fleetpoll.fleet.build_fleet")
+    @patch("fleetpoll.devices.load_devices")
+    @patch("fleetpoll.devices.get_local_name")
+    def test_malformed_limits_never_breaks_the_rest_of_ingest(
+            self, get_name, load_devices, build_fleet):
+        get_name.return_value = "hub"
+        load_devices.return_value = []
+        build_fleet.return_value = {
+            "device_name": "hub", "role": "full", "version": "1", "claude_version": "1",
+            "sessions": [{"session_id": "s1", "name": "rc-a", "state": "idle"}],
+            "events": [], "cursor": "cur-1", "generated_at": 1000.0, "errors": [],
+            "limits": "not a dict",
+        }
+        poller = fleetpoll.FleetPoller(self.store, http_get=MagicMock())
+        poller.poll_once()
+
+        # Sessions/cursor still made it through despite the bad `limits`.
+        view = self.store.fleet_view()
+        self.assertEqual(len(view["sessions"]), 1)
+        self.assertEqual(poller._cursors["local"], "cur-1")
+        self.assertEqual(self.store.limits_view()["rows"], [])
+
+    @patch("fleetpoll.fleet.build_fleet")
+    @patch("fleetpoll.devices.load_devices")
+    @patch("fleetpoll.devices.get_local_name")
+    def test_unavailable_limits_persisted_and_never_becomes_primary(
+            self, get_name, load_devices, build_fleet):
+        get_name.return_value = "hub"
+        load_devices.return_value = []
+        build_fleet.return_value = {
+            "device_name": "hub", "role": "full", "version": "1", "claude_version": "1",
+            "sessions": [], "events": [], "cursor": None, "generated_at": 1000.0,
+            "errors": [], "limits": self._limits_payload(available=False),
+        }
+        poller = fleetpoll.FleetPoller(self.store, http_get=MagicMock())
+        poller.poll_once()
+
+        view = self.store.limits_view()
+        self.assertEqual(len(view["rows"]), 1)
+        self.assertFalse(view["rows"][0]["available"])
+        self.assertIsNone(view["primary"])
+
+
 class StartStopTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

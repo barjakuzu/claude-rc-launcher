@@ -1151,6 +1151,14 @@ class ApiFleetRouteTest(unittest.TestCase):
         h.path = "/api/sessions/local/s1/events"
         self.assertFalse(h._should_proxy("some-device"))
 
+    def test_api_limits_is_hub_only_not_proxied(self):
+        # CONTRACT.md section 5: /api/limits is a hub-side aggregation
+        # over every device's account_limits row (like /api/cost), never
+        # a single device's own data to proxy to.
+        h = server.Handler.__new__(server.Handler)
+        h.path = "/api/limits"
+        self.assertFalse(h._should_proxy("some-device"))
+
 
 class ApiFleetStreamHeadersTest(unittest.TestCase):
     def test_stream_sets_no_buffering_headers(self):
@@ -1563,6 +1571,15 @@ class ApiRouteQueryStringToleranceTest(_ApiRouteFixture):
             self.assertIn("summary", data, path)
             self.assertIn("config_error", data, path)
 
+    def test_api_limits_ok_with_and_without_query_string(self):
+        for path in ("/api/limits", "/api/limits?x=1"):
+            data, code = self._get_json(path)
+            self.assertEqual(code, 200, path)
+            self.assertIn("primary", data, path)
+            self.assertIn("devices", data, path)
+            self.assertIn("divergent", data, path)
+            self.assertIn("generated_at", data, path)
+
 
 class ApiFleetUsageFieldsTest(_ApiRouteFixture):
     """CONTRACT.md section 3: GET /api/fleet gains usage_age_seconds per
@@ -1714,6 +1731,81 @@ class ApiAlertsRouteTest(_ApiRouteFixture):
             data, code = self._get_json("/api/alerts")
         self.assertEqual(code, 200)
         self.assertEqual(data["config_error"], "boom: bad guard.json")
+
+
+class ApiLimitsRouteTest(_ApiRouteFixture):
+    """Exercises /api/limits (CONTRACT.md section 5) beyond bare
+    query-string tolerance (covered by ApiRouteQueryStringToleranceTest
+    above)."""
+
+    def _limits_payload(self, available=True, fetched_at=1000.0, five_hour_percent=56.0):
+        return {
+            "available": available, "fetched_at": fetched_at,
+            "five_hour": {"percent": five_hour_percent, "resets_at": "r"} if available else None,
+            "seven_day": {"percent": 80.0, "resets_at": "r"} if available else None,
+            "scoped": [], "spend": None, "extra_usage": None,
+            "error": None if available else "CredentialsUnavailable",
+        }
+
+    def test_empty_store_returns_null_primary_not_an_error(self):
+        data, code = self._get_json("/api/limits")
+        self.assertEqual(code, 200)
+        self.assertIsNone(data["primary"])
+        self.assertEqual(data["devices"], [])
+        self.assertFalse(data["divergent"])
+
+    def test_happy_path_primary_carries_device_id(self):
+        server.HUB_STORE.upsert_device({"id": "local", "name": "Dev VM", "role": "full",
+                                         "version": "1", "claude_version": "1"})
+        server.HUB_STORE.upsert_account_limits("local", self._limits_payload())
+        data, code = self._get_json("/api/limits")
+        self.assertEqual(code, 200)
+        self.assertIsNotNone(data["primary"])
+        self.assertEqual(data["primary"]["device_id"], "local")
+        self.assertEqual(data["primary"]["five_hour"]["percent"], 56.0)
+
+    def test_devices_list_carries_name_available_fetched_at_age_seconds(self):
+        server.HUB_STORE.upsert_device({"id": "local", "name": "Dev VM", "role": "full",
+                                         "version": "1", "claude_version": "1"})
+        server.HUB_STORE.upsert_account_limits(
+            "local", self._limits_payload(fetched_at=time.time() - 30))
+        data, code = self._get_json("/api/limits")
+        self.assertEqual(code, 200)
+        self.assertEqual(len(data["devices"]), 1)
+        dev = data["devices"][0]
+        self.assertEqual(dev["device_id"], "local")
+        self.assertEqual(dev["name"], "Dev VM")
+        self.assertTrue(dev["available"])
+        self.assertGreaterEqual(dev["age_seconds"], 30)
+
+    def test_device_name_falls_back_to_id_when_device_row_absent(self):
+        # An account_limits row can exist for a device the `devices` table
+        # doesn't (yet) know about -- e.g. a poll ordering edge case.
+        server.HUB_STORE.upsert_account_limits("ghost", self._limits_payload())
+        data, code = self._get_json("/api/limits")
+        self.assertEqual(code, 200)
+        dev = next(d for d in data["devices"] if d["device_id"] == "ghost")
+        self.assertEqual(dev["name"], "ghost")
+
+    def test_divergent_flag_surfaces_from_store(self):
+        server.HUB_STORE.upsert_account_limits(
+            "local", self._limits_payload(fetched_at=1000.0, five_hour_percent=50.0))
+        server.HUB_STORE.upsert_account_limits(
+            "laptop", self._limits_payload(fetched_at=1000.0, five_hour_percent=90.0))
+        data, code = self._get_json("/api/limits")
+        self.assertEqual(code, 200)
+        self.assertTrue(data["divergent"])
+
+    def test_unavailable_only_device_gives_null_primary_but_lists_the_device(self):
+        server.HUB_STORE.upsert_device({"id": "local", "name": "Dev VM", "role": "full",
+                                         "version": "1", "claude_version": "1"})
+        server.HUB_STORE.upsert_account_limits(
+            "local", self._limits_payload(available=False))
+        data, code = self._get_json("/api/limits")
+        self.assertEqual(code, 200)
+        self.assertIsNone(data["primary"])
+        self.assertEqual(len(data["devices"]), 1)
+        self.assertFalse(data["devices"][0]["available"])
 
 
 class ShouldProxyQueryStringTest(unittest.TestCase):

@@ -1219,6 +1219,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if (p.startswith("/static/") or p == "/devices" or p == "/devices/rename"
                 or p == "/api/config-matrix" or p == "/api/fleet" or p == "/api/fleet/stream"
                 or p == "/api/audit" or p == "/api/cost" or p == "/api/alerts"
+                or p == "/api/limits"
                 or p.startswith("/api/sessions/")):
             return False
         return True
@@ -1436,6 +1437,58 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "summary": guard.summarize(alerts),
                 "alerts": alerts,
                 "config_error": guard.LAST_LOAD_ERROR,
+            })
+
+        elif path == "/api/limits":
+            # CONTRACT.md section 5. Hub-aggregated (like /api/cost,
+            # /api/alerts) -- never proxied to a device, see
+            # _should_proxy above -- so HUB_STORE is the only source.
+            now = time.time()
+            if HUB_STORE is None:
+                return self._json({
+                    "generated_at": now, "primary": None, "devices": [], "divergent": False,
+                })
+            view = HUB_STORE.limits_view()
+            device_names = {
+                d["id"]: d.get("name", d["id"])
+                for d in HUB_STORE.fleet_view()["devices"]
+            }
+            devices_out = [
+                {
+                    "device_id": row["device_id"],
+                    "name": device_names.get(row["device_id"], row["device_id"]),
+                    "available": row["available"],
+                    "fetched_at": row["fetched_at"],
+                    # CONTRACT.md section 5: age_seconds so the UI can
+                    # show staleness even when `available` is still true
+                    # (a device serving its last-good reading after its
+                    # own fetch started failing -- limits.py section 2).
+                    "age_seconds": (
+                        now - row["fetched_at"]
+                        if isinstance(row["fetched_at"], (int, float))
+                        and not isinstance(row["fetched_at"], bool)
+                        else None
+                    ),
+                }
+                for row in view["rows"]
+            ]
+            primary = view["primary"]
+            if primary is not None:
+                # store.limits_view() returns the payload and its
+                # device_id separately (see its docstring); merging them
+                # here, not there, matches cost_view() leaving `days`/
+                # `totals` shaping to this same API layer. Copied rather
+                # than mutated in place purely on principle -- callers
+                # should never assume a store.py read result is safe to
+                # mutate, even though this particular dict happens to be
+                # freshly parsed from payload_json on every call.
+                primary = dict(primary)
+                primary["device_id"] = view["primary_device_id"]
+            self._json({
+                "generated_at": now,
+                "primary": primary,
+                "devices": devices_out,
+                "divergent": view["divergent"],
             })
 
         elif path == "/api/fleet/stream":

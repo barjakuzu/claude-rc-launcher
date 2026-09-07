@@ -225,7 +225,16 @@ CREATE TABLE IF NOT EXISTS alerts (
     target_type TEXT, name TEXT,
     PRIMARY KEY (device_id, session_id, rule)
 );
+CREATE TABLE IF NOT EXISTS account_limits (
+    device_id TEXT PRIMARY KEY,
+    available INTEGER, fetched_at REAL, payload_json TEXT, updated_at REAL
+);
 """
+# account_limits (CONTRACT.md section 4) is a brand-new table, same as
+# session_usage/cost_daily/alerts were when the comment below them was
+# first written -- CREATE TABLE IF NOT EXISTS above is sufficient on its
+# own, no additive column migration needed, because no existing hub.db
+# can already have a differently-shaped version of this table.
 # session_usage, cost_daily and alerts (Phase 3 wiring, CONTRACT.md section
 # 2) were brand-new tables when this comment was first written, so CREATE
 # TABLE IF NOT EXISTS above was safe on its own. `alerts`'s target_type/name
@@ -800,6 +809,52 @@ class Store:
             return {"skipped": skipped}
         return self._write(_do)
 
+    def upsert_account_limits(self, device_id, limits_payload, now_fn=time.time):
+        """Replace this device's stored account-limits reading (CONTRACT.md
+        sections 2-4) with `limits_payload` -- fleet.build_fleet()'s own
+        `limits` key, taken and stored WHOLE as JSON, not reshaped into
+        columns: CONTRACT.md section 4 says "payload_json is the `limits`
+        object above" verbatim, and it is server.py's /api/limits route
+        (section 5), not this write path, that decides which of its
+        fields the hub API actually surfaces.
+
+        One row per device (PRIMARY KEY device_id) -- account_limits holds
+        the freshest reading per device, not a history, so this always
+        overwrites, never appends, same as upsert_device/
+        upsert_session_usage above.
+
+        `available`/`fetched_at` are pulled out of the payload into their
+        own columns too, alongside payload_json, purely so limits_view()
+        can filter/sort/compare in SQL without json.loads-ing every row
+        first -- they are NOT a second source of truth: on a read, the
+        payload (parsed from payload_json) is what callers actually use.
+
+        A payload that isn't a dict at all is skipped and logged, same
+        treatment upsert_cost_daily gives a row with no `day` -- a
+        malformed shape from one device's fleet snapshot must not raise
+        out of a poll cycle that is also ingesting that device's
+        sessions/events/usage in the same call."""
+        def _do(conn):
+            if not isinstance(limits_payload, dict):
+                _LOG.warning(
+                    "upsert_account_limits: skipping non-dict payload for device %r: %r",
+                    device_id, type(limits_payload).__name__)
+                return {"skipped": True}
+            now = now_fn()
+            available = 1 if limits_payload.get("available") else 0
+            fetched_at = limits_payload.get("fetched_at")
+            if isinstance(fetched_at, bool) or not isinstance(fetched_at, (int, float)):
+                fetched_at = None
+            conn.execute(
+                "INSERT INTO account_limits (device_id, available, fetched_at, "
+                "payload_json, updated_at) VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(device_id) DO UPDATE SET available=excluded.available, "
+                "fetched_at=excluded.fetched_at, payload_json=excluded.payload_json, "
+                "updated_at=excluded.updated_at",
+                (device_id, available, fetched_at, json.dumps(limits_payload), now))
+            return {"skipped": False}
+        return self._write(_do)
+
     def replace_alerts(self, findings, now_fn=time.time):
         """Make the alerts table equal `findings` (guard.evaluate()'s
         output) exactly: every finding upserts its row, preserving
@@ -1163,6 +1218,92 @@ class Store:
 
             return {"devices": devices_out, "projects": projects_out,
                     "sessions": sessions_out, "generated_at": now}
+        finally:
+            conn.close()
+
+    # A five_hour.percent spread beyond this many points between two
+    # AVAILABLE devices flips limits_view()'s `divergent` flag (CONTRACT.md
+    # section 4). All devices share one Claude account, so any real spread
+    # is a staleness artifact (one device's reading is a poll or two behind
+    # the other), not two different truths -- 5 is generous enough to
+    # absorb that normal skew without flagging on it constantly, while
+    # still catching a device that is actually stuck on stale data.
+    LIMITS_DIVERGENCE_THRESHOLD = 5
+
+    def limits_view(self):
+        """Hub-wide account_limits aggregation (CONTRACT.md section 4).
+
+        Returns {"rows": [...], "primary": <payload dict or None>,
+        "primary_device_id": <str or None>, "divergent": bool}.
+
+        rows: one entry per device that has ever reported a limits
+        reading -- {"device_id", "available" (bool), "fetched_at",
+        "payload" (the stored `limits` object, or None if payload_json
+        somehow failed to parse), "updated_at"}.
+
+        `primary`/`primary_device_id`: the freshest (highest fetched_at)
+        AVAILABLE row's payload and the device_id it came from, or
+        (None, None) if no device has ever reported available data --
+        CONTRACT.md section 5: "primary is null when no device has
+        data... Never invent zeros." Returned as two separate values
+        (not primary embedded with device_id already merged in) because
+        that merge is server.py's /api/limits route's job, same division
+        of labor as cost_view() leaving `days`/`totals` to the API layer.
+
+        `divergent`: True when at least two AVAILABLE rows' five_hour.percent
+        differ by more than LIMITS_DIVERGENCE_THRESHOLD points. A row with
+        no usable five_hour reading (never fetched, or a payload that
+        failed to parse) is excluded from the comparison -- it has nothing
+        to disagree WITH, not evidence either way."""
+        conn = self._read_conn()
+        try:
+            now = time.time()
+            rows_raw = conn.execute(
+                "SELECT device_id, available, fetched_at, payload_json, updated_at "
+                "FROM account_limits").fetchall()
+            rows = []
+            for r in rows_raw:
+                rows.append({
+                    "device_id": r["device_id"],
+                    "available": bool(r["available"]),
+                    "fetched_at": r["fetched_at"],
+                    "payload": _parse_json_or_none(r["payload_json"]),
+                    "updated_at": r["updated_at"],
+                })
+
+            available_rows = [
+                row for row in rows
+                if row["available"] and isinstance(row["payload"], dict)
+            ]
+            primary = None
+            primary_device_id = None
+            if available_rows:
+                def _sort_key(row):
+                    fetched_at = row["fetched_at"]
+                    return fetched_at if isinstance(fetched_at, (int, float)) else float("-inf")
+                freshest = max(available_rows, key=_sort_key)
+                primary = freshest["payload"]
+                primary_device_id = freshest["device_id"]
+
+            five_hour_percents = []
+            for row in available_rows:
+                bucket = row["payload"].get("five_hour")
+                if not isinstance(bucket, dict):
+                    continue
+                pct = bucket.get("percent")
+                if isinstance(pct, (int, float)) and not isinstance(pct, bool):
+                    five_hour_percents.append(pct)
+            divergent = (
+                len(five_hour_percents) >= 2
+                and (max(five_hour_percents) - min(five_hour_percents))
+                > self.LIMITS_DIVERGENCE_THRESHOLD
+            )
+
+            return {
+                "rows": rows, "primary": primary,
+                "primary_device_id": primary_device_id, "divergent": divergent,
+                "generated_at": now,
+            }
         finally:
             conn.close()
 

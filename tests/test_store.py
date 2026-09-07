@@ -1854,5 +1854,127 @@ class AlertsTargetTypeNameColumnsTest(unittest.TestCase):
             migrated.close()
 
 
+class AccountLimitsTest(unittest.TestCase):
+    """CONTRACT.md sections 2-4: the account_limits table,
+    upsert_account_limits() and limits_view()."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db_path = os.path.join(self.tmp.name, "hub.db")
+        self.store = store.Store(self.db_path)
+
+    def tearDown(self):
+        self.store.close()
+        self.tmp.cleanup()
+
+    def _payload(self, available=True, fetched_at=1000.0, five_hour_percent=50.0):
+        return {
+            "available": available, "fetched_at": fetched_at,
+            "five_hour": {"percent": five_hour_percent, "resets_at": "r"} if available else None,
+            "seven_day": {"percent": 10.0, "resets_at": "r"} if available else None,
+            "scoped": [], "spend": None, "extra_usage": None,
+            "error": None if available else "CredentialsUnavailable",
+        }
+
+    def test_upsert_then_appears_in_limits_view_rows(self):
+        self.store.upsert_account_limits("local", self._payload())
+        view = self.store.limits_view()
+        self.assertEqual(len(view["rows"]), 1)
+        row = view["rows"][0]
+        self.assertEqual(row["device_id"], "local")
+        self.assertTrue(row["available"])
+        self.assertEqual(row["fetched_at"], 1000.0)
+        self.assertEqual(row["payload"], self._payload())
+
+    def test_upsert_overwrites_not_accumulates(self):
+        self.store.upsert_account_limits("local", self._payload(fetched_at=1000.0))
+        self.store.upsert_account_limits("local", self._payload(fetched_at=2000.0, five_hour_percent=70.0))
+        view = self.store.limits_view()
+        self.assertEqual(len(view["rows"]), 1)
+        self.assertEqual(view["rows"][0]["fetched_at"], 2000.0)
+        self.assertEqual(view["rows"][0]["payload"]["five_hour"]["percent"], 70.0)
+
+    def test_non_dict_payload_is_skipped_not_raised(self):
+        result = self.store.upsert_account_limits("local", "not a dict")
+        self.assertEqual(result, {"skipped": True})
+        view = self.store.limits_view()
+        self.assertEqual(view["rows"], [])
+
+    def test_available_false_payload_is_stored_and_readable(self):
+        self.store.upsert_account_limits(
+            "local", self._payload(available=False, fetched_at=500.0))
+        view = self.store.limits_view()
+        self.assertEqual(len(view["rows"]), 1)
+        self.assertFalse(view["rows"][0]["available"])
+        self.assertEqual(view["rows"][0]["payload"]["error"], "CredentialsUnavailable")
+
+    def test_primary_is_none_when_store_empty(self):
+        view = self.store.limits_view()
+        self.assertIsNone(view["primary"])
+        self.assertIsNone(view["primary_device_id"])
+        self.assertFalse(view["divergent"])
+
+    def test_primary_is_none_when_no_device_has_available_data(self):
+        self.store.upsert_account_limits(
+            "local", self._payload(available=False, fetched_at=1000.0))
+        view = self.store.limits_view()
+        self.assertIsNone(view["primary"])
+        self.assertIsNone(view["primary_device_id"])
+
+    def test_primary_is_the_freshest_available_row_across_devices(self):
+        self.store.upsert_account_limits("local", self._payload(fetched_at=1000.0))
+        self.store.upsert_account_limits("laptop", self._payload(fetched_at=2000.0, five_hour_percent=51.0))
+        view = self.store.limits_view()
+        self.assertEqual(view["primary_device_id"], "laptop")
+        self.assertEqual(view["primary"]["five_hour"]["percent"], 51.0)
+
+    def test_unavailable_row_never_becomes_primary_even_if_freshest(self):
+        self.store.upsert_account_limits("local", self._payload(fetched_at=1000.0))
+        self.store.upsert_account_limits(
+            "laptop", self._payload(available=False, fetched_at=9999.0))
+        view = self.store.limits_view()
+        self.assertEqual(view["primary_device_id"], "local")
+
+    def test_divergent_false_within_5_points(self):
+        self.store.upsert_account_limits("local", self._payload(fetched_at=1000.0, five_hour_percent=50.0))
+        self.store.upsert_account_limits("laptop", self._payload(fetched_at=1000.0, five_hour_percent=55.0))
+        view = self.store.limits_view()
+        self.assertFalse(view["divergent"])
+
+    def test_divergent_true_beyond_5_points(self):
+        self.store.upsert_account_limits("local", self._payload(fetched_at=1000.0, five_hour_percent=50.0))
+        self.store.upsert_account_limits("laptop", self._payload(fetched_at=1000.0, five_hour_percent=55.1))
+        view = self.store.limits_view()
+        self.assertTrue(view["divergent"])
+
+    def test_divergent_ignores_unavailable_rows(self):
+        self.store.upsert_account_limits("local", self._payload(fetched_at=1000.0, five_hour_percent=50.0))
+        self.store.upsert_account_limits(
+            "laptop", self._payload(available=False, fetched_at=1000.0))
+        view = self.store.limits_view()
+        self.assertFalse(view["divergent"])
+
+    def test_divergent_false_with_only_one_available_row(self):
+        self.store.upsert_account_limits("local", self._payload(fetched_at=1000.0))
+        view = self.store.limits_view()
+        self.assertFalse(view["divergent"])
+
+    def test_row_missing_five_hour_excluded_from_divergence_but_still_listed(self):
+        payload = self._payload(fetched_at=1000.0, five_hour_percent=50.0)
+        no_bucket = dict(payload, five_hour=None)
+        self.store.upsert_account_limits("local", payload)
+        self.store.upsert_account_limits("laptop", no_bucket)
+        view = self.store.limits_view()
+        self.assertEqual(len(view["rows"]), 2)
+        self.assertFalse(view["divergent"])
+
+    def test_fetched_at_non_numeric_is_stored_as_none(self):
+        payload = self._payload()
+        payload["fetched_at"] = "not-a-number"
+        self.store.upsert_account_limits("local", payload)
+        view = self.store.limits_view()
+        self.assertIsNone(view["rows"][0]["fetched_at"])
+
+
 if __name__ == "__main__":
     unittest.main()

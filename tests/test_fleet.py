@@ -35,10 +35,31 @@ def _empty_rollup(now=_FIXED_NOW):
     }
 
 
+_EMPTY_LIMITS = {
+    "available": False, "fetched_at": 0.0, "five_hour": None, "seven_day": None,
+    "scoped": [], "spend": None, "extra_usage": None, "error": None,
+}
+
+
 class BuildFleetTest(unittest.TestCase):
     def setUp(self):
         fleet._cache.clear()
         fleet._last_prune_at = None
+        # SECURITY (CONTRACT.md section 2): fleet.build_fleet() now calls
+        # limits.get_limits(), which -- left unmocked -- would read this
+        # machine's REAL ~/.claude/.credentials.json and attempt a REAL
+        # authenticated call to api.anthropic.com. Patched here, once, for
+        # every test in this class, rather than added to each test
+        # method's own @patch stack individually, so no test written
+        # before limits.py existed can silently regress into touching
+        # real credentials just by calling build_fleet() the way it
+        # always has. Tests that actually exercise the limits integration
+        # override self._limits_mock's return_value/side_effect
+        # explicitly -- see BuildFleetLimitsTest below.
+        limits_patcher = patch("fleet.limits.get_limits")
+        self._limits_mock = limits_patcher.start()
+        self._limits_mock.return_value = _EMPTY_LIMITS
+        self.addCleanup(limits_patcher.stop)
 
     @patch("fleet.usage.rollup")
     @patch("fleet.events.prune")
@@ -684,6 +705,156 @@ class BuildFleetTest(unittest.TestCase):
                 self.assertTrue(
                     any(e.startswith("usage:") for e in result["errors"]),
                     "expected a usage error, got %r" % (result["errors"],))
+
+
+class BuildFleetLimitsTest(unittest.TestCase):
+    """CONTRACT.md sections 2-3: build_fleet()'s top-level `limits` key.
+    limits.get_limits() itself is mocked throughout -- see
+    BuildFleetTest.setUp's docstring for why that is mandatory here, not
+    just convenient: an unmocked call would read this machine's real
+    credentials file."""
+
+    def setUp(self):
+        fleet._cache.clear()
+        fleet._last_prune_at = None
+
+    @patch("fleet.limits.get_limits")
+    @patch("fleet.usage.rollup")
+    @patch("fleet.events.prune")
+    @patch("fleet.events.read_events")
+    @patch("fleet.sessions.list_rc_sessions")
+    @patch("fleet.compat.get_caps")
+    @patch("fleet.devices.get_local_name")
+    def test_limits_passed_through_unchanged_under_full_role(
+            self, get_name, get_caps, list_sess, read_ev, prune, rollup, get_limits):
+        get_name.return_value = "hub"
+        get_caps.return_value = {}
+        list_sess.return_value = []
+        read_ev.return_value = ([], None)
+        rollup.return_value = _empty_rollup(5000.0)
+        available_limits = {
+            "available": True, "fetched_at": 5000.0,
+            "five_hour": {"percent": 56.0, "resets_at": "2026-09-08T00:40:00+00:00"},
+            "seven_day": {"percent": 80.0, "resets_at": "2026-09-08T07:00:00+00:00"},
+            "scoped": [{"kind": "weekly_scoped", "group": "weekly", "percent": 42.0,
+                        "severity": "normal", "resets_at": "r", "label": "Fable",
+                        "is_active": False}],
+            "spend": {"used_minor": 0, "currency": "USD", "exponent": 2,
+                      "limit_minor": None, "percent": 0.0, "severity": "normal"},
+            "extra_usage": {"enabled": False, "utilization": None,
+                             "spend_limit_reached": False},
+            "error": None,
+        }
+        get_limits.return_value = available_limits
+
+        result = fleet.build_fleet(role="full", now_fn=lambda: 5000.0)
+
+        self.assertEqual(result["limits"], available_limits)
+        # now_fn passed through unchanged, same pattern as usage.rollup's
+        # own now_fn kwarg elsewhere in this file.
+        self.assertEqual(get_limits.call_args.kwargs["now_fn"](), 5000.0)
+
+    @patch("fleet.limits.get_limits")
+    @patch("fleet.usage.rollup")
+    @patch("fleet.events.prune")
+    @patch("fleet.events.read_events")
+    @patch("fleet.sessions.list_rc_sessions")
+    @patch("fleet.compat.get_caps")
+    @patch("fleet.devices.get_local_name")
+    def test_limits_sent_unchanged_under_metadata_role_too(
+            self, get_name, get_caps, list_sess, read_ev, prune, rollup, get_limits):
+        # CONTRACT.md section 3: "Under role == metadata the whole limits
+        # key is sent unchanged... it describes the account, not the
+        # machine" -- unlike sessions/events/usage_daily, no redaction.
+        get_name.return_value = "hub"
+        get_caps.return_value = {}
+        list_sess.return_value = []
+        read_ev.return_value = ([], None)
+        rollup.return_value = _empty_rollup(5000.0)
+        available_limits = dict(_EMPTY_LIMITS, available=True, fetched_at=5000.0)
+        get_limits.return_value = available_limits
+
+        result = fleet.build_fleet(role="metadata", now_fn=lambda: 5000.0)
+
+        self.assertEqual(result["limits"], available_limits)
+
+    @patch("fleet.limits.get_limits")
+    @patch("fleet.usage.rollup")
+    @patch("fleet.events.prune")
+    @patch("fleet.events.read_events")
+    @patch("fleet.sessions.list_rc_sessions")
+    @patch("fleet.compat.get_caps")
+    @patch("fleet.devices.get_local_name")
+    def test_limits_get_limits_raising_never_breaks_build_fleet(
+            self, get_name, get_caps, list_sess, read_ev, prune, rollup, get_limits):
+        get_name.return_value = "hub"
+        get_caps.return_value = {}
+        list_sess.return_value = []
+        read_ev.return_value = ([], None)
+        rollup.return_value = _empty_rollup(5000.0)
+        get_limits.side_effect = RuntimeError("boom")
+
+        result = fleet.build_fleet(role="full", now_fn=lambda: 5000.0)
+
+        self.assertFalse(result["limits"]["available"])
+        self.assertEqual(result["limits"]["error"], "RuntimeError")
+
+    @patch("fleet.limits.get_limits")
+    @patch("fleet.usage.rollup")
+    @patch("fleet.events.prune")
+    @patch("fleet.events.read_events")
+    @patch("fleet.sessions.list_rc_sessions")
+    @patch("fleet.compat.get_caps")
+    @patch("fleet.devices.get_local_name")
+    def test_limits_error_in_errors_list_is_type_name_only_even_under_full_role(
+            self, get_name, get_caps, list_sess, read_ev, prune, rollup, get_limits):
+        # SECURITY (CONTRACT.md section 2): every OTHER error source in
+        # build_fleet's `errors` list carries the real exception text
+        # under full role (see test_full_role_errors_keep_exception_text
+        # in BuildFleetTest above) -- "limits" is the one deliberate
+        # exception to that. A urllib exception raised this close to the
+        # OAuth token/HTTPS call can embed the request (headers included)
+        # in its string form, so this must be forced to type(e).__name__
+        # regardless of role, as defense in depth beyond limits.py's own
+        # internal never-raise guarantee.
+        get_name.return_value = "hub"
+        get_caps.return_value = {}
+        list_sess.return_value = []
+        read_ev.return_value = ([], None)
+        rollup.return_value = _empty_rollup(5000.0)
+        get_limits.side_effect = RuntimeError(
+            "GET https://api.anthropic.com/api/oauth/usage failed, "
+            "Authorization: Bearer TEST-FIXTURE-NOT-A-REAL-TOKEN-xyz789")
+
+        result = fleet.build_fleet(role="full", now_fn=lambda: 5000.0)
+
+        self.assertEqual(result["errors"], ["limits: RuntimeError"])
+        for err in result["errors"]:
+            self.assertNotIn("TEST-FIXTURE-NOT-A-REAL-TOKEN-xyz789", err)
+            self.assertNotIn("Bearer", err)
+            self.assertNotIn("Authorization", err)
+
+    @patch("fleet.limits.get_limits")
+    @patch("fleet.usage.rollup")
+    @patch("fleet.events.prune")
+    @patch("fleet.events.read_events")
+    @patch("fleet.sessions.list_rc_sessions")
+    @patch("fleet.compat.get_caps")
+    @patch("fleet.devices.get_local_name")
+    def test_limits_get_limits_returning_non_dict_is_also_type_name_only(
+            self, get_name, get_caps, list_sess, read_ev, prune, rollup, get_limits):
+        get_name.return_value = "hub"
+        get_caps.return_value = {}
+        list_sess.return_value = []
+        read_ev.return_value = ([], None)
+        rollup.return_value = _empty_rollup(5000.0)
+        get_limits.return_value = "not a dict"
+
+        result = fleet.build_fleet(role="full", now_fn=lambda: 5000.0)
+
+        self.assertFalse(result["limits"]["available"])
+        self.assertEqual(result["limits"]["error"], "TypeError")
+        self.assertEqual(result["errors"], ["limits: TypeError"])
 
 
 if __name__ == "__main__":

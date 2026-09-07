@@ -12,6 +12,7 @@ import compat
 import config
 import devices
 import events
+import limits
 import sessions
 import usage
 
@@ -280,6 +281,32 @@ def build_fleet(since=None, role=None, events_root=None, now_fn=time.time):
         usage_daily_by_project_full = []
         usage_meta = _failed_usage_meta(now)
 
+    # CONTRACT.md section 2/3: account-level rate limits and spend.
+    # limits.get_limits() is documented to never raise on its own (every
+    # failure inside it -- no credentials, network error, malformed
+    # response -- already comes back as an available=False dict), but
+    # this is wrapped anyway, same as sessions/events/usage above, so a
+    # future bug inside limits.py can never be the reason build_fleet
+    # itself raises. now_fn is pinned to this snapshot's own `now`, same
+    # pattern as the usage block above, so limits.fetched_at (on a fresh
+    # fetch) lines up with the rest of this payload's timestamps.
+    try:
+        limits_result = limits.get_limits(now_fn=lambda: now)
+        if not isinstance(limits_result, dict):
+            raise TypeError(
+                f"limits.get_limits returned {type(limits_result).__name__}, expected dict")
+    except Exception as e:
+        errors_raw = errors_raw + [("limits", e)]
+        # SECURITY (CONTRACT.md section 2): unlike every other error
+        # source above, `limits`' own exceptions must NEVER reach the
+        # errors list as str(e) -- not even under "full" role, further
+        # down -- because an exception raised this close to the OAuth
+        # token read/HTTPS call can embed the request (headers included)
+        # in its string form. unavailable_result() + type(e).__name__
+        # here is the same shape limits.get_limits() itself would have
+        # returned had this exception happened one frame further in.
+        limits_result = limits.unavailable_result(now, error=type(e).__name__)
+
     caps = compat.get_caps()
     salt = getattr(config, "RC_HASH_SALT", "") or os.environ.get("RC_HASH_SALT", "")
 
@@ -297,7 +324,15 @@ def build_fleet(since=None, role=None, events_root=None, now_fn=time.time):
         out_sessions = [dict(s, usage=usage_by_session.get(s.get("session_id"))) for s in raw_sessions]
         out_events = raw_events
         usage_daily = usage_daily_full
-        errors = [f"{label}: {e}" for label, e in errors_raw]
+        # SECURITY (CONTRACT.md section 2): every OTHER error source here
+        # is allowed a real message under full role, but "limits" is
+        # exceptional -- see the try/except above -- so it is forced to
+        # type(e).__name__ regardless of role, defense in depth beyond
+        # limits.py's own internal never-raise guarantee.
+        errors = [
+            f"{label}: {type(e).__name__}" if label == "limits" else f"{label}: {e}"
+            for label, e in errors_raw
+        ]
 
     result = {
         "device_name": devices.get_local_name(),
@@ -311,6 +346,12 @@ def build_fleet(since=None, role=None, events_root=None, now_fn=time.time):
         "generated_at": now,
         "usage_daily": usage_daily,
         "usage_meta": usage_meta,
+        # CONTRACT.md section 3: sent unchanged under EVERY role,
+        # including metadata -- "it describes the account, not the
+        # machine, and contains no project, path or identity data", so
+        # unlike sessions/events/usage_daily above it needs no
+        # role-gated reshaping.
+        "limits": limits_result,
         "errors": errors,
     }
     # A project name is the cwd by another name, so under metadata role

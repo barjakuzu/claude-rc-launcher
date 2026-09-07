@@ -199,6 +199,23 @@ class FleetPoller:
         except Exception:
             _LOG.exception("fleetpoll: cost ingest failed for device %r", device_id)
 
+        # CONTRACT.md sections 3-4: persist this device's account-limits
+        # reading whole, as reported. A legacy pre-fleet device's
+        # synthesized snapshot (see _poll_remote_legacy) never has a
+        # "limits" key at all, so this is a no-op for it -- exactly right,
+        # there is nothing to store and no reason to write a fabricated
+        # unavailable row over whatever (if anything) a later real /rc/fleet
+        # poll of that same device eventually reports. Its own try/except,
+        # same as usage/cost above: a malformed "limits" shape from THIS
+        # device must never prevent its sessions/events/usage/cost from
+        # being ingested or its cursor from advancing.
+        try:
+            limits_payload = snapshot.get("limits")
+            if isinstance(limits_payload, dict):
+                self.store.upsert_account_limits(device_id, limits_payload)
+        except Exception:
+            _LOG.exception("fleetpoll: limits ingest failed for device %r", device_id)
+
         events = snapshot.get("events") or []
         if events:
             self.store.add_events(device_id, events)
