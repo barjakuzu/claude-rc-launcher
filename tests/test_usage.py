@@ -1,13 +1,19 @@
 """usage.py: transcript-derived token accounting. Verifies dedup by
 (message.id, requestId), the effective-token weights, the incremental
-byte-offset cache (append/partial-line/truncation/rotation handling),
-daily bucketing, and the various never-raise-on-corrupt-input guarantees.
+byte-offset cache (append/partial-line/truncation/rotation/grow-during-read
+handling), subagent-to-parent-session merging, per-session-id summing
+across multiple files, daily bucketing, LRU cache eviction, the
+byte-budget clip, lock-narrowing race safety, and the various
+never-raise-on-corrupt-input guarantees.
 
 All fixtures live under a tempfile.TemporaryDirectory passed explicitly as
 `root=`, never the real HOME, so these tests are safe to run anywhere
 (including as root, where filesystem permission bits don't apply, which is
-why the "unreadable file" test patches usage._read_new_bytes instead of
-chmod)."""
+why the "unreadable file" and "unlistable root" tests avoid chmod: the
+former patches usage._read_new_bytes, the latter points root at a plain
+file instead of a directory, which os.walk's onerror hook rejects
+regardless of privilege)."""
+import datetime
 import json
 import os
 import sys
@@ -73,6 +79,11 @@ class UsageTestCase(unittest.TestCase):
 
     def _session_path(self, session_id="sess-1"):
         return os.path.join(self.proj_dir, session_id + ".jsonl")
+
+    def _subagent_path(self, parent_session_id, agent_id="agent-1"):
+        d = os.path.join(self.proj_dir, parent_session_id, "subagents")
+        os.makedirs(d, exist_ok=True)
+        return os.path.join(d, agent_id + ".jsonl")
 
     def _write(self, path, text, mode="w"):
         with open(path, mode) as f:
@@ -184,6 +195,26 @@ class EffectiveWeightingTest(unittest.TestCase):
         self.assertEqual(usage.effective(input="abc", cache_read=None, cache_write=True, output=10), 50)
 
 
+class NegativeValuesTest(UsageTestCase):
+    """Minor: _as_int (and therefore effective() and every parsed usage
+    field) must clamp negative values to 0, not subtract from totals."""
+
+    def test_as_int_rejects_negative_values(self):
+        self.assertEqual(usage._as_int(-5), 0)
+        self.assertEqual(usage._as_int(5), 5)
+
+    def test_effective_treats_negative_inputs_as_zero(self):
+        self.assertEqual(usage.effective(input=-100, output=10), 50)
+
+    def test_negative_usage_field_in_record_counts_as_zero(self):
+        path = self._session_path()
+        self._write(path, _line(_usage_row(input_tokens=-999, output=1)))
+        data = usage.rollup(root=self.root)
+        sess = data["sessions"]["sess-1"]
+        self.assertEqual(sess["input"], 0)
+        self.assertEqual(sess["output"], 1)
+
+
 class IncrementalReadTest(UsageTestCase):
     def test_second_call_reads_only_appended_bytes(self):
         path = self._session_path()
@@ -254,6 +285,62 @@ class TruncationAndRotationTest(UsageTestCase):
         self.assertEqual(sess["input"], 1)
         self.assertEqual(sess["messages"], 1)
 
+    def test_grow_between_stat_and_read_then_truncate_is_detected(self):
+        # Critical 2 repro: the file grows AFTER _discover_files() stats it
+        # but BEFORE _read_new_bytes() actually reads it, so the read
+        # observes more bytes than the stale pre-read stat reported. If
+        # the cached "size" were left at that stale, smaller value, a
+        # later truncation back down to it would go undetected (new size
+        # >= stale cached size) and the offset would sit past the new EOF
+        # forever.
+        path = self._session_path()
+        self._write(path, _line(_usage_row(msg_id="m1", input_tokens=1, output=1)))
+
+        real_read = usage._read_new_bytes
+        extra_line = _line(_usage_row(msg_id="m2", input_tokens=2, output=2))
+
+        def _grow_then_read(p, offset, max_bytes):
+            with open(p, "a") as f:
+                f.write(extra_line)
+            return real_read(p, offset, max_bytes)
+
+        with mock.patch.object(usage, "_read_new_bytes", side_effect=_grow_then_read):
+            data = usage.rollup(root=self.root)
+        sess = data["sessions"]["sess-1"]
+        # The read picked up the grown content too (m1 and m2): the
+        # cached size reflects what was actually observed, not the stale
+        # pre-growth stat value.
+        self.assertEqual(sess["input"], 3)
+        self.assertEqual(sess["messages"], 2)
+
+        # Truncate back down to just one (different, smaller) record.
+        self._write(path, _line(_usage_row(msg_id="m3", input_tokens=9, output=9)))
+        data2 = usage.rollup(root=self.root)
+        sess2 = data2["sessions"]["sess-1"]
+        self.assertEqual(sess2["input"], 9)
+        self.assertEqual(sess2["messages"], 1)
+
+
+class ClippedReadTest(UsageTestCase):
+    def test_read_larger_than_remaining_budget_is_clipped_and_partial(self):
+        path = self._session_path()
+        rows = "".join(
+            _line(_usage_row(msg_id="m%d" % i, request_id="r%d" % i, input_tokens=1, output=1))
+            for i in range(50))
+        self._write(path, rows)
+        total_size = os.path.getsize(path)
+        budget = max(total_size // 3, 1)  # deliberately smaller than the file
+
+        data = usage.rollup(root=self.root, max_bytes_per_call=budget)
+        self.assertTrue(data["partial"])
+        self.assertLessEqual(data["bytes_read"], budget)
+        self.assertGreater(data["bytes_read"], 0)
+        self.assertLess(data["sessions"]["sess-1"]["messages"], 50)
+
+        # A follow-up call with a generous budget picks up the rest.
+        data2 = usage.rollup(root=self.root, max_bytes_per_call=usage.DEFAULT_MAX_BYTES_PER_CALL)
+        self.assertEqual(data2["sessions"]["sess-1"]["messages"], 50)
+
 
 class CorruptInputTest(UsageTestCase):
     def test_corrupt_missing_and_noninteger_lines_never_raise(self):
@@ -292,7 +379,7 @@ class UnreadableFileTest(UsageTestCase):
         path = self._session_path()
         self._write(path, _line(_usage_row(input_tokens=1, output=1)))
 
-        def _boom(_path, _offset):
+        def _boom(_path, _offset, _max_bytes):
             raise OSError("simulated permission error")
 
         with mock.patch.object(usage, "_read_new_bytes", side_effect=_boom):
@@ -304,7 +391,7 @@ class UnreadableFileTest(UsageTestCase):
         path = self._session_path()
         self._write(path, _line(_usage_row(input_tokens=1, output=1)))
 
-        def _boom(_path, _offset):
+        def _boom(_path, _offset, _max_bytes):
             raise OSError("simulated permission error")
 
         with mock.patch.object(usage, "_read_new_bytes", side_effect=_boom):
@@ -314,9 +401,35 @@ class UnreadableFileTest(UsageTestCase):
         self.assertEqual(data["sessions"]["sess-1"]["input"], 1)
 
 
+class ConcurrentUpdateDiscardTest(UsageTestCase):
+    def test_stale_read_is_discarded_not_double_applied(self):
+        """Important 6's lock-narrowing: the disk read and JSON parse run
+        with no lock held. If another caller has already committed a
+        change to the same file's cache entry by the time we finish, our
+        (now stale) result must be discarded, not merged on top (which
+        would double count) and not allowed to clobber the newer state."""
+        path = self._session_path()
+        self._write(path, _line(_usage_row(msg_id="m1", input_tokens=1, output=1)))
+
+        real_read = usage._read_new_bytes
+
+        def _read_then_race_ahead(p, offset, max_bytes):
+            data = real_read(p, offset, max_bytes)
+            # Simulate a concurrent caller having already committed an
+            # update to this same entry while we were "reading".
+            entry = usage._cache.get(p)
+            if entry is not None:
+                entry["offset"] += 1
+            return data
+
+        with mock.patch.object(usage, "_read_new_bytes", side_effect=_read_then_race_ahead):
+            data = usage.rollup(root=self.root)
+        self.assertNotIn("sess-1", data["sessions"])
+        self.assertEqual(data["bytes_read"], 0)
+
+
 class DailyBucketTest(UsageTestCase):
     def test_daily_buckets_by_utc_date_and_honours_days(self):
-        import datetime
         path = self._session_path()
         recent_row = _usage_row(msg_id="m-recent", ts="2026-09-06T08:03:19.462Z",
                                  input_tokens=1, output=1)
@@ -344,6 +457,23 @@ class DailyBucketTest(UsageTestCase):
         data = usage.rollup(root=self.root)
         self.assertEqual(data["sessions"]["sess-1"]["input"], 5)
         self.assertEqual(data["daily"], {})
+
+    def test_days_30_yields_exactly_30_buckets_not_31(self):
+        # Minor: an inclusive cutoff comparison used to yield days+1
+        # buckets. 35 consecutive daily records, days=30, must yield
+        # exactly 30 daily buckets.
+        path = self._session_path()
+        fixed_now_dt = datetime.datetime(2026, 9, 7, tzinfo=datetime.timezone.utc)
+        fixed_now = fixed_now_dt.timestamp()
+        lines = []
+        for i in range(35):
+            day = fixed_now_dt - datetime.timedelta(days=i)
+            ts = day.strftime("%Y-%m-%dT00:00:00.000Z")
+            lines.append(_line(_usage_row(
+                msg_id="m%d" % i, request_id="r%d" % i, ts=ts, input_tokens=1, output=1)))
+        self._write(path, "".join(lines))
+        data = usage.rollup(root=self.root, now_fn=lambda: fixed_now, days=30)
+        self.assertEqual(len(data["daily"]), 30)
 
 
 class MaxBytesPerCallTest(UsageTestCase):
@@ -376,6 +506,189 @@ class ResetCacheTest(UsageTestCase):
         self.assertEqual(full["sessions"]["sess-1"]["input"], 2)
 
 
+class SubagentMergeTest(UsageTestCase):
+    def test_subagent_usage_rolls_into_parent_session_not_a_phantom(self):
+        parent_id = "parent-uuid-1"
+        parent_path = self._session_path(session_id=parent_id)
+        self._write(parent_path, _line(_usage_row(
+            session_id=parent_id, msg_id="p1", request_id="rp1",
+            input_tokens=1, output=1)))
+
+        sub_path = self._subagent_path(parent_id, "agent-abc")
+        self._write(sub_path, _line(_usage_row(
+            session_id=parent_id, msg_id="s1", request_id="rs1",
+            input_tokens=2, output=2)))
+
+        data = usage.rollup(root=self.root)
+        self.assertIn(parent_id, data["sessions"])
+        self.assertEqual(data["sessions"][parent_id]["input"], 3)
+        self.assertEqual(data["sessions"][parent_id]["output"], 3)
+        self.assertEqual(data["sessions"][parent_id]["messages"], 2)
+        # No phantom session named after the subagent's own filename.
+        self.assertNotIn("agent-abc", data["sessions"])
+        for sid in data["sessions"]:
+            self.assertFalse(sid.startswith("agent-"), "phantom subagent session: %r" % sid)
+
+    def test_subagent_project_matches_parent_not_subagents_dirname(self):
+        parent_id = "parent-uuid-2"
+        parent_path = self._session_path(session_id=parent_id)
+        self._write(parent_path, _line(_usage_row(
+            session_id=parent_id, msg_id="p1", request_id="rp1", input_tokens=1, output=1)))
+        sub_path = self._subagent_path(parent_id, "agent-xyz")
+        self._write(sub_path, _line(_usage_row(
+            session_id=parent_id, msg_id="s1", request_id="rs1", input_tokens=1, output=1)))
+
+        data = usage.rollup(root=self.root)
+        self.assertEqual(data["sessions"][parent_id]["project"], PROJECT_DIR)
+
+    def test_subagent_only_session_falls_back_to_own_id_when_no_parent_file(self):
+        # A subagent file's own records still carry the parent sessionId
+        # even if the parent's own top-level file isn't present (e.g. not
+        # yet created, or outside the read window): the subagent's spend
+        # should land on that parent id, not its own filename stem.
+        parent_id = "parent-uuid-3"
+        sub_path = self._subagent_path(parent_id, "agent-only")
+        self._write(sub_path, _line(_usage_row(
+            session_id=parent_id, msg_id="s1", request_id="rs1", input_tokens=5, output=5)))
+
+        data = usage.rollup(root=self.root)
+        self.assertIn(parent_id, data["sessions"])
+        self.assertNotIn("agent-only", data["sessions"])
+
+
+class MultiFileSessionMergeTest(UsageTestCase):
+    def test_two_files_mapping_to_one_session_sum_not_overwrite(self):
+        # Reproduces the "7 different journal.jsonl files collapsed into
+        # one session" bug: two files under the same session directory,
+        # both carrying the same sessionId, must SUM rather than the
+        # second overwriting the first.
+        session_id = "shared-session"
+        dir_a = os.path.join(self.proj_dir, session_id, "part-a")
+        dir_b = os.path.join(self.proj_dir, session_id, "part-b")
+        os.makedirs(dir_a)
+        os.makedirs(dir_b)
+        path_a = os.path.join(dir_a, "journal.jsonl")
+        path_b = os.path.join(dir_b, "journal.jsonl")
+        self._write(path_a, _line(_usage_row(
+            session_id=session_id, msg_id="a1", request_id="ra", input_tokens=10, output=1)))
+        self._write(path_b, _line(_usage_row(
+            session_id=session_id, msg_id="b1", request_id="rb", input_tokens=20, output=2)))
+
+        data = usage.rollup(root=self.root)
+        matching = [sid for sid in data["sessions"] if sid == session_id]
+        self.assertEqual(len(matching), 1)
+        self.assertEqual(data["sessions"][session_id]["input"], 30)
+        self.assertEqual(data["sessions"][session_id]["output"], 3)
+        self.assertEqual(data["sessions"][session_id]["messages"], 2)
+
+    def test_each_files_dedup_set_stays_separate(self):
+        # The SAME (message.id, requestId) appearing in two DIFFERENT
+        # files mapping to the same session is not a cross-file duplicate
+        # (each file keeps its own dedup set): both count.
+        session_id = "shared-session-2"
+        dir_a = os.path.join(self.proj_dir, session_id, "part-a")
+        dir_b = os.path.join(self.proj_dir, session_id, "part-b")
+        os.makedirs(dir_a)
+        os.makedirs(dir_b)
+        path_a = os.path.join(dir_a, "journal.jsonl")
+        path_b = os.path.join(dir_b, "journal.jsonl")
+        row = _usage_row(session_id=session_id, msg_id="same-id", request_id="same-req",
+                          input_tokens=7, output=1)
+        self._write(path_a, _line(row))
+        self._write(path_b, _line(row))
+
+        data = usage.rollup(root=self.root)
+        self.assertEqual(data["sessions"][session_id]["input"], 14)
+        self.assertEqual(data["sessions"][session_id]["messages"], 2)
+
+
+class MultipleProjectDirsTest(UsageTestCase):
+    def test_multiple_project_dirs_produce_independent_sessions(self):
+        proj2 = os.path.join(self.root, "-tmp-otherproj")
+        os.makedirs(proj2)
+        path1 = self._session_path(session_id="s-in-proj1")
+        self._write(path1, _line(_usage_row(
+            session_id="s-in-proj1", msg_id="m1", input_tokens=1, output=1)))
+        path2 = os.path.join(proj2, "s-in-proj2.jsonl")
+        self._write(path2, _line(_usage_row(
+            session_id="s-in-proj2", msg_id="m2", input_tokens=2, output=2)))
+
+        data = usage.rollup(root=self.root)
+        self.assertEqual(data["sessions"]["s-in-proj1"]["project"], PROJECT_DIR)
+        self.assertEqual(data["sessions"]["s-in-proj2"]["project"], "-tmp-otherproj")
+
+
+class LRUEvictionTest(UsageTestCase):
+    def test_evicts_least_recently_active_not_most_active(self):
+        paths = []
+        for sid in ("old", "mid", "new"):
+            p = self._session_path(session_id=sid)
+            self._write(p, _line(_usage_row(session_id=sid, msg_id="m-" + sid, input_tokens=1, output=1)))
+            paths.append(p)
+        base = 1_700_000_000
+        os.utime(paths[0], (base, base))
+        os.utime(paths[1], (base + 100, base + 100))
+        os.utime(paths[2], (base + 200, base + 200))
+
+        with mock.patch.object(usage, "MAX_CACHE_ENTRIES", 2):
+            data = usage.rollup(root=self.root)
+
+        self.assertEqual(len(usage._cache), 2)
+        self.assertNotIn(paths[0], usage._cache)  # oldest-mtime: evicted
+        self.assertIn(paths[1], usage._cache)
+        self.assertIn(paths[2], usage._cache)  # newest-mtime: survives
+        self.assertNotIn("old", data["sessions"])
+        self.assertIn("mid", data["sessions"])
+        self.assertIn("new", data["sessions"])
+
+
+class EvictMissingPerfTest(UsageTestCase):
+    def test_evict_missing_skips_exists_check_for_discovered_files(self):
+        # Minor: _evict_missing() used to call os.path.exists() for every
+        # cached path on every call. It should now skip any path that
+        # this call's directory walk already confirmed exists.
+        path = self._session_path()
+        self._write(path, _line(_usage_row(input_tokens=1, output=1)))
+        usage.rollup(root=self.root)  # populates the cache
+
+        calls = []
+        real_exists = os.path.exists
+
+        def _spy(p):
+            calls.append(p)
+            return real_exists(p)
+
+        with mock.patch("os.path.exists", side_effect=_spy):
+            usage.rollup(root=self.root)  # steady state: file unchanged, still discovered
+        self.assertNotIn(path, calls)
+
+
+class UnlistableRootTest(UsageTestCase):
+    def test_existing_but_empty_root_is_a_clean_zero(self):
+        empty_root = os.path.join(self.root, "genuinely-empty")
+        os.makedirs(empty_root)
+        data = usage.rollup(root=empty_root)
+        self.assertEqual(data["sessions"], {})
+        self.assertEqual(data["files"], 0)
+        self.assertEqual(data["skipped"], 0)
+        self.assertFalse(data["partial"])
+
+    def test_missing_root_counts_as_skipped_not_clean_zero(self):
+        missing_root = os.path.join(self.root, "does-not-exist")
+        data = usage.rollup(root=missing_root)
+        self.assertEqual(data["sessions"], {})
+        self.assertGreaterEqual(data["skipped"], 1)
+        self.assertFalse(data["files"] == 0 and data["skipped"] == 0)
+
+    def test_root_that_is_a_file_not_a_directory_counts_as_skipped(self):
+        fake_root = os.path.join(self.root, "not-a-directory.jsonl")
+        with open(fake_root, "w"):
+            pass
+        data = usage.rollup(root=fake_root)
+        self.assertEqual(data["sessions"], {})
+        self.assertGreaterEqual(data["skipped"], 1)
+
+
 class MiscTest(UsageTestCase):
     def test_project_field_is_raw_encoded_dir_name(self):
         path = self._session_path()
@@ -401,13 +714,6 @@ class MiscTest(UsageTestCase):
         with mock.patch.dict(os.environ, {}, clear=False):
             os.environ.pop("CLAUDE_CONFIG_DIR", None)
             self.assertEqual(usage._default_root(), os.path.expanduser("~/.claude/projects"))
-
-    def test_empty_root_returns_empty_result(self):
-        empty_root = os.path.join(self.root, "does-not-exist")
-        data = usage.rollup(root=empty_root)
-        self.assertEqual(data["sessions"], {})
-        self.assertEqual(data["files"], 0)
-        self.assertFalse(data["partial"])
 
 
 if __name__ == "__main__":
