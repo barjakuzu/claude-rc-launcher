@@ -66,6 +66,17 @@ def _line(row):
     return json.dumps(row) + "\n"
 
 
+def _padded_line(padding, **kwargs):
+    """Like _line(_usage_row(**kwargs)), with an extra harmless field
+    inflating the line's byte size by roughly `padding` bytes. Used to
+    build a line reliably (and by a wide, non-fragile margin) larger or
+    smaller than some budget, without depending on the exact fixed
+    overhead of _usage_row's own JSON structure."""
+    row = _usage_row(**kwargs)
+    row["_pad"] = "x" * padding
+    return _line(row)
+
+
 class UsageTestCase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -829,6 +840,163 @@ class PhantomEmptySessionTest(UsageTestCase):
         data = usage.rollup(root=self.root)
         self.assertNotIn("journal", data["sessions"])
         self.assertEqual(data["sessions"], {})
+
+
+class BudgetStallRecoveryTest(UsageTestCase):
+    """Round 3: a single line larger than what one call's fair share of
+    the budget allows must still eventually complete, via the boosted
+    (at least max_bytes_per_call) allowance a file gets on the call after
+    it stalls. Two files: "sess-a" always has something small and new to
+    read and is kept newer-mtime (processed first) so it reliably eats a
+    fixed slice of the shared budget every call; "sess-b" is one line
+    just big enough to fit in a full max_bytes_per_call on its own, but
+    NOT in what's left over once "sess-a" goes first. Without the boost,
+    "sess-b" would never naturally get enough room, since the leftover
+    after "sess-a" is the same every call."""
+
+    def setUp(self):
+        super().setUp()
+        self.path_a = self._session_path(session_id="sess-a")
+        self.path_b = self._session_path(session_id="sess-b")
+
+    def _append_a(self, n):
+        line = _line(_usage_row(session_id="sess-a", msg_id="a%d" % n, request_id="ra%d" % n,
+                                 input_tokens=1, output=1))
+        self._write(self.path_a, line, mode="a")
+        return len(line.encode("utf-8"))
+
+    def test_stalled_file_completes_via_boosted_allowance_on_retry(self):
+        row_b = _usage_row(session_id="sess-b", msg_id="big-b", input_tokens=3, output=3)
+        line_b = _line(row_b)
+        self._write(self.path_b, line_b)
+        size_b = len(line_b.encode("utf-8"))
+
+        a_chunk = self._append_a(0)
+        os.utime(self.path_b, (2_000_000_000, 2_000_000_000))
+        os.utime(self.path_a, (2_000_000_100, 2_000_000_100))  # newer: processed first
+
+        # Enough for "sess-b" alone, not enough once "sess-a" (processed
+        # first every call) has already spent a_chunk of it.
+        budget = size_b + max(a_chunk // 2, 1)
+        self.assertLess(budget - a_chunk, size_b)
+
+        first = usage.rollup(root=self.root, max_bytes_per_call=budget)
+        self.assertIn("sess-a", first["sessions"])  # unaffected by B's trouble
+        self.assertNotIn("sess-b", first["sessions"])  # B stalled: no boost yet
+
+        self._append_a(1)
+        os.utime(self.path_a, (2_000_000_200, 2_000_000_200))
+        second = usage.rollup(root=self.root, max_bytes_per_call=budget)
+        self.assertIn("sess-b", second["sessions"])
+        self.assertEqual(second["sessions"]["sess-b"]["messages"], 1)
+        self.assertEqual(second["sessions"]["sess-b"]["input"], 3)
+        self.assertIn("sess-a", second["sessions"])
+
+
+class GiveUpAfterMaxStallsTest(UsageTestCase):
+    """Round 3: a file whose single line exceeds max_bytes_per_call
+    itself (so even the boosted allowance never completes it) must stop
+    being read at all after MAX_CONSECUTIVE_STALLS attempts, and every
+    call from then on must report it as skipped and partial rather than
+    silently doing nothing."""
+
+    def test_file_that_never_progresses_is_skipped_after_limit_and_partial(self):
+        path = self._session_path()
+        line = _line(_usage_row(input_tokens=1, output=1))
+        self._write(path, line)
+        # Small enough that even a full max_bytes_per_call (== this
+        # budget, single file) never reaches the line's end.
+        max_bytes_per_call = max(len(line.encode("utf-8")) // 4, 20)
+
+        real_read = usage._read_new_bytes
+        read_calls = []
+
+        def _spy(p, offset, max_bytes):
+            read_calls.append(max_bytes)
+            return real_read(p, offset, max_bytes)
+
+        results = []
+        with mock.patch.object(usage, "_read_new_bytes", side_effect=_spy):
+            for _ in range(usage.MAX_CONSECUTIVE_STALLS + 2):
+                results.append(usage.rollup(root=self.root, max_bytes_per_call=max_bytes_per_call))
+
+        # Exactly MAX_CONSECUTIVE_STALLS real read attempts happened,
+        # even though rollup() was called more times than that: once the
+        # limit was reached, no further disk I/O was spent on this file.
+        self.assertEqual(len(read_calls), usage.MAX_CONSECUTIVE_STALLS)
+
+        for data in results[:usage.MAX_CONSECUTIVE_STALLS]:
+            self.assertTrue(data["partial"])
+
+        last = results[-1]
+        self.assertEqual(last["sessions"], {})
+        self.assertGreaterEqual(last["skipped"], 1)
+        self.assertTrue(last["partial"])
+
+
+class OtherFilesUnaffectedByStallTest(UsageTestCase):
+    """Round 3: other files must keep getting correctly accounted across
+    every call, including past the point where a misbehaving file has
+    given up, not just before it."""
+
+    def test_other_files_still_get_accounted_while_one_misbehaves(self):
+        path_a = self._session_path(session_id="sess-a")
+        path_b = self._session_path(session_id="sess-b")
+
+        # Padded well past max_bytes_per_call, by a wide margin: this
+        # line must never complete, boosted or not. max_bytes_per_call
+        # itself is chosen comfortably larger than "sess-a"'s own
+        # (unpadded, ordinary-sized) lines, so "sess-a" is never clipped.
+        line_b = _padded_line(2000, session_id="sess-b", msg_id="big", input_tokens=1, output=1)
+        self._write(path_b, line_b)
+        max_bytes_per_call = 1000
+        self.assertLess(max_bytes_per_call, len(line_b.encode("utf-8")))
+
+        for i in range(usage.MAX_CONSECUTIVE_STALLS + 2):
+            self._write(path_a, _line(_usage_row(
+                session_id="sess-a", msg_id="a%d" % i, request_id="ra%d" % i,
+                input_tokens=1, output=1)), mode="a")
+            os.utime(path_a, (2_000_001_000 + i, 2_000_001_000 + i))
+            data = usage.rollup(root=self.root, max_bytes_per_call=max_bytes_per_call)
+            self.assertIn("sess-a", data["sessions"])
+            self.assertEqual(data["sessions"]["sess-a"]["messages"], i + 1)
+            self.assertNotIn("sess-b", data["sessions"])
+
+
+class StallCounterResetTest(UsageTestCase):
+    """Round 3: a file that stalls and then makes real progress must have
+    its stall counter reset, not merely happen to still work because
+    nothing ever re-checks it."""
+
+    def test_counter_resets_on_successful_progress(self):
+        path_a = self._session_path(session_id="sess-a")
+        path_b = self._session_path(session_id="sess-b")
+
+        row_b = _usage_row(session_id="sess-b", msg_id="b1", request_id="rb1",
+                            input_tokens=1, output=1)
+        line_b = _line(row_b)
+        self._write(path_b, line_b)
+        size_b = len(line_b.encode("utf-8"))
+
+        a_line = _line(_usage_row(session_id="sess-a", msg_id="a0", request_id="ra0",
+                                   input_tokens=1, output=1))
+        a_size = len(a_line.encode("utf-8"))
+        self._write(path_a, a_line)
+        os.utime(path_b, (2_000_000_000, 2_000_000_000))
+        os.utime(path_a, (2_000_000_100, 2_000_000_100))
+
+        budget = size_b + max(a_size // 2, 1)
+
+        first = usage.rollup(root=self.root, max_bytes_per_call=budget)
+        self.assertNotIn("sess-b", first["sessions"])
+        self.assertEqual(usage._cache[path_b]["stall_count"], 1)
+
+        # "sess-a" is now unchanged (nothing appended), so it costs
+        # nothing this call: "sess-b" gets the full budget and completes,
+        # which must reset the counter.
+        second = usage.rollup(root=self.root, max_bytes_per_call=budget)
+        self.assertIn("sess-b", second["sessions"])
+        self.assertEqual(usage._cache[path_b]["stall_count"], 0)
 
 
 class MiscTest(UsageTestCase):
