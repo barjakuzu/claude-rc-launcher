@@ -186,10 +186,15 @@ def _new_entry(project, inode):
         "synced": False,
         # Consecutive reads that were clipped by the budget and yielded
         # zero complete lines (see _update_entry). Reset to 0 by any read
-        # that makes real progress. Once it reaches MAX_CONSECUTIVE_STALLS
-        # this file stops being read at all, on every subsequent call,
-        # until a genuine rotation/truncation gives it a fresh entry.
+        # that makes real progress. Once it reaches MAX_CONSECUTIVE_STALLS,
+        # this file stops being read under any call whose max_bytes_per_call
+        # is no bigger than "stall_bytes" below (round 4: giving up is
+        # budget-relative, not permanent -- see _update_entry).
         "stall_count": 0,
+        # The allowance (max_bytes_per_call, once boosted) that most
+        # recently failed to make progress. A later call offering more
+        # than this retries even past MAX_CONSECUTIVE_STALLS.
+        "stall_bytes": 0,
     }
 
 
@@ -329,23 +334,34 @@ def _update_entry(path, project, max_bytes, max_bytes_per_call):
     advances. Left alone, this can consume this file's entire allotted
     budget on every single call forever, and if that allotment happens
     to be most or all of `max_bytes_per_call`, every OTHER file in the
-    same call is starved behind it too. Two mitigations, tracked via the
-    entry's "stall_count":
-    - A file with a prior stall (stall_count > 0, but still under
-      MAX_CONSECUTIVE_STALLS) gets max(max_bytes, max_bytes_per_call)
-      for this attempt, not just its fair-share `max_bytes`: enough to
-      finish an oversized-but-not-pathological line in one shot rather
-      than being clipped again at the exact same place by whatever
-      fraction of the shared budget happened to be left this time.
+    same call is starved behind it too. Mitigations, tracked via the
+    entry's "stall_count" and "stall_bytes":
+    - A file with a prior stall (stall_count > 0) is only ever attempted
+      when this call's remaining budget (`max_bytes`) equals a full
+      `max_bytes_per_call` (see the defer branch below): enough, once
+      attempted, to finish an oversized-but-not-pathological line in one
+      shot rather than being clipped again at the exact same place by
+      whatever smaller fraction of the shared budget happened to be left
+      this time. If that much isn't available this call (something else
+      went first), the attempt is deferred to a call where it is,
+      rather than spending I/O on a read that's doomed to stall again.
     - Once stall_count reaches MAX_CONSECUTIVE_STALLS, no further read is
-      attempted at all (the caller is told to count this as skipped and
-      mark the result partial) until a genuine rotation or truncation
-      resets the entry (and its stall_count) from scratch: the file has
-      by then already been given two full-budget attempts and still
-      couldn't complete even one line, so continuing to retry it every
-      poll would just be spending real I/O with no chance of success.
+      attempted UNDER A CALL WHOSE max_bytes_per_call IS NO BIGGER THAN
+      "stall_bytes" (the allowance that most recently failed): the
+      caller is told to count this as skipped and mark the result
+      partial. Giving up is deliberately budget-relative, not permanent:
+      round 3 tried "give up until a rotation/truncation resets the
+      entry", but a rotation is not guaranteed (delete-and-recreate can
+      reuse the same inode) and abandonment at offset 0 (the common case,
+      since the oversized line is usually the file's first) can never
+      satisfy the reset condition (`size < offset` is unsatisfiable at
+      offset 0) -- so that design could freeze a live session's number
+      forever with no way out. A later call whose max_bytes_per_call
+      genuinely exceeds what already failed retries instead, however
+      many times stall_count has already climbed past the limit.
     A read that DOES make progress (at least one complete line) resets
-    stall_count to 0 immediately, however small that progress was.
+    both stall_count and stall_bytes immediately, however small that
+    progress was.
 
     Does its OWN os.stat, inside the first locked block, rather than
     trusting the caller's pre-scan (size, mtime, inode): the pre-scan
@@ -401,31 +417,54 @@ def _update_entry(path, project, max_bytes, max_bytes_per_call):
             _cache.move_to_end(path)
             return 0, False, False  # unchanged since last read: nothing to do
 
-        if entry["stall_count"] >= MAX_CONSECUTIVE_STALLS:
-            # Gave up on this file: MAX_CONSECUTIVE_STALLS consecutive
-            # reads, the last two already boosted to a full
-            # max_bytes_per_call each, still resolved zero complete
-            # lines. Stop spending real I/O on it every poll; it only
-            # gets another chance via the reset-on-rotation/truncation
-            # branch above, which starts a fresh entry (stall_count 0)
-            # from scratch.
+        if (entry["stall_count"] >= MAX_CONSECUTIVE_STALLS
+                and max_bytes_per_call <= entry["stall_bytes"]):
+            # Given up on this file UNDER THIS BUDGET: MAX_CONSECUTIVE_STALLS
+            # consecutive reads, at an allowance at least this big, still
+            # resolved zero complete lines. This is relative to
+            # max_bytes_per_call, not permanent: a later call offering a
+            # bigger overall budget than the one that last failed
+            # (max_bytes_per_call > entry["stall_bytes"]) is NOT caught by
+            # this check and retries below, no matter how high stall_count
+            # has climbed. (There is no rotation/truncation escape hatch to
+            # rely on instead: a rotation is not guaranteed to happen, and
+            # abandonment at offset 0 -- the common case -- could never
+            # satisfy the size-based reset check above even if one did.)
             _cache.move_to_end(path)
             return 0, False, True
 
+        if entry["stall_count"] > 0 and max_bytes < max_bytes_per_call:
+            # This file needs a full max_bytes_per_call to have earned
+            # another try (see the docstring), but something else in this
+            # call already spent part of the shared budget, so max_bytes
+            # (this file's remaining share) is less than that. Don't
+            # attempt a smaller read that's doomed to stall again for no
+            # reason but bad luck in ordering -- and don't let the boost
+            # itself blow past max_bytes_per_call by granting it anyway
+            # (round 4, Minor: a call once read 1.98x its documented cap
+            # this way). Defer to a call where the full allowance is
+            # actually available; this is not "given up" (no I/O spent,
+            # stall_count/stall_bytes untouched), just deferred, so it
+            # still marks the result partial without counting as skipped.
+            _cache.move_to_end(path)
+            return 0, True, False
+
         start_offset = entry["offset"]
-        # A file that stalled last time gets at least a full
-        # max_bytes_per_call this attempt, not just its fair share of
-        # what's left in this call's shared budget: see the no-progress
-        # reads paragraph in the docstring above.
-        effective_max = max(max_bytes, max_bytes_per_call) if entry["stall_count"] > 0 else max_bytes
+        # By construction here, either stall_count == 0 (max_bytes is
+        # this file's ordinary fair share) or stall_count > 0 and
+        # max_bytes == max_bytes_per_call exactly (the defer branch above
+        # already ruled out max_bytes < max_bytes_per_call, and max_bytes
+        # can never exceed it). Either way max_bytes IS the allowance to
+        # use; no separate boosted value is needed.
+        effective_max = max_bytes
         # Cap the actual read at what the file really has pending, not
-        # the full (possibly boosted) allowance: f.read(n) can allocate
-        # close to n bytes up front even when far less is available, and
-        # with a generous max_bytes_per_call that can mean allocating
-        # tens of MB to read a 200-byte appendix. `clipped` below still
-        # compares against `effective_max`, not this narrower read size,
-        # so a file that genuinely has more pending than its allowance
-        # is still correctly flagged.
+        # the full allowance: f.read(n) can allocate close to n bytes up
+        # front even when far less is available, and with a generous
+        # max_bytes_per_call that can mean allocating tens of MB to read
+        # a 200-byte appendix. `clipped` below still compares against
+        # `effective_max`, not this narrower read size, so a file that
+        # genuinely has more pending than its allowance is still
+        # correctly flagged.
         pending = max(size - start_offset, 0)
         read_cap = min(effective_max, pending)
         seen_snapshot = set(entry["seen_keys"])
@@ -481,14 +520,18 @@ def _update_entry(path, project, max_bytes, max_bytes_per_call):
         entry["synced"] = True
         if made_progress:
             entry["stall_count"] = 0
+            entry["stall_bytes"] = 0
         elif clipped:
             # Clipped AND zero complete lines: a genuine no-progress
-            # stall (this attempt's allowance, possibly already the
-            # boosted max_bytes_per_call, wasn't enough), not the
-            # ordinary case of a partial trailing line waiting on the
-            # writer (that's unclipped: we read everything currently
-            # available and it just isn't a complete line yet).
+            # stall (this attempt's allowance, possibly already the full
+            # max_bytes_per_call, wasn't enough), not the ordinary case
+            # of a partial trailing line waiting on the writer (that's
+            # unclipped: we read everything currently available and it
+            # just isn't a complete line yet). Record the allowance that
+            # failed, so a later call is only re-attempted once it can
+            # offer more than this (see the give-up check above).
             entry["stall_count"] += 1
+            entry["stall_bytes"] = effective_max
         _cache.move_to_end(path)
         # Charge the full number of bytes actually read against the
         # caller's budget, not just the span that resolved into complete
