@@ -11,11 +11,14 @@ own connection exclusively and callers block only on a per-call
 threading.Event, not on any shared mutex.
 """
 import json
+import logging
 import os
 import queue
 import sqlite3
 import threading
 import time
+
+_LOG = logging.getLogger(__name__)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS devices (
@@ -40,6 +43,23 @@ CREATE TABLE IF NOT EXISTS audit_log (
 );
 CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_log(ts);
 """
+
+# session_events natural key: (device_id, session_id, ts, event). A poller
+# cursor rewind re-submits the same rows; INSERT OR IGNORE against this
+# unique index makes that a no-op instead of duplicating rows. Applied as a
+# separate migration step (not in _SCHEMA) because an existing DB may
+# already have duplicate rows that must be removed first, or the unique
+# index creation would fail.
+_DEDUP_EVENTS = """
+DELETE FROM session_events WHERE id NOT IN (
+    SELECT MIN(id) FROM session_events
+    GROUP BY device_id, session_id, ts, event
+);
+"""
+_UNIQUE_EVENTS_INDEX = (
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_events_unique "
+    "ON session_events(device_id, session_id, ts, event);"
+)
 
 
 class _Write:
@@ -66,12 +86,19 @@ class Store:
         try:
             init_conn.executescript(_SCHEMA)
             init_conn.commit()
+            # De-duplicate any pre-existing rows (from a DB created before
+            # this unique index existed) before creating the index, then
+            # create it idempotently.
+            init_conn.executescript(_DEDUP_EVENTS)
+            init_conn.execute(_UNIQUE_EVENTS_INDEX)
+            init_conn.commit()
         finally:
             init_conn.close()
 
         self._q = queue.Queue()
         self._stop = threading.Event()
         self._closed = False
+        self._close_error = None
         self._thread = threading.Thread(target=self._writer_loop, daemon=True)
         self._thread.start()
 
@@ -98,16 +125,31 @@ class Store:
                 try:
                     item.result = item.fn(conn, *item.args, **item.kwargs)
                     conn.commit()
-                except Exception as e:  # noqa: BLE001 - reported back to caller
+                except Exception as e:  # reported back to the calling thread
                     try:
                         conn.rollback()
                     except Exception:
                         pass
+                    _LOG.exception(
+                        "store write failed: %s", getattr(item.fn, "__qualname__", item.fn))
                     item.error = e
                 finally:
                     item.done.set()
         finally:
             conn.close()
+            # Fail anything still queued behind the sentinel (submitted
+            # concurrently with close(), or left over if the loop exited
+            # early) so no caller blocks for the full _write timeout.
+            drain_error = self._close_error or RuntimeError("store is closed")
+            while True:
+                try:
+                    leftover = self._q.get_nowait()
+                except queue.Empty:
+                    break
+                if leftover is None:
+                    continue
+                leftover.error = drain_error
+                leftover.done.set()
 
     def _write(self, fn, *args, **kwargs):
         if self._closed:
@@ -151,13 +193,21 @@ class Store:
         """Replace this device's live-session view: rows present are
         upserted (started_at kept from the first sighting); rows in the DB
         for this device but absent from `rows` get ended_at set, exactly
-        once (only rows that were still live, ended_at IS NULL, transition)."""
+        once (only rows that were still live, ended_at IS NULL, transition).
+
+        A row without `session_id` is not a valid natural key (falling back
+        to `name` risks colliding two distinct sessions, or an accidental
+        rename ending one and starting another) -- such rows are skipped
+        entirely: not upserted, and not counted as "seen" for the end-of-
+        session sweep. Returns {"skipped": <count>}."""
         def _do(conn):
             now = now_fn()
             seen_ids = set()
+            skipped = 0
             for r in rows:
-                sid = r.get("session_id") or r.get("name")
+                sid = r.get("session_id")
                 if not sid:
+                    skipped += 1
                     continue
                 seen_ids.add(sid)
                 existing = conn.execute(
@@ -180,13 +230,19 @@ class Store:
                     conn.execute(
                         "UPDATE sessions SET ended_at=? WHERE device_id=? AND session_id=? AND ended_at IS NULL",
                         (now, device_id, sid))
+            return {"skipped": skipped}
         return self._write(_do)
 
     def add_events(self, device_id, rows):
+        """Insert events, ignoring exact duplicates of an existing row on
+        (device_id, session_id, ts, event) -- makes a poller cursor rewind
+        that resubmits an already-seen batch a no-op instead of duplicating
+        rows."""
         def _do(conn):
             for r in rows:
                 conn.execute(
-                    "INSERT INTO session_events (device_id, session_id, ts, event, extra_json) "
+                    "INSERT OR IGNORE INTO session_events "
+                    "(device_id, session_id, ts, event, extra_json) "
                     "VALUES (?, ?, ?, ?, ?)",
                     (device_id, r.get("session_id"), r.get("ts"), r.get("event"),
                      json.dumps(r.get("extra") or {})))
@@ -234,6 +290,9 @@ class Store:
             if device_id:
                 clauses.append("device_id=?")
                 params.append(device_id)
+            # Only the literal clause fragments ("session_id=?", "device_id=?")
+            # are interpolated into the SQL string here; all actual values
+            # stay parameterized in `params`, passed separately to execute().
             where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
             rows = conn.execute(
                 f"SELECT * FROM session_events {where} ORDER BY ts DESC LIMIT ?",
@@ -261,7 +320,24 @@ class Store:
     def close(self):
         if self._closed:
             return
+        # Set _closed BEFORE draining/joining so any write racing with
+        # close() is rejected immediately with a clear error instead of
+        # being queued and left to hang.
         self._closed = True
+        self._close_error = RuntimeError("store is closed")
         self._stop.set()
         self._q.put(None)
         self._thread.join(timeout=5)
+        # Defensive: fail any item that was queued after the writer thread
+        # had already read the sentinel and exited its loop (a narrow
+        # check-then-put race in _write), so no caller ever blocks for the
+        # full _write timeout.
+        while True:
+            try:
+                leftover = self._q.get_nowait()
+            except queue.Empty:
+                break
+            if leftover is None:
+                continue
+            leftover.error = self._close_error
+            leftover.done.set()

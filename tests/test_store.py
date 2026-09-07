@@ -1,6 +1,5 @@
 import os
 import tempfile
-import time
 import unittest
 
 import store
@@ -73,6 +72,73 @@ class StoreTest(unittest.TestCase):
         self.assertGreaterEqual(deleted["events"], 1)
         self.assertGreaterEqual(deleted["audit_log"], 1)
         self.assertEqual(self.store.recent_events(session_id="s1"), [])
+
+    def test_add_events_reupload_same_batch_is_a_noop(self):
+        self.store.upsert_device({"id": "local", "name": "hub", "role": "full",
+                                   "version": "1", "claude_version": "1"})
+        batch = [
+            {"ts": 1000.0, "event": "SessionStart", "session_id": "s1", "extra": {"a": 1}},
+            {"ts": 1001.0, "event": "Stop", "session_id": "s1", "extra": {}},
+        ]
+        self.store.add_events("local", batch)
+        self.assertEqual(len(self.store.recent_events(session_id="s1")), 2)
+
+        # A poller cursor rewind resubmits the same batch.
+        self.store.add_events("local", batch)
+        self.assertEqual(len(self.store.recent_events(session_id="s1")), 2)
+
+    def test_upsert_sessions_skips_rows_without_session_id(self):
+        self.store.upsert_device({"id": "local", "name": "hub", "role": "full",
+                                   "version": "1", "claude_version": "1"})
+        result = self.store.upsert_sessions("local", [
+            {"name": "rc-foo", "cwd": "/tmp", "kind": "interactive", "state": "idle"},
+        ], now_fn=lambda: 1000.0)
+        self.assertEqual(result["skipped"], 1)
+        view = self.store.fleet_view()
+        self.assertEqual(view["sessions"], [])
+
+        # A prior real session must not be marked ended by an unrelated
+        # nameless row showing up in the same batch.
+        self.store.upsert_sessions("local", [
+            {"session_id": "s1", "name": "rc-real", "cwd": "/tmp", "kind": "interactive",
+             "state": "idle"},
+        ], now_fn=lambda: 1001.0)
+        result2 = self.store.upsert_sessions("local", [
+            {"session_id": "s1", "name": "rc-real", "cwd": "/tmp", "kind": "interactive",
+             "state": "idle"},
+            {"name": "no-id-row"},
+        ], now_fn=lambda: 1002.0)
+        self.assertEqual(result2["skipped"], 1)
+        view2 = self.store.fleet_view()
+        self.assertEqual(len(view2["sessions"]), 1)
+        self.assertIsNone(view2["sessions"][0]["ended_at"])
+
+    def test_close_rejects_concurrent_write_promptly(self):
+        import threading
+        import time as time_mod
+
+        self.store.upsert_device({"id": "local", "name": "hub", "role": "full",
+                                   "version": "1", "claude_version": "1"})
+        result = {}
+
+        def writer():
+            try:
+                self.store.add_events("local", [
+                    {"ts": 1.0, "event": "Stop", "session_id": "s1", "extra": {}}])
+                result["outcome"] = "completed"
+            except Exception as e:
+                result["outcome"] = "raised"
+                result["error"] = e
+
+        t = threading.Thread(target=writer)
+        t.start()
+        self.store.close()
+        t.join(timeout=2)
+        start = time_mod.time()
+        self.assertFalse(t.is_alive())
+        self.assertLess(time_mod.time() - start, 1)
+        self.assertIn(result.get("outcome"), ("completed", "raised"))
+        # tearDown calls store.close() again; make sure that's a no-op.
 
     def test_concurrent_writes_do_not_raise(self):
         import threading
