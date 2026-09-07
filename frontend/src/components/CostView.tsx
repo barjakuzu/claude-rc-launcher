@@ -2,26 +2,26 @@
 // with a trend, a top projects table, and a top sessions table (Phase 3
 // wiring, CONTRACT.md sections 3/5).
 //
-// GET /api/cost carries device + project totals only: CONTRACT.md's shape
-// for it has no per-session breakdown. The "top sessions" table the brief
-// asks for is built instead from /api/fleet's sessions, which already gets
-// a `usage` field per section 3. useFleet() is already the established
-// hook for that data (Sessions tab, header), so this view reuses it rather
-// than inventing a second fetch path for something the contract doesn't
-// expose from /api/cost.
-import { useEffect, useState } from 'react';
-import { RT, FONT_SANS, FONT_MONO, fmtK, fmtUsage, hueForId, tintFor } from '../tokens';
+// GET /api/cost carries device + project totals only: at the time this was
+// written, CONTRACT.md's shape for it had no per-session breakdown, so the
+// "top sessions" table is built from /api/fleet's sessions instead, which
+// already carries a `usage` field per section 3. That source is
+// lifetime-cumulative and covers only currently-live sessions though, so a
+// large ended session never appears and a long-lived one over-reports
+// against the "last N days" framing used elsewhere on this page: the
+// section is labeled for what it actually shows rather than implying a
+// 30-day window it doesn't have. CONTRACT.md has since been amended to add
+// a proper `sessions` array to `/api/cost`, drawn from `session_usage`
+// joined to `sessions` so ended sessions survive; switch to that once the
+// API lane ships it.
+import { RT, FONT_SANS, FONT_MONO, fmtK, fmtUsage, hueForId, tintFor, usagePartialFor } from '../tokens';
 import { Sparkline } from './primitives';
-import { fetchCost } from '../api';
-import type { CostReport, CostDevice, CostDailyBucket } from '../api';
+import type { CostDevice, CostDailyBucket, FleetSession, SessionUsage } from '../api';
 import { useFleet } from '../hooks/useFleet';
+import { useCost } from '../hooks/useCost';
 import { formatRelativeTime } from '../relativeTime';
 
-const DAYS = 30;
-const POLL_INTERVAL_MS = 30_000;
 const TOP_SESSIONS = 10;
-
-type LoadStatus = 'loading' | 'ok' | 'unavailable';
 
 interface CostViewProps {
   /** Optional. Lets a device row jump to that device's detail view,
@@ -38,30 +38,48 @@ const tdStyle: React.CSSProperties = {
   padding: '6px 10px', fontFamily: FONT_MONO, fontSize: 11.5, color: RT.textDim,
 };
 
-export function CostView({ onOpenDevice }: CostViewProps) {
-  const [report, setReport] = useState<CostReport | null>(null);
-  const [status, setStatus] = useState<LoadStatus>('loading');
-  const { devices: fleetDevices, sessions: fleetSessions } = useFleet();
+function hasUsage(s: FleetSession): s is FleetSession & { usage: SessionUsage } {
+  return s.usage != null;
+}
 
-  useEffect(() => {
-    let cancelled = false;
-    const load = async () => {
-      try {
-        const data = await fetchCost(DAYS);
-        if (cancelled) return;
-        setReport(data);
-        setStatus('ok');
-      } catch {
-        if (cancelled) return;
-        // A single missed poll after we've already loaded once should not
-        // blank the view out from under the user.
-        setStatus((s) => (s === 'ok' ? s : 'unavailable'));
-      }
-    };
-    load();
-    const t = setInterval(load, POLL_INTERVAL_MS);
-    return () => { cancelled = true; clearInterval(t); };
-  }, []);
+// Last-updated label for a fleet session: prefers the authoritative
+// usage.last_ts timestamp over usage_age_seconds, which would otherwise
+// have to be round-tripped back through the browser clock (Date.now() at
+// render time) to get a display string, drifting slightly from the actual
+// moment the backend measured.
+function lastUpdatedLabel(s: FleetSession): string {
+  if (s.usage?.last_ts != null) return formatRelativeTime(s.usage.last_ts);
+  if (s.usage_age_seconds != null) return formatRelativeTime(Date.now() / 1000 - s.usage_age_seconds);
+  return '—';
+}
+
+// Small inline marker for a device's tri-state usage_partial, attached next
+// to a number derived (even partly) from that device's usage. `true`
+// (confirmed partial) and `undefined` (unknown, e.g. /api/fleet hasn't
+// reported this device yet) both need a visible marker: only `false`
+// (confirmed not partial) renders nothing. Never coerce this away with
+// `!!` at the call site, that is exactly the bug this component had.
+function PartialMark({ status }: { status: boolean | undefined }) {
+  if (status === true) {
+    return (
+      <span title="This device's usage snapshot is partial (still converging after a restart)" style={{ color: RT.amber, marginLeft: 5 }}>
+        ~
+      </span>
+    );
+  }
+  if (status === undefined) {
+    return (
+      <span title="Partial status unknown for this device (fleet data not loaded yet)" style={{ color: RT.textLow, marginLeft: 5 }}>
+        ?
+      </span>
+    );
+  }
+  return null;
+}
+
+export function CostView({ onOpenDevice }: CostViewProps) {
+  const { report, status } = useCost();
+  const { devices: fleetDevices, sessions: fleetSessions, connected, usingFallback } = useFleet();
 
   if (status === 'unavailable') {
     return (
@@ -79,19 +97,29 @@ export function CostView({ onOpenDevice }: CostViewProps) {
     );
   }
 
-  const partialByDevice = new Map(fleetDevices.map((d) => [d.id, !!d.usage_partial]));
   const nameByDevice = new Map(fleetDevices.map((d) => [d.id, d.name]));
 
+  // /api/fleet has been observed at least once (via SSE or the polling
+  // fallback) once it's connected, has fallen back to polling, or has
+  // already handed back any data. Before that, an empty topSessions table
+  // means "we haven't heard from the fleet yet," not "no sessions have
+  // usage," so those two cases need different empty-state copy (mirrors
+  // AllSessions.tsx's use of these same useFleet flags for its connection note).
+  const fleetLoaded = connected || usingFallback || fleetDevices.length > 0 || fleetSessions.length > 0;
+
   const topSessions = fleetSessions
-    .filter((s) => s.usage != null)
-    .sort((a, b) => b.usage!.effective - a.usage!.effective)
+    .filter(hasUsage)
+    .sort((a, b) => b.usage.effective - a.usage.effective)
     .slice(0, TOP_SESSIONS);
 
   const devicesByTotal = report.devices.slice().sort((a, b) => b.total_effective - a.total_effective);
 
+  const partialDevices = devicesByTotal.filter((d) => usagePartialFor(fleetDevices, d.device_id) === true);
+  const unknownPartialDevices = devicesByTotal.filter((d) => usagePartialFor(fleetDevices, d.device_id) === undefined);
+
   return (
     <div style={{ flex: 1, overflow: 'auto', padding: 16 }}>
-      <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, marginBottom: 16 }}>
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, marginBottom: 4, flexWrap: 'wrap' }}>
         <div style={{
           fontSize: 11, color: RT.textDim, letterSpacing: '.14em',
           textTransform: 'uppercase', fontFamily: FONT_MONO,
@@ -100,7 +128,23 @@ export function CostView({ onOpenDevice }: CostViewProps) {
         </div>
         <div style={{ fontFamily: FONT_MONO, fontSize: 12, color: RT.textLow }}>
           {fmtK(report.totals.effective)} effective tokens total
+          {partialDevices.length > 0 && (
+            <span style={{ color: RT.amber, marginLeft: 6 }}>
+              ({partialDevices.length} device{partialDevices.length === 1 ? '' : 's'} partial)
+            </span>
+          )}
+          {unknownPartialDevices.length > 0 && (
+            <span style={{ color: RT.textLow, marginLeft: 6 }}>
+              ({unknownPartialDevices.length} device{unknownPartialDevices.length === 1 ? '' : 's'} status unknown)
+            </span>
+          )}
         </div>
+      </div>
+      {/* A permanently failing poll must not keep showing the last good
+          numbers as though they were live: the age makes a stale reading
+          visibly stale instead of silently current. */}
+      <div style={{ fontFamily: FONT_MONO, fontSize: 10.5, color: RT.textLow, marginBottom: 16 }}>
+        updated {formatRelativeTime(report.generated_at)}
       </div>
 
       <Section title="Devices">
@@ -114,7 +158,7 @@ export function CostView({ onOpenDevice }: CostViewProps) {
                 device={d}
                 days={report.days}
                 generatedAt={report.generated_at}
-                partial={!!partialByDevice.get(d.device_id)}
+                partial={usagePartialFor(fleetDevices, d.device_id)}
                 hue={hueForId(d.device_id)}
                 onOpen={onOpenDevice ? () => onOpenDevice(d.device_id) : undefined}
               />
@@ -140,7 +184,10 @@ export function CostView({ onOpenDevice }: CostViewProps) {
                 <tr key={`${p.device_id}:${p.project}:${i}`} style={{ borderBottom: `1px solid ${RT.border}` }}>
                   <td style={tdStyle}>{nameByDevice.get(p.device_id) ?? p.device_id}</td>
                   <td style={tdStyle}>{p.project || '—'}</td>
-                  <td style={tdStyle}>{fmtK(p.effective)}</td>
+                  <td style={tdStyle}>
+                    {fmtK(p.effective)}
+                    <PartialMark status={usagePartialFor(fleetDevices, p.device_id)} />
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -148,9 +195,12 @@ export function CostView({ onOpenDevice }: CostViewProps) {
         )}
       </Section>
 
-      <Section title="Top sessions">
+      <Section
+        title="Top sessions"
+        note="Current sessions only, lifetime totals, not scoped to the 30-day window above. Ended sessions are not included yet."
+      >
         {topSessions.length === 0 ? (
-          <EmptyNote text="No session usage recorded yet." />
+          <EmptyNote text={fleetLoaded ? 'No session usage recorded yet.' : 'Loading session data…'} />
         ) : (
           <table style={{ borderCollapse: 'collapse', width: '100%', fontFamily: FONT_SANS }}>
             <thead>
@@ -166,12 +216,11 @@ export function CostView({ onOpenDevice }: CostViewProps) {
                 <tr key={`${s.device_id}:${s.session_id}`} style={{ borderBottom: `1px solid ${RT.border}` }}>
                   <td style={tdStyle}>{nameByDevice.get(s.device_id) ?? s.device_id}</td>
                   <td style={{ ...tdStyle, color: RT.text }}>{s.name ?? s.session_id}</td>
-                  <td style={tdStyle}>{fmtUsage(s.usage)}</td>
                   <td style={tdStyle}>
-                    {s.usage_age_seconds != null
-                      ? formatRelativeTime(Date.now() / 1000 - s.usage_age_seconds)
-                      : '—'}
+                    {fmtUsage(s.usage)}
+                    <PartialMark status={usagePartialFor(fleetDevices, s.device_id)} />
                   </td>
+                  <td style={tdStyle}>{lastUpdatedLabel(s)}</td>
                 </tr>
               ))}
             </tbody>
@@ -182,15 +231,20 @@ export function CostView({ onOpenDevice }: CostViewProps) {
   );
 }
 
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
+function Section({ title, note, children }: { title: string; note?: string; children: React.ReactNode }) {
   return (
     <div style={{ marginBottom: 24 }}>
       <div style={{
         fontSize: 11, color: RT.textDim, letterSpacing: '.14em',
-        textTransform: 'uppercase', fontFamily: FONT_MONO, marginBottom: 8,
+        textTransform: 'uppercase', fontFamily: FONT_MONO, marginBottom: note ? 3 : 8,
       }}>
         {title}
       </div>
+      {note && (
+        <div style={{ fontSize: 10.5, color: RT.textLow, fontFamily: FONT_MONO, marginBottom: 8, maxWidth: 640 }}>
+          {note}
+        </div>
+      )}
       {children}
     </div>
   );
@@ -229,7 +283,7 @@ function gapFillDaily(daily: CostDailyBucket[], days: number, generatedAt: numbe
 }
 
 function DeviceCostRow({ device, days, generatedAt, partial, hue, onOpen }: {
-  device: CostDevice; days: number; generatedAt: number; partial: boolean; hue: number; onOpen?: () => void;
+  device: CostDevice; days: number; generatedAt: number; partial: boolean | undefined; hue: number; onOpen?: () => void;
 }) {
   const hueColor = tintFor(hue, 0.70, 0.10);
   const trend = gapFillDaily(device.daily, days, generatedAt);
@@ -252,9 +306,14 @@ function DeviceCostRow({ device, days, generatedAt, partial, hue, onOpen }: {
           <span style={{ width: 7, height: 7, borderRadius: 7, background: hueColor, flex: 'none' }} />
           <span style={{ fontSize: 13.5, fontWeight: 600 }}>{device.name}</span>
         </div>
-        {partial && (
+        {partial === true && (
           <div style={{ fontFamily: FONT_MONO, fontSize: 10, color: RT.amber, marginTop: 3 }}>
             partial data
+          </div>
+        )}
+        {partial === undefined && (
+          <div style={{ fontFamily: FONT_MONO, fontSize: 10, color: RT.textLow, marginTop: 3 }}>
+            partial status unknown
           </div>
         )}
       </button>
