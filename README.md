@@ -260,3 +260,21 @@ curl -fsSL https://raw.githubusercontent.com/barjakuzu/claude-rc-launcher/main/u
 
 [MIT](LICENSE)
 
+
+## Hook events (fleet visibility)
+
+RC Launcher can show a session's lifecycle (started, prompted, stopped,
+needs attention...) across every device, not just the ones it launched.
+This works by having Claude Code call a tiny spooler script on every hook
+event. It is entirely optional and safe on a device without the launcher
+installed: every hook command is guarded.
+
+To enable it, merge the block from `docs/hooks/settings.snippet.json`
+into your (usually shared) `~/.claude/settings.json` under its `hooks`
+key. `install.sh` already places the spooler at
+`~/.claude-rc/bin/rc-hook`; nothing else is required.
+
+The spooler never sends anything over the network, never stores prompt
+text (only its length), and exits successfully even when it can't do
+anything: a hook must never block or fail a Claude Code session because
+of it.

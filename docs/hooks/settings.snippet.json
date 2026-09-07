@@ -1,0 +1,28 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {"hooks": [{"type": "command", "command": "[ -x \"$HOME/.claude-rc/bin/rc-hook\" ] && \"$HOME/.claude-rc/bin/rc-hook\" || true"}]}
+    ],
+    "UserPromptSubmit": [
+      {"hooks": [{"type": "command", "command": "[ -x \"$HOME/.claude-rc/bin/rc-hook\" ] && \"$HOME/.claude-rc/bin/rc-hook\" || true"}]}
+    ],
+    "Stop": [
+      {"hooks": [{"type": "command", "command": "[ -x \"$HOME/.claude-rc/bin/rc-hook\" ] && \"$HOME/.claude-rc/bin/rc-hook\" || true"}]}
+    ],
+    "StopFailure": [
+      {"hooks": [{"type": "command", "command": "[ -x \"$HOME/.claude-rc/bin/rc-hook\" ] && \"$HOME/.claude-rc/bin/rc-hook\" || true"}]}
+    ],
+    "Notification": [
+      {"hooks": [{"type": "command", "command": "[ -x \"$HOME/.claude-rc/bin/rc-hook\" ] && \"$HOME/.claude-rc/bin/rc-hook\" || true"}]}
+    ],
+    "SubagentStop": [
+      {"hooks": [{"type": "command", "command": "[ -x \"$HOME/.claude-rc/bin/rc-hook\" ] && \"$HOME/.claude-rc/bin/rc-hook\" || true"}]}
+    ],
+    "PreCompact": [
+      {"hooks": [{"type": "command", "command": "[ -x \"$HOME/.claude-rc/bin/rc-hook\" ] && \"$HOME/.claude-rc/bin/rc-hook\" || true"}]}
+    ],
+    "SessionEnd": [
+      {"hooks": [{"type": "command", "command": "[ -x \"$HOME/.claude-rc/bin/rc-hook\" ] && \"$HOME/.claude-rc/bin/rc-hook\" || true"}]}
+    ]
+  }
+}
