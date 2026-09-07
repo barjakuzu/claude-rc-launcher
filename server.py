@@ -24,6 +24,7 @@ from http.cookies import SimpleCookie
 from urllib.parse import urlparse, parse_qs
 
 import config
+import guard
 from config import (
     VERSION, HOST, PORT, SESSION_PREFIX, WORKING_DIR, CLAUDE_BIN,
     AUTH_USER, AUTH_PASS, RC_FLAGS, MODEL_MAP, SHELL_BIN, SHELL_MODE,
@@ -123,6 +124,39 @@ _LOG = logging.getLogger(__name__)
 HUB_STORE = None  # set by app.py at startup; store.Store instance
 
 SSE_HEARTBEAT_SECONDS = 20
+
+# GET /api/cost?days=N (CONTRACT.md section 3). `days` is device-adjacent
+# but not device-supplied -- it comes straight off the query string of an
+# authenticated request -- so it still gets the same treatment as any
+# other untrusted input: absent/non-numeric defaults, and anything else is
+# clamped rather than passed through to store.cost_view(), which does real
+# strftime/gmtime arithmetic on `now - days * 86400` and has no clamp of
+# its own. DAYS_MAX=365 is generous relative to prune()'s own cost_daily
+# retention (cost_days=35 by default) -- a caller asking for more than is
+# actually retained just gets less data back, not an error.
+COST_DAYS_DEFAULT = 30
+COST_DAYS_MIN = 1
+COST_DAYS_MAX = 365
+
+
+def _parse_cost_days(qs):
+    """`qs` is parse_qs(...)'s dict-of-lists. Returns an int in
+    [COST_DAYS_MIN, COST_DAYS_MAX], always -- absent, empty, or
+    unparseable clamps to COST_DAYS_DEFAULT (there is no sane direction to
+    clamp garbage input toward); a parseable but out-of-range number
+    clamps to the nearer bound instead. Never raises."""
+    raw = qs.get("days", [None])[0]
+    if raw is None or raw == "":
+        return COST_DAYS_DEFAULT
+    try:
+        value = int(float(raw))
+    except (TypeError, ValueError, OverflowError):
+        return COST_DAYS_DEFAULT
+    if value < COST_DAYS_MIN:
+        return COST_DAYS_MIN
+    if value > COST_DAYS_MAX:
+        return COST_DAYS_MAX
+    return value
 
 # RC_ROLE="metadata" enforcement: a metadata device serves only fleet
 # roll-up/health data, never session control, terminal, or transcript
@@ -1168,7 +1202,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             p = p[3:]
         if (p.startswith("/static/") or p == "/devices" or p == "/devices/rename"
                 or p == "/api/config-matrix" or p == "/api/fleet" or p == "/api/fleet/stream"
-                or p == "/api/audit" or p.startswith("/api/sessions/")):
+                or p == "/api/audit" or p == "/api/cost" or p == "/api/alerts"
+                or p.startswith("/api/sessions/")):
             return False
         return True
 
@@ -1324,7 +1359,68 @@ class Handler(http.server.BaseHTTPRequestHandler):
             view = HUB_STORE.fleet_view()
             recent = HUB_STORE.recent_events(limit=500)
             _apply_needs_attention(view["sessions"], recent)
+            # CONTRACT.md section 3: each session gains usage_age_seconds
+            # (now minus usage.last_ts, or null), each device gains
+            # usage_partial as a real JSON bool (the stored column is
+            # SQLite 0/1/NULL, not a bool).
+            now = time.time()
+            for s in view["sessions"]:
+                usage = s.get("usage")
+                last_ts = usage.get("last_ts") if isinstance(usage, dict) else None
+                s["usage_age_seconds"] = (
+                    now - last_ts if isinstance(last_ts, (int, float))
+                    and not isinstance(last_ts, bool) else None)
+            for d in view["devices"]:
+                d["usage_partial"] = bool(d.get("usage_partial"))
             self._json(view)
+
+        elif path == "/api/cost":
+            qs = parse_qs(urlparse(self.path).query)
+            days = _parse_cost_days(qs)
+            if HUB_STORE is None:
+                return self._json({
+                    "generated_at": time.time(), "days": days,
+                    "devices": [], "projects": [], "sessions": [],
+                    "totals": {"effective": 0, "input": 0, "cache_read": 0,
+                               "cache_write": 0, "output": 0},
+                })
+            view = HUB_STORE.cost_view(days=days)
+            # `totals` is summed from `devices[].daily` (the per-DEVICE
+            # daily totals), never from `projects` -- CONTRACT.md's
+            # amendment on daily/daily_by_project: the two are only
+            # approximately reconcilable (each is independently rounded),
+            # so subtracting or cross-checking one against the other would
+            # turn an expected rounding drift into a visible phantom
+            # number. Summing from `daily` alone sidesteps that entirely.
+            totals = {"effective": 0, "input": 0, "cache_read": 0,
+                      "cache_write": 0, "output": 0}
+            for dev in view.get("devices") or []:
+                for day_row in dev.get("daily") or []:
+                    for key in totals:
+                        totals[key] += day_row.get(key) or 0
+            self._json({
+                "generated_at": view.get("generated_at", time.time()),
+                "days": days,
+                "devices": view.get("devices", []),
+                "projects": view.get("projects", []),
+                "sessions": view.get("sessions", []),
+                "totals": totals,
+            })
+
+        elif path == "/api/alerts":
+            alerts = HUB_STORE.live_alerts() if HUB_STORE is not None else []
+            # rules=None (the default) inside fleetpoll._run_guard's
+            # guard.evaluate() call is what keeps guard.LAST_LOAD_ERROR
+            # current every poll cycle -- read straight off the module
+            # here, no extra plumbing needed to get a broken guard.json
+            # in front of the UI instead of it looking like "no
+            # guardrails configured".
+            self._json({
+                "generated_at": time.time(),
+                "summary": guard.summarize(alerts),
+                "alerts": alerts,
+                "config_error": guard.LAST_LOAD_ERROR,
+            })
 
         elif path == "/api/fleet/stream":
             my_event = threading.Event()

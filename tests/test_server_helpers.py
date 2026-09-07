@@ -1462,12 +1462,12 @@ class AuditLogTest(unittest.TestCase):
             self.assertIn("_audit(", next_block, f"{name} branch missing _audit() call")
 
 
-class ApiRouteQueryStringToleranceTest(unittest.TestCase):
-    """Regression test: the hub's exact-match GET routes must match on the
-    query-stripped path, not on self.path verbatim. A request carrying a
-    query string (as the SPA's /api/audit?limit=N call always does) used to
-    404 because these routes compared against a path that still had the
-    query string attached."""
+class _ApiRouteFixture(unittest.TestCase):
+    """Shared fixture for every GET /api/* route test below: a real Store
+    on a temp DB, auth mocked out, and a helper that drives do_GET()
+    through a bare Handler and captures whatever it hands to _json().
+    Defines no test_* methods of its own, so it contributes nothing when
+    collected directly -- only its subclasses run."""
 
     def setUp(self):
         self._role = server.config.RC_ROLE
@@ -1508,6 +1508,14 @@ class ApiRouteQueryStringToleranceTest(unittest.TestCase):
         self.assertIn("data", captured, f"{path} did not reach a _json() response")
         return captured["data"], captured.get("code", 200)
 
+
+class ApiRouteQueryStringToleranceTest(_ApiRouteFixture):
+    """Regression test: the hub's exact-match GET routes must match on the
+    query-stripped path, not on self.path verbatim. A request carrying a
+    query string (as the SPA's /api/audit?limit=N call always does) used to
+    404 because these routes compared against a path that still had the
+    query string attached."""
+
     def test_api_fleet_ok_with_and_without_query_string(self):
         for path in ("/api/fleet", "/api/fleet?x=1"):
             data, code = self._get_json(path)
@@ -1537,6 +1545,148 @@ class ApiRouteQueryStringToleranceTest(unittest.TestCase):
                 data, code = self._get_json(path)
                 self.assertEqual(code, 200, path)
                 self.assertEqual(data, {"ok": True}, path)
+
+    def test_api_cost_ok_with_and_without_query_string(self):
+        for path in ("/api/cost", "/api/cost?days=7"):
+            data, code = self._get_json(path)
+            self.assertEqual(code, 200, path)
+            self.assertIn("devices", data, path)
+            self.assertIn("projects", data, path)
+            self.assertIn("sessions", data, path)
+            self.assertIn("totals", data, path)
+
+    def test_api_alerts_ok_with_and_without_query_string(self):
+        for path in ("/api/alerts", "/api/alerts?x=1"):
+            data, code = self._get_json(path)
+            self.assertEqual(code, 200, path)
+            self.assertIn("alerts", data, path)
+            self.assertIn("summary", data, path)
+            self.assertIn("config_error", data, path)
+
+
+class ApiFleetUsageFieldsTest(_ApiRouteFixture):
+    """CONTRACT.md section 3: GET /api/fleet gains usage_age_seconds per
+    session and usage_partial per device."""
+
+    def test_usage_age_seconds_present_and_null_when_no_usage(self):
+        server.HUB_STORE.upsert_device({"id": "local", "name": "hub", "role": "full",
+                                         "version": "1", "claude_version": "1"})
+        server.HUB_STORE.upsert_sessions("local", [
+            {"session_id": "s1", "name": "rc-a", "cwd": "/tmp", "kind": "launcher",
+             "state": "idle", "started_at": 1000.0},
+        ])
+        server.HUB_STORE.upsert_session_usage("local", [
+            {"session_id": "s1", "effective": 100, "last_ts": time.time() - 30},
+        ])
+        data, code = self._get_json("/api/fleet")
+        self.assertEqual(code, 200)
+        by_id = {s["session_id"]: s for s in data["sessions"]}
+        self.assertIn("usage_age_seconds", by_id["s1"])
+        self.assertGreaterEqual(by_id["s1"]["usage_age_seconds"], 30)
+
+    def test_usage_age_seconds_null_when_usage_absent(self):
+        server.HUB_STORE.upsert_device({"id": "local", "name": "hub", "role": "full",
+                                         "version": "1", "claude_version": "1"})
+        server.HUB_STORE.upsert_sessions("local", [
+            {"session_id": "s1", "name": "rc-a", "cwd": "/tmp", "kind": "launcher",
+             "state": "idle", "started_at": 1000.0},
+        ])
+        data, code = self._get_json("/api/fleet")
+        self.assertEqual(code, 200)
+        self.assertIsNone(data["sessions"][0]["usage_age_seconds"])
+
+    def test_usage_partial_is_a_real_bool(self):
+        server.HUB_STORE.upsert_device({"id": "local", "name": "hub", "role": "full",
+                                         "version": "1", "claude_version": "1",
+                                         "usage_partial": True})
+        data, code = self._get_json("/api/fleet")
+        self.assertEqual(code, 200)
+        dev = next(d for d in data["devices"] if d["id"] == "local")
+        self.assertIs(dev["usage_partial"], True)
+
+
+class ApiCostRouteTest(_ApiRouteFixture):
+    """Exercises /api/cost's behavior beyond bare query-string tolerance
+    (covered by ApiRouteQueryStringToleranceTest above) -- days
+    validation, the happy path with real rows, and the empty-store case."""
+
+    def test_days_absent_defaults_to_30(self):
+        data, _ = self._get_json("/api/cost")
+        self.assertEqual(data["days"], 30)
+
+    def test_days_non_numeric_defaults_rather_than_500(self):
+        data, code = self._get_json("/api/cost?days=banana")
+        self.assertEqual(code, 200)
+        self.assertEqual(data["days"], 30)
+
+    def test_days_negative_clamps_to_minimum(self):
+        data, code = self._get_json("/api/cost?days=-5")
+        self.assertEqual(code, 200)
+        self.assertEqual(data["days"], 1)
+
+    def test_days_zero_clamps_to_minimum(self):
+        data, code = self._get_json("/api/cost?days=0")
+        self.assertEqual(code, 200)
+        self.assertEqual(data["days"], 1)
+
+    def test_days_absurdly_large_clamps_to_maximum(self):
+        data, code = self._get_json("/api/cost?days=99999999999999999999")
+        self.assertEqual(code, 200)
+        self.assertEqual(data["days"], 365)
+
+    def test_empty_store_returns_empty_shape_not_an_error(self):
+        data, code = self._get_json("/api/cost")
+        self.assertEqual(code, 200)
+        self.assertEqual(data["devices"], [])
+        self.assertEqual(data["projects"], [])
+        self.assertEqual(data["sessions"], [])
+        self.assertEqual(data["totals"],
+                          {"effective": 0, "input": 0, "cache_read": 0,
+                           "cache_write": 0, "output": 0})
+
+    def test_happy_path_totals_summed_from_daily_not_projects(self):
+        server.HUB_STORE.upsert_device({"id": "local", "name": "hub", "role": "full",
+                                         "version": "1", "claude_version": "1"})
+        server.HUB_STORE.upsert_cost_daily("local", [
+            {"day": time.strftime("%Y-%m-%d", time.gmtime()), "project": "-var-www",
+             "input": 1, "cache_read": 2, "cache_write": 3, "output": 4, "effective": 1000},
+        ])
+        data, code = self._get_json("/api/cost?days=30")
+        self.assertEqual(code, 200)
+        self.assertEqual(data["totals"]["effective"], 1000)
+        dev = next(d for d in data["devices"] if d["device_id"] == "local")
+        self.assertEqual(dev["total_effective"], 1000)
+        projects = {p["project"]: p["effective"] for p in data["projects"]}
+        self.assertEqual(projects.get("-var-www"), 1000)
+
+
+class ApiAlertsRouteTest(_ApiRouteFixture):
+    """Exercises /api/alerts's behavior beyond bare query-string tolerance
+    (covered by ApiRouteQueryStringToleranceTest above)."""
+
+    def test_empty_store_returns_empty_alerts_not_an_error(self):
+        data, code = self._get_json("/api/alerts")
+        self.assertEqual(code, 200)
+        self.assertEqual(data["alerts"], [])
+        self.assertEqual(data["summary"], {"alert": 0, "warn": 0, "rules": {}})
+
+    def test_happy_path_returns_live_alerts_and_summary(self):
+        server.HUB_STORE.replace_alerts([
+            {"rule": "token_rate", "severity": "alert", "target_type": "session",
+             "device_id": "local", "session_id": "s1", "name": "rc-foo",
+             "message": "m", "value": 1.0, "threshold": 2.0, "since": 100.0},
+        ], now_fn=lambda: 1000.0)
+        data, code = self._get_json("/api/alerts")
+        self.assertEqual(code, 200)
+        self.assertEqual(len(data["alerts"]), 1)
+        self.assertEqual(data["alerts"][0]["rule"], "token_rate")
+        self.assertEqual(data["summary"], {"alert": 1, "warn": 0, "rules": {"token_rate": 1}})
+
+    def test_config_error_surfaces_guard_last_load_error(self):
+        with mock.patch.object(server.guard, "LAST_LOAD_ERROR", "boom: bad guard.json"):
+            data, code = self._get_json("/api/alerts")
+        self.assertEqual(code, 200)
+        self.assertEqual(data["config_error"], "boom: bad guard.json")
 
 
 class ShouldProxyQueryStringTest(unittest.TestCase):
