@@ -14,6 +14,7 @@ import urllib.request
 
 import devices
 import fleet
+import guard
 import store
 
 # Imported lazily inside _ingest (not at module load) to avoid a hard
@@ -86,10 +87,22 @@ class FleetPoller:
     def _ingest(self, device_id, snapshot):
         import server  # lazy import, see note above
 
+        # CONTRACT.md section 1: usage_meta.partial says this poll's usage
+        # numbers may be LOW (the device's usage cache hasn't converged
+        # yet, e.g. right after a restart), not that they're missing.
+        # Recorded on the device row (store.py's additive usage_partial
+        # column) because that is the only thing both server.py's
+        # /api/fleet route and this poller's own guard step (see
+        # _run_guard) can reach from just a Store handle -- neither holds
+        # a reference to the other.
+        usage_meta = snapshot.get("usage_meta")
+        usage_partial = bool(usage_meta.get("partial")) if isinstance(usage_meta, dict) else False
+
         self.store.upsert_device({
             "id": device_id, "name": snapshot.get("device_name", device_id),
             "role": snapshot.get("role", "full"), "version": snapshot.get("version"),
             "claude_version": snapshot.get("claude_version"),
+            "usage_partial": usage_partial,
         })
         sessions_in = snapshot.get("sessions") or []
         for s in sessions_in:
@@ -109,6 +122,71 @@ class FleetPoller:
         # grace window in upsert_sessions.
         grace_seconds = max(store.ENDED_ROW_GRACE_SECONDS, 3 * self.interval)
         self.store.upsert_sessions(device_id, sessions_in, grace_seconds=grace_seconds)
+
+        # Phase 3 wiring (CONTRACT.md sections 1/2): persist per-session
+        # usage and per-project daily cost totals. Each block is its own
+        # try/except, deliberately separate from the sessions/events
+        # ingest above and from each other -- a malformed usage or cost
+        # shape from THIS device must not prevent its sessions/events from
+        # being ingested, its cursor from advancing, or the OTHER of these
+        # two writes from happening. store.py's own coercion already
+        # drops a bad row without raising for the common cases (a
+        # non-numeric field, a missing key); these try/excepts are the
+        # backstop for anything store.py can't anticipate (snapshot["sessions"]
+        # not actually a list of dicts, say) so this poller's own
+        # "never breaks the loop" guarantee holds even then.
+        try:
+            usage_rows = []
+            for s in sessions_in:
+                if not isinstance(s, dict):
+                    continue
+                u = s.get("usage")
+                sid = s.get("session_id")
+                if not isinstance(u, dict) or not sid:
+                    continue
+                usage_rows.append({
+                    "session_id": sid,
+                    "input": u.get("input"), "cache_read": u.get("cache_read"),
+                    "cache_write": u.get("cache_write"), "output": u.get("output"),
+                    "effective": u.get("effective"), "last_ts": u.get("last_ts"),
+                })
+            if usage_rows:
+                self.store.upsert_session_usage(device_id, usage_rows)
+        except Exception:
+            _LOG.exception("fleetpoll: session usage ingest failed for device %r", device_id)
+
+        try:
+            by_project = snapshot.get("usage_daily_by_project")
+            if isinstance(by_project, list):
+                cost_rows = [
+                    {"day": r.get("day"), "project": r.get("project"),
+                     "input": r.get("input"), "cache_read": r.get("cache_read"),
+                     "cache_write": r.get("cache_write"), "output": r.get("output"),
+                     "effective": r.get("effective")}
+                    for r in by_project if isinstance(r, dict)
+                ]
+            else:
+                # A metadata-role device omits usage_daily_by_project
+                # entirely (CONTRACT.md: a project name is the cwd by
+                # another name), and a pre-fleet legacy device (see
+                # _poll_remote_legacy) never had either key to begin with.
+                # Either way, fall back to the per-day (not per-project)
+                # totals with project="" so the device still contributes
+                # to /api/cost's per-device totals -- it just can never
+                # appear in the projects breakdown.
+                daily = snapshot.get("usage_daily")
+                cost_rows = [
+                    {"day": r.get("day"), "project": "",
+                     "input": r.get("input"), "cache_read": r.get("cache_read"),
+                     "cache_write": r.get("cache_write"), "output": r.get("output"),
+                     "effective": r.get("effective")}
+                    for r in (daily if isinstance(daily, list) else []) if isinstance(r, dict)
+                ]
+            if cost_rows:
+                self.store.upsert_cost_daily(device_id, cost_rows)
+        except Exception:
+            _LOG.exception("fleetpoll: cost ingest failed for device %r", device_id)
+
         events = snapshot.get("events") or []
         if events:
             self.store.add_events(device_id, events)
@@ -249,9 +327,89 @@ class FleetPoller:
                 self._poll_local(now)
                 for device in devices.load_devices():
                     self._poll_remote(device, now)
+                self._run_guard(now)
                 self._maybe_prune(now)
             except Exception:
                 _LOG.exception("fleetpoll: poll_once failed unexpectedly")
+
+    def _run_guard(self, now):
+        """CONTRACT.md section 4: run guard.evaluate() once per completed
+        poll cycle (every device has already been polled by the time this
+        runs, so a guard failure here can never be the reason a device
+        didn't get polled) and persist the result. Never raises: a guard
+        or store failure here is this poller's own bug, not a symptom of
+        any one device's payload, and must not prevent the next cycle
+        from running."""
+        try:
+            snapshot = self.store.fleet_view(include_ended=False)
+            sessions_in = snapshot.get("sessions")
+            devices_in = snapshot.get("devices")
+            sessions_in = sessions_in if isinstance(sessions_in, list) else []
+            devices_in = devices_in if isinstance(devices_in, list) else []
+
+            try:
+                event_ts_map = self.store.last_event_ts_map()
+            except Exception:
+                _LOG.exception("fleetpoll: guard last_event_ts lookup failed")
+                event_ts_map = {}
+
+            partial_device_ids = {
+                d.get("id") for d in devices_in
+                if isinstance(d, dict) and d.get("usage_partial")
+            }
+
+            enriched_sessions = []
+            for s in sessions_in:
+                if not isinstance(s, dict):
+                    continue
+                # Never mutate fleet_view()'s own dicts in place -- other
+                # callers in this same process (server.py's /api/fleet,
+                # the SSE stream) may still be holding this exact list.
+                s = dict(s)
+                s["last_event_ts"] = event_ts_map.get((s.get("device_id"), s.get("session_id")))
+
+                # CONTRACT.md section 4, "the stalled rule needs the raw
+                # status": _derive_session_state ranks needs_attention
+                # above busy, so a session wedged inside a Stop hook stops
+                # presenting as busy in the derived `state` the UI reads
+                # and would escape the `stalled` rule, which exists
+                # precisely to catch that case. `status` (persisted
+                # verbatim from the device's own report) is the raw
+                # signal the stalled rule actually needs -- so when the
+                # raw status is "busy", guard is handed state="busy" here
+                # regardless of what the derived state says. This is a
+                # local copy used only for this evaluate() call: the
+                # store row's own `state` column (and therefore the UI)
+                # is untouched, so `state` (derived) and `status` (raw)
+                # keep meaning two different things -- do not collapse
+                # them back into one field.
+                if s.get("status") == "busy":
+                    s["state"] = "busy"
+
+                # CONTRACT.md amendment, "guard must not fire cost rules
+                # on partial data": after a daemon restart the device's
+                # usage cache is cold for ~12 polls and EVERY session
+                # under-reads during that window; usage_partial is the
+                # only signal this is happening. Dropping `usage` (not
+                # the session itself) makes guard.py's existing "missing
+                # usage means cost rules can't run here" behavior do
+                # exactly the right thing: age/stall/concurrency, which
+                # don't read usage, still evaluate normally.
+                # `projects_capped` is deliberately NOT checked here --
+                # that flag means the totals are trustworthy and only the
+                # per-project breakdown was truncated for size, which is
+                # not a reason to withhold usage from a cost rule.
+                if s.get("device_id") in partial_device_ids:
+                    s["usage"] = None
+
+                enriched_sessions.append(s)
+
+            findings = guard.evaluate(
+                {"devices": devices_in, "sessions": enriched_sessions},
+                now_fn=lambda: now)
+            self.store.replace_alerts(findings, now_fn=lambda: now)
+        except Exception:
+            _LOG.exception("fleetpoll: guard evaluation failed")
 
     def _maybe_prune(self, now):
         if now < self._next_prune_at:

@@ -954,15 +954,39 @@ class UsageCostAlertsTest(unittest.TestCase):
 
     def test_upsert_cost_daily_empty_project_is_valid_not_skipped(self):
         # CONTRACT.md: project is the empty string when the device did not
-        # report one (metadata role), never skipped for that reason alone.
+        # report one (metadata role), never skipped for that reason alone
+        # -- but it must still count toward the device's own total (the
+        # amendment: "a metadata device contributes to per-device totals
+        # only, never to the projects table" -- see the next test for the
+        # "never to the projects table" half).
+        self.store.upsert_device({"id": "local", "name": "hub", "role": "metadata",
+                                   "version": "1", "claude_version": "1"})
         result = self.store.upsert_cost_daily("local", [
             {"day": _day(0), "project": "", "input": 1, "cache_read": 1, "cache_write": 1,
              "output": 1, "effective": 42},
         ])
         self.assertEqual(result["skipped"], 0)
         view = self.store.cost_view(days=30)
-        projects = {p["project"]: p["effective"] for p in view["projects"]}
-        self.assertEqual(projects.get(""), 42)
+        dev = next(d for d in view["devices"] if d["device_id"] == "local")
+        self.assertEqual(dev["total_effective"], 42)
+
+    def test_cost_view_never_surfaces_an_empty_project_in_the_projects_table(self):
+        # CONTRACT.md amendment (per-project daily totals): "A metadata
+        # device contributes to per-device totals only, never to the
+        # projects table." project="" is exactly what a metadata (or
+        # legacy pre-fleet) device's rows carry -- it must never appear
+        # in view["projects"], including alongside a real project from
+        # another device in the same window.
+        self.store.upsert_cost_daily("local", [
+            {"day": _day(0), "project": "", "input": 1, "cache_read": 1, "cache_write": 1,
+             "output": 1, "effective": 42},
+            {"day": _day(0), "project": "-var-www", "input": 1, "cache_read": 1,
+             "cache_write": 1, "output": 1, "effective": 7},
+        ])
+        view = self.store.cost_view(days=30)
+        projects = {p["project"] for p in view["projects"]}
+        self.assertNotIn("", projects)
+        self.assertIn("-var-www", projects)
 
     def test_upsert_cost_daily_skips_row_with_non_coercible_numeric_field(self):
         # Fix round 2, review Important 2: this is the exact probe that

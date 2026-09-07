@@ -1,5 +1,6 @@
 import os
 import tempfile
+import time
 import unittest
 import urllib.error
 from unittest.mock import patch, MagicMock
@@ -619,6 +620,308 @@ class GraceSecondsCoupledToPollIntervalTest(unittest.TestCase):
         poller.store.upsert_sessions.assert_called_once()
         self.assertEqual(
             poller.store.upsert_sessions.call_args.kwargs["grace_seconds"], 360)  # 3*120
+
+
+class UsageCostIngestTest(unittest.TestCase):
+    """W4/integration: CONTRACT.md sections 1/2 -- per-session usage and
+    per-project daily cost totals, ingested from the same fleet snapshot
+    fleet.build_fleet() already returns, persisted via
+    store.upsert_session_usage/upsert_cost_daily."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = _fake_store(self.tmp.name)
+
+    def tearDown(self):
+        self.store.close()
+        self.tmp.cleanup()
+
+    @patch("fleetpoll.fleet.build_fleet")
+    @patch("fleetpoll.devices.load_devices")
+    @patch("fleetpoll.devices.get_local_name")
+    def test_full_role_payload_persists_session_usage_and_cost_daily(
+            self, get_name, load_devices, build_fleet):
+        get_name.return_value = "hub"
+        load_devices.return_value = []
+        build_fleet.return_value = {
+            "device_name": "hub", "role": "full", "version": "1", "claude_version": "1",
+            "sessions": [{
+                "session_id": "s1", "name": "rc-a", "state": "busy",
+                "usage": {"input": 100, "cache_read": 200, "cache_write": 10,
+                          "output": 50, "effective": 900, "last_ts": 500.0},
+            }],
+            "events": [], "cursor": None, "generated_at": 1000.0, "errors": [],
+            "usage_daily": [{"day": "2026-09-07", "input": 100, "cache_read": 200,
+                              "cache_write": 10, "output": 50, "effective": 900}],
+            "usage_daily_by_project": [{"day": "2026-09-07", "project": "-var-www",
+                                         "input": 100, "cache_read": 200, "cache_write": 10,
+                                         "output": 50, "effective": 900}],
+            "usage_meta": {"files": 1, "skipped": 0, "partial": False, "generated_at": 1000.0},
+        }
+        poller = fleetpoll.FleetPoller(self.store, http_get=MagicMock())
+        poller.poll_once()
+
+        view = self.store.fleet_view()
+        self.assertEqual(view["sessions"][0]["usage"]["effective"], 900)
+
+        cost = self.store.cost_view(days=30)
+        dev = next(d for d in cost["devices"] if d["device_id"] == "local")
+        self.assertEqual(dev["total_effective"], 900)
+        projects = {p["project"]: p["effective"] for p in cost["projects"]}
+        self.assertEqual(projects.get("-var-www"), 900)
+
+    @patch("fleetpoll.fleet.build_fleet")
+    @patch("fleetpoll.devices.load_devices")
+    @patch("fleetpoll.devices.get_local_name")
+    def test_metadata_payload_falls_back_to_project_empty_string(
+            self, get_name, load_devices, build_fleet):
+        get_name.return_value = "hub"
+        load_devices.return_value = []
+        build_fleet.return_value = {
+            "device_name": "hub", "role": "metadata", "version": "1", "claude_version": "1",
+            "sessions": [{
+                "session_id": "hashabc", "name": "hashname", "state": "busy",
+                "usage": {"effective": 555},
+            }],
+            "events": [], "cursor": None, "generated_at": 1000.0, "errors": [],
+            "usage_daily": [{"day": "2026-09-07", "effective": 555}],
+            # usage_daily_by_project key is OMITTED entirely under
+            # role == metadata, per CONTRACT.md.
+            "usage_meta": {"files": 1, "skipped": 0, "partial": False, "generated_at": 1000.0},
+        }
+        poller = fleetpoll.FleetPoller(self.store, http_get=MagicMock())
+        poller.poll_once()
+
+        view = self.store.fleet_view()
+        self.assertEqual(view["sessions"][0]["usage"]["effective"], 555)
+
+        cost = self.store.cost_view(days=30)
+        dev = next(d for d in cost["devices"] if d["device_id"] == "local")
+        # Contributes to the device's own total ...
+        self.assertEqual(dev["total_effective"], 555)
+        # ... but never to the projects breakdown (CONTRACT.md amendment).
+        self.assertEqual(cost["projects"], [])
+
+    @patch("fleetpoll.fleet.build_fleet")
+    @patch("fleetpoll.devices.load_devices")
+    @patch("fleetpoll.devices.get_local_name")
+    def test_malformed_usage_payload_from_one_device_does_not_stop_others(
+            self, get_name, load_devices, build_fleet):
+        get_name.return_value = "hub"
+        good_device = {"id": "dev-good", "name": "good-box", "base_url": "http://good:8200"}
+        load_devices.return_value = [good_device]
+        build_fleet.return_value = {
+            # The LOCAL device's own snapshot is deliberately malformed:
+            # `usage` on the session is a string instead of a dict, and
+            # `usage_daily_by_project` is a string instead of a list.
+            "device_name": "hub", "role": "full", "version": "1", "claude_version": "1",
+            "sessions": [{"session_id": "s1", "name": "rc-a", "state": "idle",
+                          "usage": "not-a-dict"}],
+            "events": [], "cursor": None, "generated_at": 1000.0, "errors": [],
+            "usage_daily": "also-not-a-list",
+            "usage_daily_by_project": "still-not-a-list",
+            "usage_meta": "not-even-a-dict",
+        }
+        remote_resp = {
+            "device_name": "good-box", "role": "full", "version": "1", "claude_version": "1",
+            "sessions": [{
+                "session_id": "s2", "name": "rc-b", "state": "idle",
+                "usage": {"input": 1, "cache_read": 1, "cache_write": 1,
+                          "output": 1, "effective": 42, "last_ts": 10.0},
+            }],
+            "events": [], "cursor": None, "generated_at": 1000.0, "errors": [],
+            "usage_daily": [{"day": "2026-09-07", "effective": 42}],
+            "usage_daily_by_project": [{"day": "2026-09-07", "project": "-tmp",
+                                         "input": 1, "cache_read": 1, "cache_write": 1,
+                                         "output": 1, "effective": 42}],
+            "usage_meta": {"files": 1, "skipped": 0, "partial": False, "generated_at": 1000.0},
+        }
+        http_get = MagicMock(return_value=remote_resp)
+        poller = fleetpoll.FleetPoller(self.store, http_get=http_get)
+        poller.poll_once()  # must not raise
+
+        view = self.store.fleet_view()
+        by_id = {(s["device_id"], s["session_id"]): s for s in view["sessions"]}
+        # The malformed local session still got upserted (name/state) --
+        # only its usage was skipped -- and the good remote device's
+        # session usage made it in untouched.
+        self.assertIn(("local", "s1"), by_id)
+        self.assertIn(("dev-good", "s2"), by_id)
+        self.assertEqual(by_id[("dev-good", "s2")]["usage"]["effective"], 42)
+
+        cost = self.store.cost_view(days=30)
+        dev_ids = {d["device_id"] for d in cost["devices"]}
+        self.assertIn("dev-good", dev_ids)
+        self.assertNotIn("local", dev_ids)  # nothing coercible was ever written for it
+
+
+class GuardInvocationTest(unittest.TestCase):
+    """W4/integration: CONTRACT.md section 4 -- guard.evaluate() runs once
+    per completed poll cycle over an enriched store.fleet_view(), and the
+    result is persisted via store.replace_alerts()."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = _fake_store(self.tmp.name)
+
+    def tearDown(self):
+        self.store.close()
+        self.tmp.cleanup()
+
+    @patch("fleetpoll.fleet.build_fleet")
+    @patch("fleetpoll.devices.load_devices")
+    @patch("fleetpoll.devices.get_local_name")
+    def test_stalled_session_wedged_needs_attention_still_trips_guard(
+            self, get_name, load_devices, build_fleet):
+        get_name.return_value = "hub"
+        load_devices.return_value = []
+        # A session that's still `status: busy` (its raw, device-reported
+        # status) but presents as needs_attention (waiting_for is set) --
+        # this is the exact "wedged inside a Stop hook" case CONTRACT.md
+        # section 4 calls out. It's been busy for a very long time with no
+        # events at all, so the stalled rule (default stalled_minutes=30)
+        # should fire if guard sees it as busy.
+        # store.upsert_sessions writes `last_seen` via its own now_fn
+        # default (real time.time()), not poll_once's injected now_fn --
+        # so `last_seen` lands at approximately real "now" regardless of
+        # what this test passes to poll_once. To make the stalled rule's
+        # elapsed-time math land somewhere predictable, this test anchors
+        # itself to the real wall clock too: guard evaluates a full hour
+        # "after" the moment upsert_sessions actually ran, well past the
+        # default 30-minute stalled threshold.
+        t0 = time.time()
+        build_fleet.return_value = {
+            "device_name": "hub", "role": "full", "version": "1", "claude_version": "1",
+            "sessions": [{
+                "session_id": "s1", "name": "rc-wedged", "kind": "launcher",
+                "status": "busy", "waiting_for": "tool", "started_at": t0,
+            }],
+            "events": [], "cursor": None, "generated_at": 1000.0, "errors": [],
+        }
+        poller = fleetpoll.FleetPoller(self.store, http_get=MagicMock())
+        poller.poll_once(now_fn=lambda: t0 + 3600)
+
+        # The UI-facing derived state is still needs_attention...
+        view = self.store.fleet_view()
+        self.assertEqual(view["sessions"][0]["state"], "needs_attention")
+
+        # ...but guard saw it as busy and the stalled rule fired.
+        alerts = self.store.live_alerts()
+        rules = {a["rule"] for a in alerts}
+        self.assertIn("stalled", rules)
+
+    @patch("fleetpoll.fleet.build_fleet")
+    @patch("fleetpoll.devices.load_devices")
+    @patch("fleetpoll.devices.get_local_name")
+    def test_partial_device_usage_withheld_from_guard_cost_rules(
+            self, get_name, load_devices, build_fleet):
+        get_name.return_value = "hub"
+        load_devices.return_value = []
+        # A session already well over token_total's default threshold
+        # (50,000,000 effective) -- but its device reports usage_partial,
+        # so guard must not see `usage` at all for it and token_total must
+        # not fire. session_age/stalled/device_concurrency are unaffected
+        # by usage and must still be free to evaluate normally.
+        build_fleet.return_value = {
+            "device_name": "hub", "role": "full", "version": "1", "claude_version": "1",
+            "sessions": [{
+                "session_id": "s1", "name": "rc-big", "kind": "launcher",
+                "status": "idle", "started_at": 1000.0,
+                "usage": {"input": 0, "cache_read": 0, "cache_write": 0,
+                          "output": 0, "effective": 999_000_000, "last_ts": 1000.0},
+            }],
+            "events": [], "cursor": None, "generated_at": 1000.0, "errors": [],
+            "usage_meta": {"files": 1, "skipped": 0, "partial": True, "generated_at": 1000.0},
+        }
+        poller = fleetpoll.FleetPoller(self.store, http_get=MagicMock())
+        poller.poll_once(now_fn=lambda: 1000.0)
+
+        alerts = self.store.live_alerts()
+        rules = {a["rule"] for a in alerts}
+        self.assertNotIn("token_total", rules)
+
+        view = self.store.fleet_view()
+        dev = next(d for d in view["devices"] if d["id"] == "local")
+        self.assertEqual(dev["usage_partial"], 1)
+
+    @patch("fleetpoll.fleet.build_fleet")
+    @patch("fleetpoll.devices.load_devices")
+    @patch("fleetpoll.devices.get_local_name")
+    def test_projects_capped_alone_does_not_withhold_usage(
+            self, get_name, load_devices, build_fleet):
+        get_name.return_value = "hub"
+        load_devices.return_value = []
+        build_fleet.return_value = {
+            "device_name": "hub", "role": "full", "version": "1", "claude_version": "1",
+            "sessions": [{
+                "session_id": "s1", "name": "rc-big", "kind": "launcher",
+                "status": "idle", "started_at": 1000.0,
+                "usage": {"input": 0, "cache_read": 0, "cache_write": 0,
+                          "output": 0, "effective": 999_000_000, "last_ts": 1000.0},
+            }],
+            "events": [], "cursor": None, "generated_at": 1000.0, "errors": [],
+            "usage_meta": {"files": 1, "skipped": 0, "partial": False,
+                           "generated_at": 1000.0, "projects_capped": True},
+        }
+        poller = fleetpoll.FleetPoller(self.store, http_get=MagicMock())
+        poller.poll_once(now_fn=lambda: 1000.0)
+
+        alerts = self.store.live_alerts()
+        rules = {a["rule"] for a in alerts}
+        self.assertIn("token_total", rules)  # usage was NOT withheld
+
+    @patch("fleetpoll.fleet.build_fleet")
+    @patch("fleetpoll.devices.load_devices")
+    @patch("fleetpoll.devices.get_local_name")
+    def test_guard_raising_does_not_break_the_poll_loop(
+            self, get_name, load_devices, build_fleet):
+        get_name.return_value = "hub"
+        load_devices.return_value = []
+        build_fleet.return_value = {
+            "device_name": "hub", "role": "full", "version": "1", "claude_version": "1",
+            "sessions": [{"session_id": "s1", "name": "rc-a", "state": "idle"}],
+            "events": [], "cursor": None, "generated_at": 1000.0, "errors": [],
+        }
+        poller = fleetpoll.FleetPoller(self.store, http_get=MagicMock())
+        with patch("fleetpoll.guard.evaluate", side_effect=RuntimeError("boom")):
+            poller.poll_once()  # must not raise
+
+        # The session was still ingested even though guard blew up on it.
+        view = self.store.fleet_view()
+        self.assertEqual(len(view["sessions"]), 1)
+
+    @patch("fleetpoll.fleet.build_fleet")
+    @patch("fleetpoll.devices.load_devices")
+    @patch("fleetpoll.devices.get_local_name")
+    def test_alerts_that_stop_firing_are_removed_on_the_next_cycle(
+            self, get_name, load_devices, build_fleet):
+        get_name.return_value = "hub"
+        load_devices.return_value = []
+        build_fleet.side_effect = [
+            {  # cycle 1: a session already way over the age limit
+                # started_at=1.0, not 0.0 -- store._valid_started_at treats
+                # 0 as "not set" (indistinguishable from a numeric-default
+                # column), which would make upsert_sessions fall back to
+                # real wall-clock time for started_at instead of honouring
+                # this deliberately-ancient value.
+                "device_name": "hub", "role": "full", "version": "1", "claude_version": "1",
+                "sessions": [{"session_id": "s1", "name": "rc-old", "kind": "launcher",
+                              "status": "idle", "started_at": 1.0}],
+                "events": [], "cursor": None, "generated_at": 1000.0, "errors": [],
+            },
+            {  # cycle 2: session s1 has ended (absent from the payload)
+                "device_name": "hub", "role": "full", "version": "1", "claude_version": "1",
+                "sessions": [], "events": [], "cursor": None,
+                "generated_at": 2000.0, "errors": [],
+            },
+        ]
+        poller = fleetpoll.FleetPoller(self.store, http_get=MagicMock())
+        very_late = 30 * 3600  # 30h after started_at=0, over the 24h default
+        poller.poll_once(now_fn=lambda: very_late)
+        self.assertIn("session_age", {a["rule"] for a in self.store.live_alerts()})
+
+        poller.poll_once(now_fn=lambda: very_late + 10)
+        self.assertEqual(self.store.live_alerts(), [])
 
 
 class StartStopTest(unittest.TestCase):

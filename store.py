@@ -1086,8 +1086,22 @@ class Store:
             devices_out = sorted(
                 devices_map.values(), key=lambda d: d["total_effective"], reverse=True)
 
+            # W4/integration fix: an empty `project` means "this device
+            # did not report a project breakdown" (CONTRACT.md section 2:
+            # the empty string when the device did not report one, e.g.
+            # metadata role) -- never a real project. CONTRACT.md's
+            # per-project-daily-totals amendment is explicit that such a
+            # device "contributes to per-device totals only, never to the
+            # projects table", so these rows are excluded here even
+            # though they were already summed into `by_device_day` above
+            # for devices_out. Skipping "" is also what keeps a metadata
+            # device and a legacy pre-fleet device (fleetpoll.py's own
+            # project="" fallback for either) from ever showing up in
+            # this table as a phantom empty-named "project".
             by_project = {}
             for r in rows:
+                if not r["project"]:
+                    continue
                 key = (r["device_id"], r["project"])
                 by_project[key] = by_project.get(key, 0) + (r["effective"] or 0)
             projects_out = sorted(
