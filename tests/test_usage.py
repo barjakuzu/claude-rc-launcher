@@ -953,9 +953,57 @@ class StarvationByNewerFileTest(UsageTestCase):
             landed, "sess-b was starved indefinitely behind a continuously active newer file")
 
 
+class PickStallPriorityPathRotatesTest(UsageTestCase):
+    """Round 6 (comments-and-tests): the mutation testing behind the
+    round 5 review confirmed that pinning _stall_priority_cursor's index
+    to a constant (either 0, or len(stalled) - 1) still passed every
+    test in this file, meaning the rotation itself had never actually
+    been exercised: outcome-based tests (StarvationByNewerFileTest,
+    BudgetStallRecoveryTest) only ever have at most one stalled
+    candidate competing for the priority slot at a time, so any fixed
+    index happens to pick the only file that matters.
+
+    This tests _pick_stall_priority_path directly, against a candidate
+    set held deliberately stable (seeded straight into the cache, never
+    actually read, so nothing resolves or changes the set between
+    calls) specifically so the picks can be attributed to the rotation
+    logic alone, not to byte-budget arithmetic deciding who succeeds."""
+
+    def test_rotates_through_every_currently_stalled_candidate(self):
+        n = 5
+        paths = []
+        for i in range(n):
+            sid = "sess-%d" % i
+            path = self._session_path(session_id=sid)
+            self._write(path, _line(_usage_row(session_id=sid, input_tokens=1, output=1)))
+            paths.append(path)
+            # Seeded directly: a stalled entry as _pick_stall_priority_path
+            # actually finds it, without needing a real clipped read to
+            # produce one.
+            usage._cache[path] = usage._new_entry(PROJECT_DIR, 0)
+            usage._cache[path]["stall_count"] = 1
+
+        file_entries = [(p, PROJECT_DIR, 0, 0.0, 0) for p in paths]
+
+        # A true rotation visits every one of the n candidates exactly
+        # once across n picks (in ascending sorted-path order, since the
+        # cursor starts at 0 after setUp's reset_cache()); a cursor
+        # pinned to a constant index -- 0, or len(stalled) - 1 -- would
+        # return the very same path all n times instead.
+        first_round = [usage._pick_stall_priority_path(file_entries) for _ in range(n)]
+        self.assertEqual(set(first_round), set(paths))
+        self.assertEqual(len(set(first_round)), n)
+        self.assertEqual(first_round, sorted(paths))
+
+        # And it wraps around: a second lap visits the same n candidates
+        # again (the set is still stable, nothing here has resolved).
+        second_round = [usage._pick_stall_priority_path(file_entries) for _ in range(n)]
+        self.assertEqual(set(second_round), set(paths))
+
+
 class GiveUpAfterMaxStallsTest(UsageTestCase):
     """Round 3: a file whose single line exceeds max_bytes_per_call
-    itself (so even the boosted allowance never completes it) must stop
+    itself (so even a full allowance never completes it) must stop
     being read at all after MAX_CONSECUTIVE_STALLS attempts, and every
     call from then on must report it as skipped and partial rather than
     silently doing nothing."""
@@ -1137,13 +1185,13 @@ class AbandonmentIsBudgetRelativeTest(UsageTestCase):
         self.assertTrue(smaller["partial"])
 
 
-class BoostNeverExceedsCallBudgetTest(UsageTestCase):
-    """Round 4, Minor: a stalled file's retry allowance must never push
-    a call's total bytes_read past max_bytes_per_call, even when another
-    file competes for the same call's budget on every single call (the
+class RetryNeverExceedsCallBudgetTest(UsageTestCase):
+    """Round 4, Minor: a stalled file's retry must never push a call's
+    total bytes_read past max_bytes_per_call, even when another file
+    competes for the same call's budget on every single call (the
     scenario that measured a call reading 1.98x its documented cap
-    before this fix: the old boost formula ignored budget already spent
-    by other files in the same call)."""
+    before this fix: the allowance granted for a retry used to ignore
+    budget already spent by other files in the same call)."""
 
     def test_bytes_read_never_exceeds_max_bytes_per_call(self):
         path_a = self._session_path(session_id="sess-a")
