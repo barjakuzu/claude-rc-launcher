@@ -56,7 +56,9 @@ class BuildFleetTest(unittest.TestCase):
         self.assertNotIn("tmux", row)
         self.assertNotIn("claude", row)
         self.assertNotIn("tokens", row)
-        self.assertEqual(set(row.keys()), {"session_id", "name", "state", "started_at", "kind"})
+        self.assertEqual(
+            set(row.keys()),
+            {"session_id", "name", "state", "started_at", "kind", "status"})
         self.assertNotEqual(row["session_id"], "s1")
         self.assertNotEqual(row["name"], "rc-secret-project")
         ev = result["events"][0]
