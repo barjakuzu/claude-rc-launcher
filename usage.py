@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import collections
 import datetime
+import io
 import json
 import os
 import threading
@@ -294,28 +295,43 @@ def _merge_scratch(entry, scratch):
         bucket["output"] += day["output"]
 
 
-def _update_entry(path, project, size, mtime, inode, max_bytes):
+def _update_entry(path, project, max_bytes):
     """Bring the cache entry for `path` up to date with what's on disk,
     parsing only newly appended complete lines, clipped to at most
     `max_bytes` of new data (the caller's remaining per-call budget).
     Returns (bytes_read, clipped). Raises OSError if the file can't be
-    opened/read; nothing is committed in that case, so a file that has
-    never been read successfully stays absent from rollup()'s output
-    (see the "synced" field) rather than appearing as a bogus zero-valued
-    session, and a file that WAS already synced keeps its last-known-good
-    totals instead of being wiped by a transient failure.
+    stat'ed/opened/read; nothing is committed in that case, so a file
+    that has never been read successfully stays absent from rollup()'s
+    output (see the "synced" field) rather than appearing as a bogus
+    zero-valued session, and a file that WAS already synced keeps its
+    last-known-good totals instead of being wiped by a transient failure.
 
-    Acquires the module lock itself, twice: once (briefly) to look up or
-    create the cache entry, decide whether a read is even needed, and
-    snapshot its dedup set and offset; again (also briefly) to commit.
-    The disk read, and the JSON/line parsing, run with NO lock held and
-    touch no shared state: they parse into a private scratch entry (see
-    _merge_scratch), never the live one, so two callers racing on the
-    same file (a poll and a concurrent session_usage() call, say) never
-    mutate the same dict/set at the same time. This is what keeps a
-    multi-file rollup() from blocking a concurrent caller for the whole
-    scan: the lock is only ever held for one file's cheap bookkeeping,
-    not its I/O.
+    Does its OWN os.stat, inside the first locked block, rather than
+    trusting the caller's pre-scan (size, mtime, inode): the pre-scan
+    runs once per rollup() call, before the per-file loop, so by the
+    time a given file's turn comes up (after every earlier file in the
+    call has been processed) that snapshot can be badly stale, and a
+    concurrent caller may already have advanced this same entry past it.
+    A stale, too-small pre-scan size compared against a newer offset
+    reads as a truncation that never happened, resetting a live session's
+    entry (and briefly making it vanish from rollup()'s output, since a
+    freshly reset entry is unsynced until its own read completes). A
+    fresh stat taken atomically with the cache lookup, in the same locked
+    block, closes that window: it can only be as stale as the read that
+    follows it, the same residual (self-healing within one more poll)
+    slack every other field in this cache already tolerates.
+
+    Acquires the module lock itself, twice: once (briefly) to stat the
+    file, look up or create the cache entry, and decide whether a read is
+    even needed, snapshotting its dedup set and offset; again (also
+    briefly) to commit. The disk read, and the JSON/line parsing, run
+    with NO lock held and touch no shared state: they parse into a
+    private scratch entry (see _merge_scratch), never the live one, so
+    two callers racing on the same file (a poll and a concurrent
+    session_usage() call, say) never mutate the same dict/set at the same
+    time. This is what keeps a multi-file rollup() from blocking a
+    concurrent caller for the whole scan: the lock is only ever held for
+    one file's cheap bookkeeping, not its I/O.
 
     If another caller has already advanced (or reset) this same entry by
     the time we finish reading (detected by the live entry's offset no
@@ -324,6 +340,9 @@ def _update_entry(path, project, size, mtime, inode, max_bytes):
     loser's data will simply be re-read on the next rollup() call.
     """
     with _lock:
+        st = os.stat(path)  # may raise OSError; caller counts it as skipped
+        size, mtime, inode = st.st_size, st.st_mtime, st.st_ino
+
         existing = _cache.get(path)
         if existing is not None and (existing["inode"] != inode or size < existing["offset"]):
             # Rotated or truncated out from under us: the old offset and
@@ -342,22 +361,40 @@ def _update_entry(path, project, size, mtime, inode, max_bytes):
             return 0, False  # unchanged since last read: nothing to do
 
         start_offset = entry["offset"]
+        # Cap the actual read at what the file really has pending, not
+        # the full per-call budget: f.read(n) can allocate close to n
+        # bytes up front even when far less is available, and with a
+        # generous max_bytes_per_call that can mean allocating tens of
+        # MB to read a 200-byte appendix. `clipped` below still compares
+        # against the caller's `max_bytes`, not this narrower read size,
+        # so a file that genuinely has more pending than the budget
+        # allows is still correctly flagged.
+        pending = max(size - start_offset, 0)
+        read_cap = min(max_bytes, pending)
         seen_snapshot = set(entry["seen_keys"])
         session_id_snapshot = entry["session_id"]
 
     # --- disk I/O and parsing, no lock held, no shared state touched ---
-    data = _read_new_bytes(path, start_offset, max_bytes)  # may raise OSError
+    data = _read_new_bytes(path, start_offset, read_cap)  # may raise OSError
     clipped = len(data) >= max_bytes
 
     scratch = _new_entry(project, inode)
     scratch["seen_keys"] = seen_snapshot
     scratch["session_id"] = session_id_snapshot
 
+    # Iterate instead of data.splitlines(keepends=True): splitlines
+    # materializes a list holding every line's own bytes copy on top of
+    # `data` itself, which peaked at roughly 2x a full budget's worth of
+    # data in practice. A BytesIO reader yields (and releases) one line
+    # at a time. This also happens to be stricter than splitlines, which
+    # additionally splits on bare \r: JSONL lines are only ever
+    # terminated by \n, so this can't mis-split on a stray \r byte.
     pos = start_offset
-    for line in data.splitlines(keepends=True):
+    for line in io.BytesIO(data):
         if not line.endswith(b"\n"):
-            # Partial trailing line (mid-write): don't consume it, leave
-            # offset before it so the next poll re-reads it whole.
+            # Partial trailing line (mid-write, or the read was clipped
+            # mid-line): don't consume it, leave offset before it so the
+            # next poll re-reads it whole (or with more budget).
             break
         pos += len(line)
         _consume_line(scratch, line)
@@ -385,7 +422,17 @@ def _update_entry(path, project, size, mtime, inode, max_bytes):
         entry["mtime"] = mtime
         entry["synced"] = True
         _cache.move_to_end(path)
-        return pos - start_offset, clipped
+        # Charge the full number of bytes actually read against the
+        # caller's budget, not just the span that resolved into complete
+        # lines: a read that is clipped mid-line (a single line longer
+        # than this call's remaining budget) still consumed real I/O and
+        # must count for it, or the caller's budget accounting thinks
+        # this file cost nothing while it silently re-reads the same
+        # unfinished line, at real disk cost, on every future call too.
+        # entry["offset"] not advancing past it is fine: the line is
+        # still there, complete, waiting for a call with enough budget to
+        # finish it (see ClippedLineTest).
+        return len(data), clipped
 
 
 def _evict_missing(discovered_paths):
@@ -442,14 +489,17 @@ def rollup(root=None, max_bytes_per_call=DEFAULT_MAX_BYTES_PER_CALL,
 
     # Newest-mtime-first, same order as file_entries, so a byte budget
     # that runs out mid-call spends itself on the most active sessions
-    # first: _update_entry() does its own (per-file) locking around this.
-    for path, project, size, mtime, inode in file_entries:
+    # first: _update_entry() does its own (per-file) locking around this,
+    # and its own fresh os.stat (the pre-scan's size/mtime/inode below are
+    # used only for this ordering and for discovered_paths/LRU purposes,
+    # never trusted for _update_entry's own truncation/change decisions).
+    for path, project, _size, _mtime, _inode in file_entries:
         remaining = max_bytes_per_call - total_bytes_read
         if remaining <= 0:
             partial = True
             continue
         try:
-            bytes_read, clipped = _update_entry(path, project, size, mtime, inode, remaining)
+            bytes_read, clipped = _update_entry(path, project, remaining)
         except OSError:
             skipped += 1
             continue
@@ -492,6 +542,14 @@ def rollup(root=None, max_bytes_per_call=DEFAULT_MAX_BYTES_PER_CALL,
             entry = _cache.get(path)
             if entry is None or not entry["synced"]:
                 continue  # never successfully read (e.g. always failed to open)
+            if entry["session_id"] is None and entry["messages"] == 0:
+                # No usage-bearing record ever gave this file a session
+                # identity, and it never counted any usage either: falling
+                # back to its filename stem would merge every other
+                # usage-free file with the same name (several different
+                # journal.jsonl files, say) into one meaningless phantom
+                # session. Nothing here is worth reporting.
+                continue
             session_id = entry["session_id"] or os.path.splitext(os.path.basename(path))[0]
             acc = session_accum.get(session_id)
             if acc is None:
