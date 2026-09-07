@@ -420,9 +420,17 @@ export function PreviewModal({ deviceId, name, mode, sessionId, onClose }: Previ
   // Polling loop: refresh pane content (fallback transport only)
   useEffect(() => {
     if (!autoRefresh || transport !== 'poll') return;
+    // Reset any stale unreachable state from a previous run of this effect
+    // (session switch, or autoRefresh toggled off then back on) so a banner
+    // never lingers past the run that raised it.
+    pollFailuresRef.current = 0;
+    setDeviceUnreachable(false);
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const FAST_INTERVAL = 700;
+    // Intended ladder as consecutive failures accumulate: 700ms, 700ms,
+    // 2s, 5s, 5s, ... (i.e. 700ms -> 2s -> 5s, capped) — BACKOFF_STEPS is
+    // indexed by (failures - 1), clamped, so it must stay in this order.
     const BACKOFF_STEPS = [700, 2000, 5000];
     const fetchOnce = async () => {
       try {
@@ -479,8 +487,10 @@ export function PreviewModal({ deviceId, name, mode, sessionId, onClose }: Previ
         if (pollFailuresRef.current >= 3) setDeviceUnreachable(true);
       } finally {
         if (!cancelled) {
-          const step = Math.min(pollFailuresRef.current, BACKOFF_STEPS.length - 1);
-          const delay = pollFailuresRef.current >= 3 ? BACKOFF_STEPS[step] : FAST_INTERVAL;
+          const failures = pollFailuresRef.current;
+          const delay = failures === 0
+            ? FAST_INTERVAL
+            : BACKOFF_STEPS[Math.min(failures - 1, BACKOFF_STEPS.length - 1)];
           timer = setTimeout(fetchOnce, delay);
         }
       }
@@ -496,6 +506,10 @@ export function PreviewModal({ deviceId, name, mode, sessionId, onClose }: Previ
       cancelled = true;
       clearTimeout(timer);
       refreshRef.current = () => {};
+      // Don't let this run's unreachable banner survive into whatever
+      // comes next (new session, or autoRefresh switched off).
+      pollFailuresRef.current = 0;
+      setDeviceUnreachable(false);
     };
   }, [autoRefresh, deviceId, name, transport]);
 
