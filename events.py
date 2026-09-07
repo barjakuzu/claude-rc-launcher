@@ -12,20 +12,34 @@ DATE_FMT = "%Y-%m-%d"
 
 
 def _spool_files(root):
-    """Sorted (oldest first) list of "<date>.jsonl" filenames present."""
+    """Sorted (oldest first) list of spool filenames present: both
+    "<date>.jsonl" and its rotated "<date>.jsonl.1" sibling (rc-hook
+    renames the just-written file aside to ".1" once it exceeds
+    ROTATE_SIZE_BYTES, then starts a fresh "<date>.jsonl"). For a given
+    date the ".1" file holds strictly older events than the plain file
+    (it's the pre-rotation content, a pure rename), so it is ordered
+    immediately before it."""
     try:
         names = os.listdir(root)
     except OSError:
         return []
     out = []
     for n in names:
-        if n.endswith(".jsonl"):
-            try:
-                datetime.datetime.strptime(n[:-len(".jsonl")], DATE_FMT)
-            except ValueError:
-                continue
-            out.append(n)
-    return sorted(out)
+        if n.endswith(".jsonl.1"):
+            date_str = n[:-len(".jsonl.1")]
+        elif n.endswith(".jsonl"):
+            date_str = n[:-len(".jsonl")]
+        else:
+            continue
+        try:
+            datetime.datetime.strptime(date_str, DATE_FMT)
+        except ValueError:
+            continue
+        out.append(n)
+    # Sort by (date, is_rotated_first) so "<date>.jsonl.1" sorts right
+    # before "<date>.jsonl" for the same date.
+    return sorted(out, key=lambda n: (n[:-len(".jsonl.1")] if n.endswith(".jsonl.1") else n[:-len(".jsonl")],
+                                       0 if n.endswith(".jsonl.1") else 1))
 
 
 def _parse_cursor(cursor):
@@ -47,20 +61,37 @@ def read_events(root, since_cursor=None, limit=500):
         return [], None
 
     cursor_file, cursor_offset = _parse_cursor(since_cursor)
+    rotated_sibling = (cursor_file + ".1") if cursor_file else None
+    plain_file_too_small = False
     if cursor_file in files:
+        try:
+            plain_file_too_small = cursor_offset > os.path.getsize(os.path.join(root, cursor_file))
+        except OSError:
+            plain_file_too_small = False
+    if cursor_file in files and not (plain_file_too_small and rotated_sibling in files):
         start_index = files.index(cursor_file)
+        start_file = cursor_file
+    elif rotated_sibling and rotated_sibling in files:
+        # The file the cursor pointed at has since been rotated aside:
+        # rc-hook rotates by os.replace(path, path + ".1"), a pure
+        # rename, so the bytes at the cursor's offset now live in the
+        # ".1" sibling at the same offset. Resume there so the events
+        # that were moved by rotation aren't skipped.
+        start_index = files.index(cursor_file + ".1")
+        start_file = cursor_file + ".1"
     else:
         # Unknown/older/missing file (pruned, or first-ever read): start
         # from the beginning of the earliest file still present.
         start_index = 0
         cursor_offset = 0
+        start_file = files[0]
 
     rows = []
     last_file, last_offset = files[start_index], cursor_offset
     for i in range(start_index, len(files)):
         fname = files[i]
         path = os.path.join(root, fname)
-        offset = cursor_offset if fname == cursor_file else 0
+        offset = cursor_offset if fname == start_file else 0
         try:
             size = os.path.getsize(path)
         except OSError:

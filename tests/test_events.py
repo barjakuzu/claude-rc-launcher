@@ -102,6 +102,33 @@ class ReadEventsTest(unittest.TestCase):
         self.assertTrue(cursor.startswith("2026-09-06.jsonl:"))
 
 
+    def test_rotation_mid_stream_reads_rotated_and_fresh_without_loss(self):
+        # Simulate rc-hook's rotation: read events partway through the
+        # day's file, then the file gets rotated (renamed) to ".1" and
+        # a fresh file with more events is written. A cursor taken
+        # before rotation must still see everything: the tail of the
+        # rotated ".1" file plus the fresh file's events.
+        path = _write_day(self.root, "2026-09-07", [
+            {"ts": 1, "event": "SessionStart", "session_id": "a", "extra": {}},
+        ])
+        _, cursor = events.read_events(self.root)
+        _write_day(self.root, "2026-09-07", [
+            {"ts": 2, "event": "Notification", "session_id": "a", "extra": {}},
+        ])
+        # rc-hook rotates by a pure rename, preserving bytes/offsets.
+        os.replace(path, path + ".1")
+        _write_day(self.root, "2026-09-07", [
+            {"ts": 3, "event": "Stop", "session_id": "a", "extra": {}},
+        ])
+        rows, cursor2 = events.read_events(self.root, since_cursor=cursor)
+        self.assertEqual([r["event"] for r in rows], ["Notification", "Stop"])
+        self.assertTrue(cursor2.startswith("2026-09-07.jsonl:"))
+        self.assertFalse(cursor2.startswith("2026-09-07.jsonl.1"))
+        # And nothing further to read from the new cursor.
+        rows3, _ = events.read_events(self.root, since_cursor=cursor2)
+        self.assertEqual(rows3, [])
+
+
 class PruneTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
