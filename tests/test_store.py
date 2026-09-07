@@ -452,6 +452,84 @@ class UpsertSessionsStartedAtTest(unittest.TestCase):
         ], now_fn=lambda: now + 100.0)
         self.assertEqual(self._started_at(), real_earlier)
 
+    def test_reported_huge_int_does_not_raise_overflow_error(self):
+        # An int with ~308+ digits can't convert to a C double at all --
+        # math.isfinite() itself raises OverflowError on it. _valid_started_at
+        # must swallow that and treat the value as not-set (falls back to
+        # now), not let it escape upsert_sessions.
+        self.store.upsert_sessions("local", [
+            {"session_id": "s1", "name": "rc-a", "cwd": "/tmp", "kind": "interactive",
+             "state": "idle", "started_at": 10 ** 400},
+        ], now_fn=lambda: 1000.0)
+        self.assertEqual(self._started_at(), 1000.0)
+
+
+class RecreatedSessionStartedAtTest(unittest.TestCase):
+    """A (device_id, session_id) pair can be reused -- most commonly a
+    synthetic tmux:<name> id, reassigned the moment a tmux session of that
+    name is recreated. The dead row's started_at must not be inherited by
+    the new session (neither kept outright nor min-ed against it), or a
+    session recreated seconds ago would permanently read as however old
+    the previous occupant of that id happened to be."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db_path = os.path.join(self.tmp.name, "hub.db")
+        self.store = store.Store(self.db_path)
+        self.store.upsert_device({"id": "local", "name": "hub", "role": "full",
+                                   "version": "1", "claude_version": "1"})
+
+    def tearDown(self):
+        self.store.close()
+        self.tmp.cleanup()
+
+    def test_recreated_session_does_not_inherit_dead_rows_started_at(self):
+        old_now = 1757000000.0
+        old_started = old_now - 20 * 86400  # a 20-day-old session
+        self.store.upsert_sessions("local", [
+            {"session_id": "tmux:rc-alpha", "name": "rc-alpha", "cwd": "/tmp",
+             "kind": "interactive", "state": "idle", "started_at": old_started},
+        ], now_fn=lambda: old_now)
+        self.assertEqual(
+            self.store.fleet_view()["sessions"][0]["started_at"], old_started)
+
+        # The session ends (absent from the next poll).
+        self.store.upsert_sessions("local", [], now_fn=lambda: old_now + 10.0)
+        ended_view = self.store.fleet_view(include_ended=True)
+        self.assertIsNotNone(ended_view["sessions"][0]["ended_at"])
+
+        # tmux reuses the same name/id five seconds later, with its own
+        # real, recent started_at -- this is the reviewer's exact probe.
+        new_now = old_now + 15.0
+        new_started = new_now - 5.0
+        self.store.upsert_sessions("local", [
+            {"session_id": "tmux:rc-alpha", "name": "rc-alpha", "cwd": "/tmp",
+             "kind": "interactive", "state": "idle", "started_at": new_started},
+        ], now_fn=lambda: new_now)
+
+        result = self.store.fleet_view()
+        self.assertEqual(len(result["sessions"]), 1)
+        self.assertEqual(result["sessions"][0]["started_at"], new_started)
+        self.assertIsNone(result["sessions"][0]["ended_at"])
+
+    def test_recreated_session_with_no_reported_started_at_falls_back_to_now_not_dead_value(self):
+        old_now = 1757000000.0
+        old_started = old_now - 20 * 86400
+        self.store.upsert_sessions("local", [
+            {"session_id": "tmux:rc-alpha", "name": "rc-alpha", "cwd": "/tmp",
+             "kind": "interactive", "state": "idle", "started_at": old_started},
+        ], now_fn=lambda: old_now)
+        self.store.upsert_sessions("local", [], now_fn=lambda: old_now + 10.0)
+
+        new_now = old_now + 15.0
+        self.store.upsert_sessions("local", [
+            {"session_id": "tmux:rc-alpha", "name": "rc-alpha", "cwd": "/tmp",
+             "kind": "interactive", "state": "idle"},  # no started_at reported
+        ], now_fn=lambda: new_now)
+
+        result = self.store.fleet_view()
+        self.assertEqual(result["sessions"][0]["started_at"], new_now)
+
 
 class SessionsStatusColumnTest(unittest.TestCase):
     def setUp(self):

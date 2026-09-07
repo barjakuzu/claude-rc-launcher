@@ -25,12 +25,18 @@ _LOG = logging.getLogger(__name__)
 def _valid_started_at(value):
     """True if `value` is a usable started_at: a finite, positive number.
     0, negative, NaN and inf (and None, and non-numbers) are all "not
-    set" -- a stored 0 must never win a min() against a real timestamp."""
+    set" -- a stored 0 must never win a min() against a real timestamp.
+    Never raises: math.isfinite() itself raises OverflowError on an int
+    with roughly 308+ digits (too large to convert to a C double), which
+    is caught here rather than left to escape upsert_sessions."""
     if value is None or isinstance(value, bool):
         return False
     if not isinstance(value, (int, float)):
         return False
-    return math.isfinite(value) and value > 0
+    try:
+        return math.isfinite(value) and value > 0
+    except OverflowError:
+        return False
 
 
 class StoreClosed(RuntimeError):
@@ -258,8 +264,10 @@ class Store:
         set, exactly once (only rows that were still live, ended_at IS
         NULL, transition).
 
-        started_at resolution (existing = already stored, reported = r's
-        started_at, both run through _valid_started_at first):
+        started_at resolution (existing = the started_at of a still-LIVE
+        stored row for this (device_id, session_id) -- an ENDED row does
+        not count as existing, see below; reported = r's started_at; both
+        run through _valid_started_at first):
         - existing invalid, reported invalid: now (first sighting, no
           usable timestamp from either side yet).
         - existing invalid, reported valid: reported (the backfill path
@@ -267,6 +275,18 @@ class Store:
         - existing valid, reported invalid: existing, unchanged.
         - both valid: min(existing, reported) -- a later reported time
           must never move the stored value forward.
+
+        A (device_id, session_id) pair can be reused: a synthetic
+        tmux:<name> id in particular is reassigned the moment a tmux
+        session of that name is recreated, and the old row's ended_at is
+        still set at that point (the sweep below only clears it once the
+        new sighting's INSERT/UPDATE runs). The started_at lookup only
+        considers a row with ended_at IS NULL "existing" -- otherwise a
+        session recreated seconds ago would inherit whatever started_at
+        the dead session under the same id happened to have, permanently
+        (that dead value would either be kept outright or win a min()
+        against the new session's real, much more recent, reported time).
+        Reusing an id is a new session as far as started_at is concerned.
 
         A row without `session_id` is not a valid natural key (falling back
         to `name` risks colliding two distinct sessions, or an accidental
@@ -287,7 +307,8 @@ class Store:
                     continue
                 seen_ids.add(sid)
                 existing = conn.execute(
-                    "SELECT started_at FROM sessions WHERE device_id=? AND session_id=?",
+                    "SELECT started_at FROM sessions WHERE device_id=? AND session_id=? "
+                    "AND ended_at IS NULL",
                     (device_id, sid)).fetchone()
                 existing_started = existing["started_at"] if existing else None
                 existing_valid = existing_started if _valid_started_at(existing_started) else None
