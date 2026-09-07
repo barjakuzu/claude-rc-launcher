@@ -458,6 +458,112 @@ class LegacyFleetFallbackTest(unittest.TestCase):
             thread.join(timeout=5)
 
 
+class PruneSchedulingTest(unittest.TestCase):
+    """Nothing ever called Store.prune() before, so ended sessions/events/
+    audit rows piled up forever. The poll loop must call it, but at most
+    once an hour -- not on every 30s cycle."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = _fake_store(self.tmp.name)
+
+    def tearDown(self):
+        self.store.close()
+        self.tmp.cleanup()
+
+    @patch("fleetpoll.fleet.build_fleet")
+    @patch("fleetpoll.devices.load_devices")
+    @patch("fleetpoll.devices.get_local_name")
+    def test_prune_called_on_first_poll(self, get_name, load_devices, build_fleet):
+        get_name.return_value = "hub"
+        load_devices.return_value = []
+        build_fleet.return_value = {"device_name": "hub", "role": "full", "version": "1",
+                                     "claude_version": "1", "sessions": [], "events": [],
+                                     "cursor": None, "generated_at": 1.0, "errors": []}
+        poller = fleetpoll.FleetPoller(self.store, http_get=MagicMock())
+        with patch.object(self.store, "prune", wraps=self.store.prune) as prune:
+            poller.poll_once(now_fn=lambda: 1000.0)
+            prune.assert_called_once()
+
+    @patch("fleetpoll.fleet.build_fleet")
+    @patch("fleetpoll.devices.load_devices")
+    @patch("fleetpoll.devices.get_local_name")
+    def test_prune_not_called_again_within_an_hour(self, get_name, load_devices, build_fleet):
+        get_name.return_value = "hub"
+        load_devices.return_value = []
+        build_fleet.return_value = {"device_name": "hub", "role": "full", "version": "1",
+                                     "claude_version": "1", "sessions": [], "events": [],
+                                     "cursor": None, "generated_at": 1.0, "errors": []}
+        poller = fleetpoll.FleetPoller(self.store, http_get=MagicMock())
+        with patch.object(self.store, "prune", wraps=self.store.prune) as prune:
+            poller.poll_once(now_fn=lambda: 1000.0)
+            poller.poll_once(now_fn=lambda: 1000.0 + fleetpoll.PRUNE_INTERVAL_SECONDS - 1)
+            prune.assert_called_once()
+
+    @patch("fleetpoll.fleet.build_fleet")
+    @patch("fleetpoll.devices.load_devices")
+    @patch("fleetpoll.devices.get_local_name")
+    def test_prune_called_again_after_an_hour(self, get_name, load_devices, build_fleet):
+        get_name.return_value = "hub"
+        load_devices.return_value = []
+        build_fleet.return_value = {"device_name": "hub", "role": "full", "version": "1",
+                                     "claude_version": "1", "sessions": [], "events": [],
+                                     "cursor": None, "generated_at": 1.0, "errors": []}
+        poller = fleetpoll.FleetPoller(self.store, http_get=MagicMock())
+        with patch.object(self.store, "prune", wraps=self.store.prune) as prune:
+            poller.poll_once(now_fn=lambda: 1000.0)
+            poller.poll_once(now_fn=lambda: 1000.0 + fleetpoll.PRUNE_INTERVAL_SECONDS)
+            self.assertEqual(prune.call_count, 2)
+
+    @patch("fleetpoll.fleet.build_fleet")
+    @patch("fleetpoll.devices.load_devices")
+    @patch("fleetpoll.devices.get_local_name")
+    def test_prune_failure_does_not_break_poll_once(self, get_name, load_devices, build_fleet):
+        get_name.return_value = "hub"
+        load_devices.return_value = []
+        build_fleet.return_value = {"device_name": "hub", "role": "full", "version": "1",
+                                     "claude_version": "1", "sessions": [], "events": [],
+                                     "cursor": None, "generated_at": 1.0, "errors": []}
+        poller = fleetpoll.FleetPoller(self.store, http_get=MagicMock())
+        with patch.object(self.store, "prune", side_effect=RuntimeError("boom")):
+            poller.poll_once(now_fn=lambda: 1000.0)  # must not raise
+
+
+class FleetViewExcludesEndedSessionsTest(unittest.TestCase):
+    """/api/fleet and the SSE snapshot read fleet_view() with defaults --
+    an ended session must not sit in the Sessions tab forever."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = _fake_store(self.tmp.name)
+
+    def tearDown(self):
+        self.store.close()
+        self.tmp.cleanup()
+
+    @patch("fleetpoll.fleet.build_fleet")
+    @patch("fleetpoll.devices.load_devices")
+    @patch("fleetpoll.devices.get_local_name")
+    def test_session_missing_from_a_later_snapshot_disappears_from_default_view(
+            self, get_name, load_devices, build_fleet):
+        get_name.return_value = "hub"
+        load_devices.return_value = []
+        build_fleet.side_effect = [
+            {"device_name": "hub", "role": "full", "version": "1", "claude_version": "1",
+             "sessions": [{"session_id": "s1", "name": "rc-a", "state": "idle"}],
+             "events": [], "cursor": None, "generated_at": 1.0, "errors": []},
+            {"device_name": "hub", "role": "full", "version": "1", "claude_version": "1",
+             "sessions": [], "events": [], "cursor": None, "generated_at": 2.0, "errors": []},
+        ]
+        poller = fleetpoll.FleetPoller(self.store, http_get=MagicMock())
+        poller.poll_once()
+        self.assertEqual(len(self.store.fleet_view()["sessions"]), 1)
+
+        poller.poll_once()
+        self.assertEqual(self.store.fleet_view()["sessions"], [])
+        self.assertEqual(len(self.store.fleet_view(include_ended=True)["sessions"]), 1)
+
+
 class StartStopTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

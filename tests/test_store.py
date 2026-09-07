@@ -42,8 +42,13 @@ class StoreTest(unittest.TestCase):
         self.assertIsNone(view["sessions"][0]["ended_at"])
 
         self.store.upsert_sessions("local", [], now_fn=lambda: 1020.0)
+        # Default fleet_view() excludes ended sessions -- the live
+        # Sessions tab must not show them forever.
         view2 = self.store.fleet_view()
-        self.assertEqual(view2["sessions"][0]["ended_at"], 1020.0)
+        self.assertEqual(view2["sessions"], [])
+        # They stay queryable with include_ended=True (activity/history).
+        view2_all = self.store.fleet_view(include_ended=True)
+        self.assertEqual(view2_all["sessions"][0]["ended_at"], 1020.0)
 
     def test_add_events_then_recent_events_by_session(self):
         self.store.upsert_device({"id": "local", "name": "hub", "role": "full",

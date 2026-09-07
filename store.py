@@ -334,13 +334,23 @@ class Store:
 
     # -- reads -----------------------------------------------------------
 
-    def fleet_view(self):
+    def fleet_view(self, include_ended=False):
+        """Rows for the live Sessions tab: ended sessions are excluded by
+        default so a session that stopped hours ago doesn't linger in the
+        list forever (nothing ever called prune() from the poll loop
+        before, so store.py alone couldn't rely on rows disappearing).
+        Pass include_ended=True for callers that still need dead sessions
+        -- e.g. activity/history views keyed off session_id."""
         conn = self._read_conn()
         try:
             devices_rows = [dict(r) for r in conn.execute(
                 "SELECT * FROM devices ORDER BY name")]
-            session_rows = [dict(r) for r in conn.execute(
-                "SELECT * FROM sessions ORDER BY last_seen DESC")]
+            if include_ended:
+                session_rows = [dict(r) for r in conn.execute(
+                    "SELECT * FROM sessions ORDER BY last_seen DESC")]
+            else:
+                session_rows = [dict(r) for r in conn.execute(
+                    "SELECT * FROM sessions WHERE ended_at IS NULL ORDER BY last_seen DESC")]
             for s in session_rows:
                 s["tmux"] = _parse_json_or_none(s.get("tmux"))
                 s["claude"] = _parse_json_or_none(s.get("claude"))

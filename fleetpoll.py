@@ -24,6 +24,12 @@ _LOG = logging.getLogger(__name__)
 
 BACKOFF_CEILING_SECONDS = 300
 
+# store.Store.prune() deletes ended sessions/events/audit rows older than
+# its `days` cutoff. Nothing ever called it before, so the sessions table
+# grew forever; call it from the poll loop, but no more than this often --
+# it's a maintenance sweep, not part of every 30s cycle.
+PRUNE_INTERVAL_SECONDS = 3600
+
 # A device response larger than this is rejected outright (treated as a
 # device error, same as a connection failure) rather than read into memory
 # in full -- a misbehaving or compromised device returning a huge body
@@ -74,6 +80,7 @@ class FleetPoller:
         self._stop = threading.Event()
         self._thread = None
         self._legacy_logged = set()  # device_ids we've already logged the fallback for
+        self._next_prune_at = 0.0
 
     def _ingest(self, device_id, snapshot):
         import server  # lazy import, see note above
@@ -235,8 +242,19 @@ class FleetPoller:
                 self._poll_local(now)
                 for device in devices.load_devices():
                     self._poll_remote(device, now)
+                self._maybe_prune(now)
             except Exception:
                 _LOG.exception("fleetpoll: poll_once failed unexpectedly")
+
+    def _maybe_prune(self, now):
+        if now < self._next_prune_at:
+            return
+        self._next_prune_at = now + PRUNE_INTERVAL_SECONDS
+        try:
+            result = self.store.prune()
+            _LOG.info("fleetpoll: pruned old rows: %s", result)
+        except Exception:
+            _LOG.exception("fleetpoll: prune failed")
 
     def _loop(self):
         while not self._stop.is_set():
