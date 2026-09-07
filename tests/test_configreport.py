@@ -76,9 +76,12 @@ class CollectConfigReportTest(unittest.TestCase):
             f.write("watch@official\nghost@official\n")
         with open(os.path.join(self.cfg, "marketplaces.txt"), "w") as f:
             f.write("official https://example.com/official\n")
-        settings = {"hooks": {"Stop": []}, "remoteControlAtStartup": True, "model": "claude-opus"}
-        with open(os.path.join(self.cfg, "config", "settings.json"), "w") as f:
-            json.dump(settings, f)
+        base_settings = {"hooks": {"Stop": []}, "remoteControlAtStartup": True,
+                          "permissions": {"allow": ["Bash"]}}
+        with open(os.path.join(self.cfg, "config", "settings.base.json"), "w") as f:
+            json.dump(base_settings, f)
+        with open(os.path.join(self.cfg, "config", "settings.seed.json"), "w") as f:
+            json.dump({"model": "sonnet"}, f)
 
         # Device-only skill: gitignored, secret content that must never be
         # read (only its NAME may appear anywhere in the report).
@@ -96,8 +99,15 @@ class CollectConfigReportTest(unittest.TestCase):
         _git(self.cfg, "commit", "-q", "-m", "init")
         os.makedirs(os.path.join(self.home, ".claude"), exist_ok=True)
         os.symlink(os.path.join(self.cfg, "skills"), os.path.join(self.home, ".claude", "skills"))
-        os.symlink(os.path.join(self.cfg, "config", "settings.json"),
-                    os.path.join(self.home, ".claude", "settings.json"))
+        # ~/.claude/settings.json is a real, device-owned, untracked file
+        # (no longer a symlink into the repo). By design it carries keys
+        # the repo base file does not (model/effortLevel/modelSettings).
+        with open(os.path.join(self.home, ".claude", "settings.json"), "w") as f:
+            json.dump({
+                "hooks": {"Stop": []}, "remoteControlAtStartup": True,
+                "permissions": {"allow": ["Bash"]}, "model": "claude-opus",
+                "effortLevel": "high",
+            }, f)
 
     def _fake_run_with_plugins(self, plugin_lines):
         def fake_run(cmd, **kw):
@@ -120,12 +130,15 @@ class CollectConfigReportTest(unittest.TestCase):
         self.assertTrue(report["claude_config"]["dirty"])
         self.assertIn("agents/claude.md", report["claude_config"]["dirty_files"])
 
-    def test_dirty_false_when_only_settings_json_dirty(self):
-        with open(os.path.join(self.cfg, "config", "settings.json"), "a") as f:
+    def test_dirty_true_when_settings_base_json_dirty(self):
+        # config/settings.base.json is now a normal tracked file — no more
+        # special-casing (there is no committed settings.json blob left to
+        # special-case against).
+        with open(os.path.join(self.cfg, "config", "settings.base.json"), "a") as f:
             f.write("\n")
         report = configreport.collect_config_report(home=self.home, run=_stub_run)
-        self.assertFalse(report["claude_config"]["dirty"])
-        self.assertIn("config/settings.json", report["claude_config"]["dirty_files"])
+        self.assertTrue(report["claude_config"]["dirty"])
+        self.assertIn("config/settings.base.json", report["claude_config"]["dirty_files"])
 
     def test_deps_missing_vs_dangling_split(self):
         report = configreport.collect_config_report(home=self.home, run=_stub_run)
@@ -212,33 +225,38 @@ class CollectConfigReportTest(unittest.TestCase):
         self.assertTrue(report["plugins"]["installed_status"]["watch@official"])
         self.assertEqual(report["plugins"]["disabled"], [])
 
-    def test_settings_hooks_symlink_and_sha256(self):
+    def test_settings_hooks_and_sha256_come_from_base(self):
         report = configreport.collect_config_report(home=self.home, run=_stub_run)
         self.assertTrue(report["settings"]["hooks_present"])
         self.assertTrue(report["settings"]["remote_control_at_startup"])
-        self.assertTrue(report["settings"]["settings_symlinked"])
+        self.assertNotIn("settings_symlinked", report["settings"])
         self.assertTrue(report["settings"]["skills_symlinked"])
         expected = hashlib.sha256(
-            open(os.path.join(self.cfg, "config", "settings.json"), "rb").read()
+            open(os.path.join(self.cfg, "config", "settings.base.json"), "rb").read()
         ).hexdigest()
         self.assertEqual(report["settings"]["sha256"], expected)
 
-    def test_effective_model_from_env_overrides_settings(self):
+    def test_effective_model_from_device_settings_json(self):
+        os.environ.pop("ANTHROPIC_MODEL", None)
+        report = configreport.collect_config_report(home=self.home, run=_stub_run)
+        self.assertEqual(report["effective_model"], "claude-opus")
+        self.assertNotIn("env_model_override", report)
+
+    def test_effective_model_env_var_reported_as_override_not_effective_model(self):
         old = os.environ.get("ANTHROPIC_MODEL")
         os.environ["ANTHROPIC_MODEL"] = "claude-sonnet-env"
         try:
             report = configreport.collect_config_report(home=self.home, run=_stub_run)
-            self.assertEqual(report["effective_model"], "claude-sonnet-env")
+            # Env var genuinely overrides at runtime, so it is surfaced
+            # separately — but effective_model still reflects the device's
+            # own settings.json (the env var is not treated as drift).
+            self.assertEqual(report["effective_model"], "claude-opus")
+            self.assertEqual(report["env_model_override"], "claude-sonnet-env")
         finally:
             if old is None:
                 os.environ.pop("ANTHROPIC_MODEL", None)
             else:
                 os.environ["ANTHROPIC_MODEL"] = old
-
-    def test_effective_model_falls_back_to_settings_json(self):
-        os.environ.pop("ANTHROPIC_MODEL", None)
-        report = configreport.collect_config_report(home=self.home, run=_stub_run)
-        self.assertEqual(report["effective_model"], "claude-opus")
 
     def test_claude_local_md_detected(self):
         with open(os.path.join(self.home, ".claude", "CLAUDE.local.md"), "w") as f:
@@ -267,81 +285,82 @@ class CollectConfigReportTest(unittest.TestCase):
         self.assertLess(time.monotonic() - start, 5)
         self.assertIn("loopy", report["skills"]["names"])
 
-    def _redirty_settings(self, new_settings):
-        with open(os.path.join(self.cfg, "config", "settings.json"), "w") as f:
-            json.dump(new_settings, f)
+    def _write_device_settings(self, data):
+        with open(os.path.join(self.home, ".claude", "settings.json"), "w") as f:
+            json.dump(data, f)
 
-    def test_settings_drift_ordering_for_plugin_marketplace_keys_only(self):
-        self._redirty_settings({
-            "hooks": {"Stop": []}, "remoteControlAtStartup": True, "model": "claude-opus",
-            "enabledPlugins": ["watch@official"], "extraKnownMarketplaces": ["official"],
+    def _write_base_settings(self, data):
+        with open(os.path.join(self.cfg, "config", "settings.base.json"), "w") as f:
+            json.dump(data, f)
+
+    def test_base_sync_in_sync_when_device_has_all_base_keys(self):
+        report = configreport.collect_config_report(home=self.home, run=_stub_run)
+        sync = report["settings"]["base_sync"]
+        self.assertEqual(sync["kind"], "in-sync")
+        self.assertEqual(sync["missing"], [])
+        self.assertEqual(sync["differing"], [])
+
+    def test_base_sync_stale_lists_missing_base_key(self):
+        self._write_base_settings({
+            "hooks": {"Stop": []}, "remoteControlAtStartup": True,
+            "permissions": {"allow": ["Bash"]}, "extraSharedKey": True,
         })
         report = configreport.collect_config_report(home=self.home, run=_stub_run)
-        drift = report["settings"]["settings_drift"]
-        self.assertEqual(drift["kind"], "ordering")
-        self.assertEqual(drift["keys"], ["enabledPlugins", "extraKnownMarketplaces"])
+        sync = report["settings"]["base_sync"]
+        self.assertEqual(sync["kind"], "stale")
+        self.assertIn("extraSharedKey", sync["missing"])
+        self.assertEqual(sync["differing"], [])
 
-    def test_settings_drift_local_edit_for_model_change(self):
-        self._redirty_settings({
-            "hooks": {"Stop": []}, "remoteControlAtStartup": True, "model": "opus",
-            "modelSettings": {"opus": {"temperature": 1}},
+    def test_base_sync_stale_lists_differing_base_key(self):
+        self._write_device_settings({
+            "hooks": {"Stop": []}, "remoteControlAtStartup": False,
+            "permissions": {"allow": ["Bash"]}, "model": "claude-opus",
         })
         report = configreport.collect_config_report(home=self.home, run=_stub_run)
-        drift = report["settings"]["settings_drift"]
-        self.assertEqual(drift["kind"], "local-edit")
-        self.assertIn("model", drift["keys"])
-        self.assertIn("modelSettings", drift["keys"])
+        sync = report["settings"]["base_sync"]
+        self.assertEqual(sync["kind"], "stale")
+        self.assertIn("remoteControlAtStartup", sync["differing"])
+        self.assertEqual(sync["missing"], [])
 
-    def test_settings_drift_local_edit_when_mixed_with_ordering_keys(self):
-        self._redirty_settings({
-            "hooks": {"Stop": []}, "remoteControlAtStartup": True, "model": "opus",
-            "enabledPlugins": ["watch@official"],
-        })
+    def test_base_sync_never_reports_device_only_keys(self):
+        # model / effortLevel / modelSettings live only on the device by
+        # design and must never appear as missing/differing.
         report = configreport.collect_config_report(home=self.home, run=_stub_run)
-        drift = report["settings"]["settings_drift"]
-        self.assertEqual(drift["kind"], "local-edit")
-        self.assertIn("model", drift["keys"])
-        self.assertIn("enabledPlugins", drift["keys"])
+        sync = report["settings"]["base_sync"]
+        for key in ("model", "effortLevel", "modelSettings"):
+            self.assertNotIn(key, sync["missing"])
+            self.assertNotIn(key, sync["differing"])
 
-    def test_settings_drift_null_when_clean(self):
+    def test_base_sync_unknown_when_device_file_missing(self):
+        os.remove(os.path.join(self.home, ".claude", "settings.json"))
         report = configreport.collect_config_report(home=self.home, run=_stub_run)
-        drift = report["settings"]["settings_drift"]
-        self.assertIsNone(drift["kind"])
-        self.assertEqual(drift["keys"], [])
+        sync = report["settings"]["base_sync"]
+        self.assertEqual(sync["kind"], "unknown")
+        self.assertEqual(sync["missing"], [])
+        self.assertEqual(sync["differing"], [])
 
-    def test_settings_drift_unknown_on_git_show_failure(self):
-        self._redirty_settings({"hooks": {"Stop": []}, "model": "opus2"})
+    def test_base_sync_unknown_when_base_file_missing(self):
+        os.remove(os.path.join(self.cfg, "config", "settings.base.json"))
+        report = configreport.collect_config_report(home=self.home, run=_stub_run)
+        sync = report["settings"]["base_sync"]
+        self.assertEqual(sync["kind"], "unknown")
 
-        def fake_run(cmd, **kw):
-            if cmd[:3] == ["git", "-C", self.cfg] and "show" in cmd:
-                raise subprocess.TimeoutExpired(cmd, 10)
-            return _stub_run(cmd, **kw)
-
-        report = configreport.collect_config_report(home=self.home, run=fake_run)
-        drift = report["settings"]["settings_drift"]
-        self.assertEqual(drift["kind"], "unknown")
-        self.assertEqual(drift["keys"], [])
-
-    def test_settings_drift_unknown_on_invalid_utf8_working_file(self):
-        # A mid-edit or binary-corrupted working file must degrade to
-        # unknown, not raise — collect_config_report's docstring promises
-        # it never raises.
-        with open(os.path.join(self.cfg, "config", "settings.json"), "wb") as f:
+    def test_base_sync_unknown_on_invalid_json_never_raises(self):
+        with open(os.path.join(self.home, ".claude", "settings.json"), "wb") as f:
             f.write(b'{"model": "opus", "bad": "\xff\xfe not valid utf-8"}')
         report = configreport.collect_config_report(home=self.home, run=_stub_run)
-        drift = report["settings"]["settings_drift"]
-        self.assertEqual(drift["kind"], "unknown")
-        self.assertEqual(drift["keys"], [])
+        sync = report["settings"]["base_sync"]
+        self.assertEqual(sync["kind"], "unknown")
 
-    def test_settings_drift_never_includes_values(self):
-        self._redirty_settings({
-            "hooks": {"Stop": []}, "model": "opus",
+    def test_base_sync_never_includes_values(self):
+        self._write_base_settings({
+            "hooks": {"Stop": []},
             "env": {"SECRET_TOKEN": "super-secret-value-xyz"},
         })
         report = configreport.collect_config_report(home=self.home, run=_stub_run)
         dumped = json.dumps(report)
         self.assertNotIn("super-secret-value-xyz", dumped)
-        self.assertIn("env", report["settings"]["settings_drift"]["keys"])
+        self.assertIn("env", report["settings"]["base_sync"]["missing"])
 
     def test_plugins_report_uses_configured_claude_bin(self):
         seen = []

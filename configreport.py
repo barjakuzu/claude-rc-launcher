@@ -86,10 +86,7 @@ def _git_state(cfg_dir, run, errors):
                 name = name.split(" -> ", 1)[1]
             dirty_files.append(_unquote_git_path(name))
         state["dirty_files"] = dirty_files
-        # A dirty config/settings.json alone is install-ordering, not drift
-        # (plugin installs rewrite it) — only flag `dirty` when something
-        # else changed too.
-        state["dirty"] = any(f != "config/settings.json" for f in dirty_files)
+        state["dirty"] = bool(dirty_files)
     else:
         errors.append("claude-config: git status failed")
     ok, out = _run_ok(run, _git_cmd(cfg_dir, "rev-list", "--count", "HEAD..@{u}"))
@@ -228,88 +225,90 @@ def _marketplaces(cfg_dir, errors):
         return []
 
 
-_ORDERING_KEYS = {"enabledPlugins", "extraKnownMarketplaces"}
-
-
-def _settings_drift(cfg_dir, run, dirty_files, errors):
-    """Classify a dirty config/settings.json: `ordering` (Claude Code
-    rewriting enabledPlugins/extraKnownMarketplaces on plugin/marketplace
-    install — resolves itself on the next commit from any device) vs
-    `local-edit` (a genuine local change to model/permissions/hooks/etc that
-    silently blocks this device's next `git pull`). Never includes VALUES
-    (settings.json can hold env values/tokens) — only top-level key names.
-
-    Note: a genuine content edit that happens to land only on
-    enabledPlugins/extraKnownMarketplaces is still classified `ordering` —
-    it too blocks a pull until committed, but is expected to be superseded
-    by the next commit from any device rather than needing a human to
-    resolve it, same as the install-rewrite case this exists to catch.
-    """
-    result = {"kind": None, "keys": []}
-    if "config/settings.json" not in (dirty_files or []):
-        return result
-    # git show HEAD:<path> both confirms git is reachable and gives us the
-    # committed blob to diff against, so a separate `git diff` probe first
-    # would be redundant.
-    ok, committed_raw = _run_ok(run, _git_cmd(cfg_dir, "show", "HEAD:config/settings.json"))
-    if not ok:
-        errors.append("settings_drift: git show HEAD:config/settings.json failed")
-        return {"kind": "unknown", "keys": []}
-    path = os.path.join(cfg_dir, "config", "settings.json")
+def _read_json_object(path, errors, label):
+    """Reads `path` as a JSON object. Returns (ok, dict). Never raises;
+    a missing file, unreadable file, invalid JSON, or non-object JSON all
+    yield ok=False without raising."""
     try:
         with open(path, "rb") as f:
-            working_raw = f.read()
+            raw = f.read()
     except OSError:
-        errors.append("settings_drift: could not read working settings.json")
-        return {"kind": "unknown", "keys": []}
+        errors.append(f"{label}: read failed")
+        return False, {}
     try:
-        committed = json.loads(committed_raw)
-        working = json.loads(working_raw.decode("utf-8"))
+        data = json.loads(raw.decode("utf-8"))
     except (ValueError, UnicodeDecodeError):
-        errors.append("settings_drift: could not parse settings.json as JSON")
-        return {"kind": "unknown", "keys": []}
-    if not isinstance(committed, dict) or not isinstance(working, dict):
-        errors.append("settings_drift: settings.json is not a JSON object")
-        return {"kind": "unknown", "keys": []}
-    keys = set()
-    for key in set(committed) | set(working):
-        if committed.get(key, object()) != working.get(key, object()):
-            keys.add(key)
-    if not keys:
-        return {"kind": None, "keys": []}
-    kind = "ordering" if keys <= _ORDERING_KEYS else "local-edit"
-    return {"kind": kind, "keys": sorted(keys)}
+        errors.append(f"{label}: could not parse as JSON")
+        return False, {}
+    if not isinstance(data, dict):
+        errors.append(f"{label}: not a JSON object")
+        return False, {}
+    return True, data
+
+
+def _base_sync(cfg_dir, home, errors):
+    """Compares the repo's authoritative `config/settings.base.json` against
+    the device's real, untracked `~/.claude/settings.json`. Reports only
+    top-level KEY NAMES, never values — settings.json can hold an `env`
+    block with live secrets. Keys present only on the device (e.g. `model`,
+    `effortLevel`, `modelSettings`, written by the desktop app / `/model` /
+    `/effort`) are expected and never reported. Never raises: any read or
+    parse failure on either side degrades to `unknown`."""
+    base_path = os.path.join(cfg_dir, "config", "settings.base.json")
+    device_path = os.path.join(home, ".claude", "settings.json")
+    base_ok, base = _read_json_object(base_path, errors, "settings.base.json")
+    device_ok, device = _read_json_object(device_path, errors, "~/.claude/settings.json")
+    if not base_ok or not device_ok:
+        return {"kind": "unknown", "missing": [], "differing": []}
+    missing, differing = [], []
+    for key, value in base.items():
+        if key not in device:
+            missing.append(key)
+        elif device[key] != value:
+            differing.append(key)
+    missing.sort()
+    differing.sort()
+    kind = "stale" if (missing or differing) else "in-sync"
+    return {"kind": kind, "missing": missing, "differing": differing}
 
 
 def _settings_report(cfg_dir, home, errors):
-    path = os.path.join(cfg_dir, "config", "settings.json")
+    # hooks_present / remote_control_at_startup / sha256 describe the
+    # repo's shared, authoritative settings.base.json (config/settings.json
+    # no longer exists — it was split into settings.base.json, merged over
+    # the device file on every bootstrap, and settings.seed.json, applied
+    # only when a key is absent).
+    path = os.path.join(cfg_dir, "config", "settings.base.json")
     result = {"hooks_present": False, "remote_control_at_startup": None,
-              "settings_symlinked": False, "skills_symlinked": False, "sha256": None}
-    settings_data = {}
+              "skills_symlinked": False, "sha256": None}
     if os.path.isfile(path):
         try:
             with open(path, "rb") as f:
                 raw = f.read()
             result["sha256"] = hashlib.sha256(raw).hexdigest()
-            settings_data = json.loads(raw)
-            result["hooks_present"] = bool(settings_data.get("hooks"))
-            result["remote_control_at_startup"] = settings_data.get("remoteControlAtStartup")
+            base_data = json.loads(raw)
+            result["hooks_present"] = bool(base_data.get("hooks"))
+            result["remote_control_at_startup"] = base_data.get("remoteControlAtStartup")
         except (OSError, ValueError) as e:
-            errors.append(f"settings.json: {e}")
-    # settings_symlinked: is the live ~/.claude/settings.json itself a
-    # symlink (into claude-config/config/settings.json).
+            errors.append(f"settings.base.json: {e}")
     # skills_symlinked: is ~/.claude/skills a symlink into
     # claude-config/skills (a proper linked install rather than a copy).
-    result["settings_symlinked"] = os.path.islink(os.path.join(home, ".claude", "settings.json"))
+    # ~/.claude/settings.json is no longer a symlink by design (it is a
+    # real, device-owned file), so there is nothing to report there.
     result["skills_symlinked"] = os.path.islink(os.path.join(home, ".claude", "skills"))
-    return result, settings_data
+    return result
 
 
-def _effective_model(settings_data):
+def _effective_model(home, errors):
+    """`model` is read from the device's own ~/.claude/settings.json —
+    never from the repo, and not primarily from the environment (a
+    device's own model is not drift). ANTHROPIC_MODEL, when set, genuinely
+    overrides at runtime and is reported separately as env_model_override."""
+    device_path = os.path.join(home, ".claude", "settings.json")
+    ok, device = _read_json_object(device_path, errors, "~/.claude/settings.json (effective_model)")
+    model = device.get("model") if ok else None
     env_model = os.environ.get("ANTHROPIC_MODEL")
-    if env_model:
-        return env_model
-    return settings_data.get("model")
+    return model, env_model
 
 
 def collect_config_report(home=None, run=subprocess.run):
@@ -323,11 +322,12 @@ def collect_config_report(home=None, run=subprocess.run):
     except Exception:
         errors.append("compat.claude_version() failed")
 
-    settings_report, settings_data = _settings_report(cfg_dir, home, errors)
+    settings_report = _settings_report(cfg_dir, home, errors)
     git_state = _git_state(cfg_dir, run, errors)
-    settings_report["settings_drift"] = _settings_drift(cfg_dir, run, git_state["dirty_files"], errors)
+    settings_report["base_sync"] = _base_sync(cfg_dir, home, errors)
 
-    return {
+    model, env_model = _effective_model(home, errors)
+    result = {
         "claude_version": claude_version,
         "launcher_version": config.VERSION,
         "claude_config": git_state,
@@ -340,8 +340,11 @@ def collect_config_report(home=None, run=subprocess.run):
         "plugins": _plugins_report(cfg_dir, run, errors),
         "marketplaces": _marketplaces(cfg_dir, errors),
         "settings": settings_report,
-        "effective_model": _effective_model(settings_data),
+        "effective_model": model,
         "claude_local_md": os.path.isfile(os.path.join(home, ".claude", "CLAUDE.local.md")),
         "generated_at": int(time.time()),
         "errors": errors,
     }
+    if env_model:
+        result["env_model_override"] = env_model
+    return result
