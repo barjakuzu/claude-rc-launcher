@@ -92,14 +92,15 @@ class CardFromPartsLauncherVersionTest(unittest.TestCase):
 
 class BuildConfigMatrixTest(unittest.TestCase):
     def _report(self, head="abc123", dirty=False, dirty_files=None, deps_missing=None,
-                missing=None, hooks=True, version="2.1.263", launcher_version="2.1.10"):
+                missing=None, hooks=True, version="2.1.263", launcher_version="2.1.10",
+                settings_drift=None):
         return {
             "claude_version": version,
             "launcher_version": launcher_version,
             "claude_config": {"head": head, "dirty": dirty, "dirty_files": dirty_files or []},
             "skills": {"deps_missing": deps_missing or [], "dangling": [], "device_only": []},
             "plugins": {"missing": missing or [], "extra": []},
-            "settings": {"hooks_present": hooks},
+            "settings": {"hooks_present": hooks, "settings_drift": settings_drift},
             "rules": {"shared": [], "local": []},
         }
 
@@ -132,12 +133,35 @@ class BuildConfigMatrixTest(unittest.TestCase):
 
     def test_settings_only_dirty_is_separate_reason_not_dirty(self):
         hub = self._report()
-        other = self._report(head="abc123", dirty=False, dirty_files=["config/settings.json"])
+        other = self._report(head="abc123", dirty=False, dirty_files=["config/settings.json"],
+                              settings_drift={"kind": "ordering", "keys": ["enabledPlugins"]})
         matrix = overview.build_config_matrix(
             hub, [{"id": "dev2", "base_url": "http://x"}], fetch=lambda d: other)
         reasons = matrix["skew"]["dev2"]
         self.assertIn("settings uncommitted", reasons)
         self.assertNotIn("dirty", reasons)
+        self.assertNotIn("settings edited locally (blocks pull)", reasons)
+
+    def test_settings_local_edit_is_distinct_red_reason(self):
+        hub = self._report()
+        other = self._report(head="abc123", dirty=False, dirty_files=["config/settings.json"],
+                              settings_drift={"kind": "local-edit", "keys": ["model"]})
+        matrix = overview.build_config_matrix(
+            hub, [{"id": "dev2", "base_url": "http://x"}], fetch=lambda d: other)
+        reasons = matrix["skew"]["dev2"]
+        self.assertIn("settings edited locally (blocks pull)", reasons)
+        self.assertNotIn("settings uncommitted", reasons)
+        self.assertNotIn("dirty", reasons)
+
+    def test_settings_drift_unknown_falls_back_to_ordering_reason(self):
+        hub = self._report()
+        other = self._report(head="abc123", dirty=False, dirty_files=["config/settings.json"],
+                              settings_drift={"kind": "unknown", "keys": []})
+        matrix = overview.build_config_matrix(
+            hub, [{"id": "dev2", "base_url": "http://x"}], fetch=lambda d: other)
+        reasons = matrix["skew"]["dev2"]
+        self.assertIn("settings uncommitted", reasons)
+        self.assertNotIn("settings edited locally (blocks pull)", reasons)
 
     def test_unreachable_device_marked(self):
         hub = self._report()

@@ -267,6 +267,83 @@ class CollectConfigReportTest(unittest.TestCase):
         self.assertLess(time.monotonic() - start, 5)
         self.assertIn("loopy", report["skills"]["names"])
 
+    def _redirty_settings(self, new_settings):
+        with open(os.path.join(self.cfg, "config", "settings.json"), "w") as f:
+            json.dump(new_settings, f)
+
+    def test_settings_drift_ordering_for_plugin_marketplace_keys_only(self):
+        self._redirty_settings({
+            "hooks": {"Stop": []}, "remoteControlAtStartup": True, "model": "claude-opus",
+            "enabledPlugins": ["watch@official"], "extraKnownMarketplaces": ["official"],
+        })
+        report = configreport.collect_config_report(home=self.home, run=_stub_run)
+        drift = report["settings"]["settings_drift"]
+        self.assertEqual(drift["kind"], "ordering")
+        self.assertEqual(drift["keys"], ["enabledPlugins", "extraKnownMarketplaces"])
+
+    def test_settings_drift_local_edit_for_model_change(self):
+        self._redirty_settings({
+            "hooks": {"Stop": []}, "remoteControlAtStartup": True, "model": "opus",
+            "modelSettings": {"opus": {"temperature": 1}},
+        })
+        report = configreport.collect_config_report(home=self.home, run=_stub_run)
+        drift = report["settings"]["settings_drift"]
+        self.assertEqual(drift["kind"], "local-edit")
+        self.assertIn("model", drift["keys"])
+        self.assertIn("modelSettings", drift["keys"])
+
+    def test_settings_drift_local_edit_when_mixed_with_ordering_keys(self):
+        self._redirty_settings({
+            "hooks": {"Stop": []}, "remoteControlAtStartup": True, "model": "opus",
+            "enabledPlugins": ["watch@official"],
+        })
+        report = configreport.collect_config_report(home=self.home, run=_stub_run)
+        drift = report["settings"]["settings_drift"]
+        self.assertEqual(drift["kind"], "local-edit")
+        self.assertIn("model", drift["keys"])
+        self.assertIn("enabledPlugins", drift["keys"])
+
+    def test_settings_drift_null_when_clean(self):
+        report = configreport.collect_config_report(home=self.home, run=_stub_run)
+        drift = report["settings"]["settings_drift"]
+        self.assertIsNone(drift["kind"])
+        self.assertEqual(drift["keys"], [])
+
+    def test_settings_drift_unknown_on_git_show_failure(self):
+        self._redirty_settings({"hooks": {"Stop": []}, "model": "opus2"})
+
+        def fake_run(cmd, **kw):
+            if cmd[:3] == ["git", "-C", self.cfg] and "show" in cmd:
+                raise subprocess.TimeoutExpired(cmd, 10)
+            return _stub_run(cmd, **kw)
+
+        report = configreport.collect_config_report(home=self.home, run=fake_run)
+        drift = report["settings"]["settings_drift"]
+        self.assertEqual(drift["kind"], "unknown")
+        self.assertEqual(drift["keys"], [])
+
+    def test_settings_drift_unknown_on_diff_failure(self):
+        self._redirty_settings({"hooks": {"Stop": []}, "model": "opus2"})
+
+        def fake_run(cmd, **kw):
+            if cmd[:3] == ["git", "-C", self.cfg] and "diff" in cmd:
+                raise subprocess.TimeoutExpired(cmd, 10)
+            return _stub_run(cmd, **kw)
+
+        report = configreport.collect_config_report(home=self.home, run=fake_run)
+        drift = report["settings"]["settings_drift"]
+        self.assertEqual(drift["kind"], "unknown")
+
+    def test_settings_drift_never_includes_values(self):
+        self._redirty_settings({
+            "hooks": {"Stop": []}, "model": "opus",
+            "env": {"SECRET_TOKEN": "super-secret-value-xyz"},
+        })
+        report = configreport.collect_config_report(home=self.home, run=_stub_run)
+        dumped = json.dumps(report)
+        self.assertNotIn("super-secret-value-xyz", dumped)
+        self.assertIn("env", report["settings"]["settings_drift"]["keys"])
+
     def test_plugins_report_uses_configured_claude_bin(self):
         seen = []
 

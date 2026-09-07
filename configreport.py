@@ -228,6 +228,51 @@ def _marketplaces(cfg_dir, errors):
         return []
 
 
+_ORDERING_KEYS = {"enabledPlugins", "extraKnownMarketplaces"}
+
+
+def _settings_drift(cfg_dir, run, dirty_files, errors):
+    """Classify a dirty config/settings.json: `ordering` (Claude Code
+    rewriting enabledPlugins/extraKnownMarketplaces on plugin/marketplace
+    install — resolves itself on the next commit from any device) vs
+    `local-edit` (a genuine local change to model/permissions/hooks/etc that
+    silently blocks this device's next `git pull`). Never includes VALUES
+    (settings.json can hold env values/tokens) — only top-level key names."""
+    result = {"kind": None, "keys": []}
+    if "config/settings.json" not in (dirty_files or []):
+        return result
+    # Run the diff first (as a cheap dirty/availability probe that degrades
+    # to unknown on failure) even though the actual key comparison below
+    # uses the committed blob vs the working file, not the diff text.
+    ok, _out = _run_ok(run, _git_cmd(cfg_dir, "diff", "--", "config/settings.json"))
+    if not ok:
+        return {"kind": "unknown", "keys": []}
+    ok, committed_raw = _run_ok(run, _git_cmd(cfg_dir, "show", "HEAD:config/settings.json"))
+    if not ok:
+        return {"kind": "unknown", "keys": []}
+    path = os.path.join(cfg_dir, "config", "settings.json")
+    try:
+        with open(path, "r") as f:
+            working_raw = f.read()
+    except OSError:
+        return {"kind": "unknown", "keys": []}
+    try:
+        committed = json.loads(committed_raw)
+        working = json.loads(working_raw)
+    except ValueError:
+        return {"kind": "unknown", "keys": []}
+    if not isinstance(committed, dict) or not isinstance(working, dict):
+        return {"kind": "unknown", "keys": []}
+    keys = set()
+    for key in set(committed) | set(working):
+        if committed.get(key, object()) != working.get(key, object()):
+            keys.add(key)
+    if not keys:
+        return {"kind": None, "keys": []}
+    kind = "ordering" if keys <= _ORDERING_KEYS else "local-edit"
+    return {"kind": kind, "keys": sorted(keys)}
+
+
 def _settings_report(cfg_dir, home, errors):
     path = os.path.join(cfg_dir, "config", "settings.json")
     result = {"hooks_present": False, "remote_control_at_startup": None,
@@ -271,11 +316,13 @@ def collect_config_report(home=None, run=subprocess.run):
         errors.append("compat.claude_version() failed")
 
     settings_report, settings_data = _settings_report(cfg_dir, home, errors)
+    git_state = _git_state(cfg_dir, run, errors)
+    settings_report["settings_drift"] = _settings_drift(cfg_dir, run, git_state["dirty_files"], errors)
 
     return {
         "claude_version": claude_version,
         "launcher_version": config.VERSION,
-        "claude_config": _git_state(cfg_dir, run, errors),
+        "claude_config": git_state,
         "skills": _skills_report(cfg_dir, errors),
         "agents": _file_stems(os.path.join(cfg_dir, "agents")),
         "rules": {
