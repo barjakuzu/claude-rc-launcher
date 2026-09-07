@@ -1186,14 +1186,49 @@ class UsageCostAlertsTest(unittest.TestCase):
         # A finding with a value sqlite3 cannot bind at all: the write must
         # fail and roll back, not partially apply (e.g. deleting `good`
         # because it's absent from this batch, then dying on the insert).
+        # `message` (not `value`/`threshold` -- fix round 4 routes those
+        # through _coerce_number, which turns an unsupported type into
+        # None rather than a bind error) is still passed through raw.
         bad = {"rule": "token_rate", "severity": "alert", "device_id": "local",
-               "session_id": "s2", "name": "rc-bar", "message": "m2",
-               "value": object(), "threshold": 2.0, "since": 100.0}
+               "session_id": "s2", "name": "rc-bar", "message": object(),
+               "value": 2.0, "threshold": 2.0, "since": 100.0}
         with self.assertRaises(Exception):
             self.store.replace_alerts([bad], now_fn=lambda: 2000.0)
 
         after = self.store.live_alerts()
         self.assertEqual(after, before)
+
+    def test_replace_alerts_coerces_value_and_threshold_without_losing_the_batch(self):
+        # Fix round 4, review residual 1: guard.py's own _finite_or_none
+        # rejects NaN/inf but never checks SQLite's 64-bit range, so an
+        # operator typo in guard.json (an over-int64 threshold) reaches
+        # here as a plain finite Python int. Reproduced directly: a
+        # finding with threshold=2**63 alongside a normal finding must
+        # not raise (dropping the whole alerts batch, including the
+        # normal finding) the way an uncoerced bind used to.
+        good = {"rule": "session_age", "severity": "warn", "device_id": "local",
+                "session_id": "s1", "name": "rc-good", "message": "m", "value": 1.0,
+                "threshold": 2.0, "since": 100.0}
+        bad_threshold = {"rule": "token_rate", "severity": "alert", "device_id": "local",
+                          "session_id": "s2", "name": "rc-bad", "message": "m",
+                          "value": 1.0, "threshold": 2 ** 63, "since": 100.0}
+        result = self.store.replace_alerts([good, bad_threshold])
+        self.assertEqual(result["count"], 2)
+        alerts = {a["rule"]: a for a in self.store.live_alerts()}
+        self.assertEqual(alerts["session_age"]["threshold"], 2.0)
+        # The out-of-range threshold is coerced to None (SQL NULL), not
+        # dropped from the batch and not left to raise.
+        self.assertIsNone(alerts["token_rate"]["threshold"])
+
+    def test_replace_alerts_coerces_a_numeric_string_value(self):
+        self.store.replace_alerts([
+            {"rule": "token_rate", "severity": "alert", "device_id": "local",
+             "session_id": "s1", "name": "rc-foo", "message": "m", "value": "5400000.0",
+             "threshold": "5000000", "since": 100.0},
+        ])
+        alerts = self.store.live_alerts()
+        self.assertEqual(alerts[0]["value"], 5400000.0)
+        self.assertEqual(alerts[0]["threshold"], 5000000)
 
     def test_replace_alerts_returns_skipped_count(self):
         # Fix round 2, review Minor 6: matches every sibling upsert
@@ -1261,6 +1296,24 @@ class UsageCostAlertsTest(unittest.TestCase):
             {"session_id": "s1", "name": "rc-foo", "cwd": "/tmp", "kind": "interactive",
              "state": "idle", "started_at": 1000},
         ], now_fn=lambda: 1000.0)
+        view = self.store.fleet_view()
+        self.assertIsNone(view["sessions"][0]["usage"])
+
+    def test_fleet_view_returns_none_for_an_all_null_session_usage_row(self):
+        # Fix round 4, review residual 2: a session_usage row can itself
+        # have every numeric column NULL (upsert_session_usage's
+        # sparse-row handling accepts {"session_id": "s1"} alone, with no
+        # numeric fields at all). "No data" must have exactly one
+        # representation -- None -- not two ({"input": None, ...} being
+        # the other).
+        self.store.upsert_device({"id": "local", "name": "hub", "role": "full",
+                                   "version": "1", "claude_version": "1"})
+        self.store.upsert_sessions("local", [
+            {"session_id": "s1", "name": "rc-foo", "cwd": "/tmp", "kind": "interactive",
+             "state": "idle", "started_at": 1000},
+        ], now_fn=lambda: 1000.0)
+        result = self.store.upsert_session_usage("local", [{"session_id": "s1"}])
+        self.assertEqual(result["skipped"], 0)
         view = self.store.fleet_view()
         self.assertIsNone(view["sessions"][0]["usage"])
 
