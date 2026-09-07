@@ -304,7 +304,7 @@ function DeviceCostRow({ device, days, generatedAt, partial, hue, onOpen }: {
       >
         <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
           <span style={{ width: 7, height: 7, borderRadius: 7, background: hueColor, flex: 'none' }} />
-          <span style={{ fontSize: 13.5, fontWeight: 600 }}>{device.name}</span>
+          <span style={{ fontSize: 13.5, fontWeight: 600 }}>{device.name ?? '—'}</span>
         </div>
         {partial === true && (
           <div style={{ fontFamily: FONT_MONO, fontSize: 10, color: RT.amber, marginTop: 3 }}>

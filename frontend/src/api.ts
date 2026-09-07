@@ -144,7 +144,12 @@ export interface CostDailyBucket {
 
 export interface CostDevice {
   device_id: string;
-  name: string;
+  /** null when the underlying session/device row has no name (an adopted
+   * or external session that never reported one: store.upsert_sessions
+   * writes r.get("name") verbatim, which is None in that case). Not
+   * needed to render: device_id already identifies the row, name is a
+   * convenience label only, rendered as the usual unknown-value dash. */
+  name: string | null;
   total_effective: number;
   /** Newest day first. */
   daily: CostDailyBucket[];
@@ -186,17 +191,28 @@ export interface AlertFinding {
    * including device_concurrency, which is enabled by default: the first
    * ordinary device warning discarded the whole report. */
   session_id: string | null;
-  name: string;
+  /** null for the same reason as CostDevice.name above: guard.py takes
+   * this straight from the session/device row (guard.py's
+   * _session_finding/_device_finding both call name through
+   * _json_safe(s.get("name")) / _json_safe(d.get("name"))), and
+   * store.upsert_sessions writes that field as None whenever it was
+   * never reported. Not needed to render: device_id/session_id already
+   * identify the finding, name is a convenience label only. */
+  name: string | null;
   message: string;
-  /** None of these four are read by any component (AlertRow only reads
+  /** None of these five are read by any component (AlertRow only reads
    * rule/severity/target_type/device_id/session_id/name/message/
    * first_seen), so isAlertFinding does not require them. Typed optional
    * to match: requiring an unused field is exactly how round 2 ended up
-   * rejecting a legitimate device_concurrency finding. */
+   * rejecting a legitimate device_concurrency finding. first_seen is read
+   * (for "firing since"), but only ever through formatRelativeTime, which
+   * already renders 'unknown' for a missing/invalid timestamp, so it does
+   * not need to be required either: no display-only field should be able
+   * to discard the whole report on its own. */
   value?: number;
   threshold?: number;
   since?: number;
-  first_seen: number;
+  first_seen?: number;
   last_seen?: number;
 }
 
@@ -242,8 +258,11 @@ function isCostDailyBucket(v: unknown): v is CostDailyBucket {
 function isCostDevice(v: unknown): v is CostDevice {
   if (!v || typeof v !== 'object') return false;
   const d = v as Record<string, unknown>;
+  // name is a display-only label (device_id is the real identifier) and
+  // is genuinely null on the wire for a session/device that never
+  // reported one, so it is not required to be a non-null string.
   return typeof d.device_id === 'string'
-    && typeof d.name === 'string'
+    && (typeof d.name === 'string' || d.name === null)
     && typeof d.total_effective === 'number'
     && Array.isArray(d.daily)
     && d.daily.every(isCostDailyBucket);
@@ -270,23 +289,27 @@ function isCostReport(v: unknown): v is CostReport {
 function isAlertFinding(v: unknown): v is AlertFinding {
   if (!v || typeof v !== 'object') return false;
   const f = v as Record<string, unknown>;
-  // Only the fields AlertRow/AlertsIndicator actually read are required.
-  // session_id is null for every device-targeted finding (guard.py's
-  // _device_finding always sets it to None, not empty string), and
-  // device_concurrency, a device-targeted rule, is enabled by default, so
-  // requiring session_id to be a non-null string rejected the single most
-  // ordinary finding guard.py produces. value/threshold/since/last_seen
-  // are not read anywhere and are not required at all, for the same
-  // reason: requiring an unused field only exists to reject a payload
-  // this app would have rendered fine.
+  // Required: the identifiers (rule/target_type/device_id/session_id) and
+  // severity, the fields without which the finding is meaningless. Not
+  // required: name (a display-only label, redundant with device_id/
+  // session_id, and genuinely null on the wire for an unnamed session or
+  // device) and first_seen (display-only too, formatRelativeTime already
+  // renders 'unknown' for a bad timestamp). session_id is null for every
+  // device-targeted finding (guard.py's _device_finding always sets it to
+  // None, not empty string), and device_concurrency, a device-targeted
+  // rule, is enabled by default, so requiring session_id to be a non-null
+  // string rejected the single most ordinary finding guard.py produces.
+  // value/threshold/since/last_seen are not read anywhere and are not
+  // required at all, for the same reason as name/first_seen: no
+  // display-only or unread field should be able to discard the whole
+  // report on its own.
   return typeof f.rule === 'string'
     && typeof f.severity === 'string'
     && typeof f.target_type === 'string'
     && typeof f.device_id === 'string'
     && (typeof f.session_id === 'string' || f.session_id === null)
-    && typeof f.name === 'string'
-    && typeof f.message === 'string'
-    && typeof f.first_seen === 'number';
+    && (typeof f.name === 'string' || f.name === null)
+    && typeof f.message === 'string';
 }
 
 function isAlertsReport(v: unknown): v is AlertsReport {
