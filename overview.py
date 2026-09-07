@@ -86,16 +86,16 @@ def _derive_skew(report, hub_head, hub_version, hub_launcher_version=None):
         reasons.append("head differs from hub")
     if cfg.get("dirty"):
         reasons.append("dirty")
-    elif "config/settings.json" in (cfg.get("dirty_files") or []):
-        drift_kind = ((report.get("settings") or {}).get("settings_drift") or {}).get("kind")
-        if drift_kind == "local-edit":
-            reasons.append("settings edited locally (blocks pull)")
-        else:
-            reasons.append("settings uncommitted")
+    base_sync_kind = ((report.get("settings") or {}).get("base_sync") or {}).get("kind")
+    if base_sync_kind == "stale":
+        reasons.append("settings out of date (run bootstrap)")
     if (report.get("skills") or {}).get("deps_missing"):
         reasons.append("external skills not installed (run bootstrap)")
-    if (report.get("plugins") or {}).get("missing"):
+    plugins = report.get("plugins") or {}
+    if plugins.get("missing"):
         reasons.append("missing plugins")
+    if set(plugins.get("declared") or []) & set(plugins.get("disabled") or []):
+        reasons.append("plugins installed but disabled")
     if not (report.get("settings") or {}).get("hooks_present", True):
         reasons.append("no hooks")
     version = report.get("claude_version")
