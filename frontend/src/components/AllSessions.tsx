@@ -8,8 +8,8 @@
 // Terminal/RC/Stop affordances below gate on those fields' *presence*, not
 // on `isExternal` alone, and degrade to read-only when they're absent —
 // mirrors SessionRow.tsx's semantics so both tabs behave identically.
-import { useEffect, useMemo, useState } from 'react';
-import { RT, FONT_MONO, tintFor, hueForId } from '../tokens';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { RT, FONT_MONO, tintFor, hueForId, Z } from '../tokens';
 import { Icons, Dot, StatusPill, ExternalBadge } from './primitives';
 import { MobileHeader } from './MobileHeader';
 import { mobileActionBtn } from './mobileActionBtn';
@@ -18,6 +18,7 @@ import type { FleetDevice, FleetSession } from '../hooks/useFleet';
 import { api } from '../api';
 import { formatRelativeTime } from '../relativeTime';
 import { PreviewModal } from './PreviewModal';
+import { fixedMenuPos } from './menuPos';
 
 interface AllSessionsProps {
   onOpenDevice: (id: string) => void;
@@ -246,6 +247,18 @@ export function AllSessions({ onOpenDevice }: AllSessionsProps) {
                     )}
                   </>
                 )}
+                {/* ⋯ more menu — Copy session ID / Open Claude Code / Unstick.
+                    A non-adopted external row (no tmux pane, nothing in
+                    the menu would work) gets no menu at all. */}
+                {(!isExternal || isAdopted) && (
+                  <MoreMenu
+                    sessionId={s.session_id}
+                    rcUrl={rowRcUrl}
+                    isExternal={isExternal}
+                    pending={!!pending[`unstick-${key}`]}
+                    onUnstick={() => guard(`unstick-${key}`, () => api.unstick(s.device_id, name))}
+                  />
+                )}
                 {(!isExternal || canStopExternal) && (
                   <button
                     style={{ background: RT.panel, border: `1px solid ${RT.border}`, borderRadius: 7, width: 36, height: 36, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', marginLeft: 'auto' }}
@@ -276,5 +289,114 @@ export function AllSessions({ onOpenDevice }: AllSessionsProps) {
         />
       )}
     </div>
+  );
+}
+
+// Per-row ⋯ menu — Copy session ID / Open Claude Code / Unstick. Each item
+// gates on the field it needs rather than on isExternal alone, mirroring
+// the other row actions above: Copy needs a session_id, Open Claude Code
+// needs an rc_url, Unstick is a launcher concept (not offered for an
+// external/adopted row, same as SessionRow.tsx).
+interface MoreMenuProps {
+  sessionId?: string;
+  rcUrl?: string | null;
+  isExternal: boolean;
+  pending: boolean;
+  onUnstick: () => void;
+}
+function MoreMenu({ sessionId, rcUrl, isExternal, pending, onUnstick }: MoreMenuProps) {
+  const [open, setOpen] = useState(false);
+  const [pos, setPos] = useState<React.CSSProperties | null>(null);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const off = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    if (open) document.addEventListener('mousedown', off);
+    return () => document.removeEventListener('mousedown', off);
+  }, [open]);
+
+  const handleCopy = async () => {
+    if (!sessionId) return;
+    try { await navigator.clipboard.writeText(sessionId); } catch { /* ignore */ }
+    setOpen(false);
+  };
+  const handleOpenUrl = () => {
+    if (!rcUrl) return;
+    window.open(rcUrl, '_blank', 'noopener,noreferrer');
+    setOpen(false);
+  };
+  const handleUnstickClick = () => {
+    setOpen(false);
+    onUnstick();
+  };
+
+  return (
+    <div ref={ref} style={{ position: 'relative' }} onClick={(e) => e.stopPropagation()}>
+      <button
+        onClick={() => {
+          if (!open && ref.current) setPos(fixedMenuPos(ref.current));
+          setOpen((o) => !o);
+        }}
+        disabled={pending}
+        title="More options"
+        style={{
+          background: RT.panel, border: `1px solid ${RT.border}`, borderRadius: 7,
+          width: 36, height: 36, display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+          cursor: pending ? 'default' : 'pointer', opacity: pending ? 0.5 : 1,
+        }}
+      >
+        <Icons.more size={14} stroke={RT.textDim} />
+      </button>
+      {open && (
+        <div style={{
+          ...(pos ?? {}),
+          background: RT.panel, border: `1px solid ${RT.borderHi}`,
+          borderRadius: 8, padding: 4, zIndex: Z.menu,
+          boxShadow: '0 8px 24px rgba(0,0,0,.4)', minWidth: 180,
+        }}>
+          <MenuItem
+            icon={<Icons.copy size={12} stroke={RT.textDim} />}
+            label="Copy session ID"
+            onClick={handleCopy}
+            disabled={!sessionId}
+          />
+          <MenuItem
+            icon={<Icons.link size={12} stroke={RT.textDim} />}
+            label="Open Claude Code"
+            onClick={handleOpenUrl}
+            disabled={!rcUrl}
+          />
+          {!isExternal && (
+            <MenuItem
+              icon={<Icons.refresh size={12} stroke={RT.amber} />}
+              label="Unstick"
+              onClick={handleUnstickClick}
+            />
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function MenuItem({ icon, label, onClick, disabled }: { icon: React.ReactNode; label: string; onClick: () => void; disabled?: boolean }) {
+  return (
+    <button
+      style={{
+        width: '100%', textAlign: 'left',
+        background: 'transparent', border: 'none', borderRadius: 5,
+        padding: '9px 11px', cursor: disabled ? 'default' : 'pointer',
+        color: disabled ? RT.textLow : RT.text, fontFamily: 'inherit',
+        fontSize: 12, display: 'flex', alignItems: 'center', gap: 8,
+        opacity: disabled ? 0.5 : 1,
+      }}
+      onClick={disabled ? undefined : onClick}
+      onMouseEnter={(e) => { if (!disabled) (e.currentTarget as HTMLButtonElement).style.background = RT.bgRaised; }}
+      onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = 'transparent'; }}
+    >
+      {icon} {label}
+    </button>
   );
 }
