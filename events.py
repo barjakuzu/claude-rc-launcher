@@ -11,6 +11,17 @@ import time
 DATE_FMT = "%Y-%m-%d"
 
 
+def _date_str(fname):
+    """The "<date>" portion of a spool filename, for both the plain
+    "<date>.jsonl" and the rotated "<date>.jsonl.1" form. Returns None
+    if `fname` doesn't match either shape."""
+    if fname.endswith(".jsonl.1"):
+        return fname[:-len(".jsonl.1")]
+    if fname.endswith(".jsonl"):
+        return fname[:-len(".jsonl")]
+    return None
+
+
 def _spool_files(root):
     """Sorted (oldest first) list of spool filenames present: both
     "<date>.jsonl" and its rotated "<date>.jsonl.1" sibling (rc-hook
@@ -25,11 +36,8 @@ def _spool_files(root):
         return []
     out = []
     for n in names:
-        if n.endswith(".jsonl.1"):
-            date_str = n[:-len(".jsonl.1")]
-        elif n.endswith(".jsonl"):
-            date_str = n[:-len(".jsonl")]
-        else:
+        date_str = _date_str(n)
+        if date_str is None:
             continue
         try:
             datetime.datetime.strptime(date_str, DATE_FMT)
@@ -38,18 +46,41 @@ def _spool_files(root):
         out.append(n)
     # Sort by (date, is_rotated_first) so "<date>.jsonl.1" sorts right
     # before "<date>.jsonl" for the same date.
-    return sorted(out, key=lambda n: (n[:-len(".jsonl.1")] if n.endswith(".jsonl.1") else n[:-len(".jsonl")],
-                                       0 if n.endswith(".jsonl.1") else 1))
+    return sorted(out, key=lambda n: (_date_str(n), 0 if n.endswith(".jsonl.1") else 1))
 
 
 def _parse_cursor(cursor):
+    """Parse a cursor string. Accepts both the current 3-field form
+    "<filename>:<offset>:<inode>" and the older 2-field
+    "<filename>:<offset>" (no inode -- e.g. a cursor from before this
+    format existed, or a filesystem where stat()ing failed). Returns
+    (filename, offset, inode) with inode=None when absent/unavailable."""
     if not cursor or ":" not in cursor:
-        return None, 0
+        return None, 0, None
+    parts = cursor.split(":")
+    if len(parts) >= 3:
+        filename = ":".join(parts[:-2])
+        offset_part, inode_part = parts[-2], parts[-1]
+        try:
+            inode = int(inode_part)
+        except ValueError:
+            inode = None
+        try:
+            return filename, int(offset_part), inode
+        except ValueError:
+            return None, 0, None
     filename, _, offset = cursor.rpartition(":")
     try:
-        return filename, int(offset)
+        return filename, int(offset), None
     except ValueError:
-        return None, 0
+        return None, 0, None
+
+
+def _inode(path):
+    try:
+        return os.stat(path).st_ino
+    except OSError:
+        return None
 
 
 def read_events(root, since_cursor=None, limit=500):
@@ -60,23 +91,44 @@ def read_events(root, since_cursor=None, limit=500):
     if not files:
         return [], None
 
-    cursor_file, cursor_offset = _parse_cursor(since_cursor)
+    cursor_file, cursor_offset, cursor_inode = _parse_cursor(since_cursor)
     rotated_sibling = (cursor_file + ".1") if cursor_file else None
-    plain_file_too_small = False
+
+    rotated_away = False
     if cursor_file in files:
-        try:
-            plain_file_too_small = cursor_offset > os.path.getsize(os.path.join(root, cursor_file))
-        except OSError:
-            plain_file_too_small = False
-    if cursor_file in files and not (plain_file_too_small and rotated_sibling in files):
+        current_inode = _inode(os.path.join(root, cursor_file))
+        if cursor_inode is not None and current_inode is not None:
+            # Inode is the reliable signal: rc-hook rotates by
+            # os.replace(path, path + ".1"), which reassigns the plain
+            # filename to a brand-new inode (a fresh, empty file) and
+            # moves the old inode (and its bytes) to the ".1" name. If
+            # the plain file's inode no longer matches what the cursor
+            # was reading, rotation happened, no matter how large the
+            # fresh file has since grown.
+            rotated_away = current_inode != cursor_inode
+        else:
+            # No inode recorded (older 2-field cursor, or stat failed):
+            # fall back to the size heuristic -- only detects rotation
+            # once the fresh file is smaller than the old offset, so a
+            # fresh file that's since grown past that offset can still
+            # cause a lost/mid-line resume. This is a narrower fallback,
+            # not the primary path.
+            try:
+                rotated_away = cursor_offset > os.path.getsize(os.path.join(root, cursor_file))
+            except OSError:
+                rotated_away = False
+
+    if cursor_file in files and not (rotated_away and rotated_sibling in files):
         start_index = files.index(cursor_file)
         start_file = cursor_file
     elif rotated_sibling and rotated_sibling in files:
         # The file the cursor pointed at has since been rotated aside:
-        # rc-hook rotates by os.replace(path, path + ".1"), a pure
-        # rename, so the bytes at the cursor's offset now live in the
-        # ".1" sibling at the same offset. Resume there so the events
-        # that were moved by rotation aren't skipped.
+        # a pure rename, so the bytes at the cursor's offset now live in
+        # the ".1" sibling at the same offset. Resume there (draining it
+        # fully, since it's ordered right before the plain file in
+        # `files`) so the events that were moved by rotation aren't
+        # skipped and reading doesn't resume mid-line into unrelated
+        # fresh content.
         start_index = files.index(cursor_file + ".1")
         start_file = cursor_file + ".1"
     else:
@@ -125,12 +177,13 @@ def read_events(root, since_cursor=None, limit=500):
                 rows.append(row)
                 if len(rows) >= limit:
                     last_file, last_offset = fname, pos
-                    return rows, f"{last_file}:{last_offset}"
+                    return rows, f"{last_file}:{last_offset}:{_inode(path) or 0}"
         last_file, last_offset = fname, pos
         if truncated:
             break
 
-    return rows, f"{last_file}:{last_offset}"
+    last_path = os.path.join(root, last_file)
+    return rows, f"{last_file}:{last_offset}:{_inode(last_path) or 0}"
 
 
 def prune(root, days=7, now_fn=time.time):
@@ -145,7 +198,9 @@ def prune(root, days=7, now_fn=time.time):
     cutoff = datetime.datetime.fromtimestamp(now_fn(), datetime.timezone.utc).date() - datetime.timedelta(days=days)
     deleted = []
     for fname in files:
-        date_str = fname[:-len(".jsonl")]
+        date_str = _date_str(fname)
+        if date_str is None:
+            continue
         try:
             file_date = datetime.datetime.strptime(date_str, DATE_FMT).date()
         except ValueError:

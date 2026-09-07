@@ -32,8 +32,8 @@ class ReadEventsTest(unittest.TestCase):
         rows, cursor = events.read_events(self.root)
         self.assertEqual(len(rows), 2)
         self.assertEqual(rows[0]["event"], "SessionStart")
-        self.assertEqual(cursor, "2026-09-07.jsonl:" + str(
-            os.path.getsize(os.path.join(self.root, "2026-09-07.jsonl"))))
+        self.assertTrue(cursor.startswith("2026-09-07.jsonl:" + str(
+            os.path.getsize(os.path.join(self.root, "2026-09-07.jsonl"))) + ":"))
 
     def test_cursor_resumes_from_byte_offset(self):
         _write_day(self.root, "2026-09-07", [
@@ -128,6 +128,33 @@ class ReadEventsTest(unittest.TestCase):
         rows3, _ = events.read_events(self.root, since_cursor=cursor2)
         self.assertEqual(rows3, [])
 
+    def test_rotation_detected_by_inode_even_after_fresh_file_grows_past_old_offset(self):
+        # Important-1 fix: rotation used to be detected only by
+        # "cursor_offset > size(new file)". If the fresh file grows past
+        # the old cursor offset before the next read, that heuristic
+        # missed the rotation entirely and reading resumed mid-line into
+        # unrelated fresh content instead of draining the rotated ".1"
+        # tail first. Inode tracking catches this regardless of size.
+        path = _write_day(self.root, "2026-09-07", [
+            {"ts": 1, "event": "SessionStart", "session_id": "a", "extra": {}},
+        ])
+        _, cursor = events.read_events(self.root)
+        self.assertEqual(cursor.count(":"), 2)  # filename:offset:inode
+        rotated_tail_event = {"ts": 2, "event": "Notification", "session_id": "a", "extra": {}}
+        _write_day(self.root, "2026-09-07", [rotated_tail_event])
+        os.replace(path, path + ".1")  # pure rename, preserves bytes/offsets
+        # Fresh file grows well past the old cursor offset before the
+        # next read -- the old size-only heuristic would treat this as
+        # "no rotation" and resume mid-line into this fresh content.
+        _write_day(self.root, "2026-09-07", [
+            {"ts": i, "event": "Stop", "session_id": "a", "extra": {}} for i in range(3, 50)
+        ])
+        rows, _ = events.read_events(self.root, since_cursor=cursor, limit=1000)
+        self.assertEqual(rows[0], rotated_tail_event)
+        self.assertEqual(len(rows), 1 + 47)  # rotated tail + the 47 fresh rows
+        # No row was dropped or corrupted by a mid-line resume.
+        self.assertTrue(all(isinstance(r, dict) and "event" in r for r in rows))
+
 
 class PruneTest(unittest.TestCase):
     def setUp(self):
@@ -144,6 +171,18 @@ class PruneTest(unittest.TestCase):
             time.strptime("2026-09-07", "%Y-%m-%d")))
         self.assertEqual(deleted, ["2026-08-01.jsonl"])
         self.assertEqual(sorted(os.listdir(self.root)), ["2026-09-06.jsonl"])
+
+    def test_prune_deletes_rotated_dot1_file_past_cutoff(self):
+        # Critical fix: _spool_files widened to include "<date>.jsonl.1"
+        # but prune() used to strip only ".jsonl", so strptime("2026-08-
+        # 01.jsonl", ...) failed and rotated files were skipped forever.
+        path = _write_day(self.root, "2026-08-01", [
+            {"ts": 1, "event": "Stop", "session_id": "a", "extra": {}}])
+        os.replace(path, path + ".1")
+        deleted = events.prune(self.root, days=7, now_fn=lambda: time.mktime(
+            time.strptime("2026-09-07", "%Y-%m-%d")))
+        self.assertEqual(deleted, ["2026-08-01.jsonl.1"])
+        self.assertEqual(os.listdir(self.root), [])
 
 
 if __name__ == "__main__":
