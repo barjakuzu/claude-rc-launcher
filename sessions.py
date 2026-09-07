@@ -256,7 +256,20 @@ def _attach_claude_row(launcher_row, claude_row):
     claude.state == "blocked"), so mirror those two fields up so a
     launcher row can actually derive busy/needs_attention. Skip the
     status mirror once tmux already reports the session dead - "dead"
-    must win over a stale "busy"."""
+    must win over a stale "busy".
+
+    Also sets the row's top-level started_at from the claude row's
+    already-normalized (agents.normalize_started_at) value. A claude
+    started_at, when present, WINS OUTRIGHT over tmux's created_at --
+    NOT the earlier of the two. Restart-in-place is exactly the case
+    where the old tmux created_at is not this session's age: a two-
+    minute-old claude process inside a twelve-day-old tmux session is a
+    two-minute-old session, and taking the minimum of the two would
+    misreport it as twelve days old (a false runaway flag, and later an
+    unwanted kill). tmux created_at is used only as a fallback when there
+    is no claude started_at at all. A known started_at is never
+    overwritten with None. created_at itself stays on the row unchanged
+    -- other code and the UI read it."""
     launcher_row["claude"] = {
         "status": claude_row.get("status"),
         "state": claude_row.get("state"),
@@ -268,6 +281,14 @@ def _attach_claude_row(launcher_row, claude_row):
         launcher_row["waiting_for"] = claude_row.get("waiting_for")
     if claude_row.get("status") == "busy" and launcher_row.get("status") != "dead":
         launcher_row["status"] = "busy"
+    claude_started = claude_row.get("started_at")
+    tmux_created = launcher_row.get("created_at")
+    if claude_started is not None:
+        launcher_row["started_at"] = claude_started
+    elif tmux_created is not None:
+        launcher_row["started_at"] = tmux_created
+    # else: neither source has a value -- leave started_at as it was
+    # (never overwrite a known value with None).
 
 
 def list_rc_sessions():
@@ -277,7 +298,13 @@ def list_rc_sessions():
 
     Launcher rows also carry created_at (tmux's #{session_created} epoch
     seconds, or None if unparseable) so callers deriving a "starting"
-    state can bound it by session age instead of forever."""
+    state can bound it by session age instead of forever.
+
+    Every row (launcher or external) also carries a top-level started_at,
+    the honest "how long has this been running" answer in epoch seconds --
+    see _attach_claude_row for how launcher rows with a matched claude row
+    get theirs. A launcher row with no matched claude row falls back to
+    its own created_at so it is never left blank."""
     r = subprocess.run(
         ["tmux", "list-sessions", "-F", "#{session_name}\t#{session_created}"],
         capture_output=True, text=True,
@@ -313,6 +340,10 @@ def list_rc_sessions():
             claude_row = claude_rows_by_id.get(rc_session_id) if rc_session_id else None
             if claude_row:
                 _attach_claude_row(s, claude_row)
+            else:
+                # No claude row matched (yet) -- fall back to tmux's own
+                # created_at rather than leaving started_at blank.
+                s["started_at"] = created_at
             # Every row must carry a stable top-level session_id before it
             # leaves the device -- the hub store's natural key -- or
             # store.upsert_sessions silently skips it (see
@@ -371,6 +402,11 @@ def list_rc_sessions():
             "cwd": row["cwd"],
             "pid": row["pid"],
             "waiting_for": row["waiting_for"],
+            # No tmux row exists for a purely-external session, so there
+            # is no created_at to compare against -- the claude row's own
+            # (already normalized by agents.py) started_at is the only
+            # source and is used as-is.
+            "started_at": row.get("started_at"),
             "claude": {"state": row.get("state")},
             "tmux": None,
             "rc_url": None,

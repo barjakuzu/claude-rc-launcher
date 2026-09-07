@@ -20,7 +20,7 @@ PRUNE_INTERVAL_SECONDS = 3600  # launcher-side path for events.prune (see
 _cache = {}  # key: (since, role) -> {"at": float, "result": dict}
              # bounded to at most one entry per role (see _remember)
 
-_METADATA_SESSION_FIELDS = ("session_id", "name", "state", "started_at", "kind")
+_METADATA_SESSION_FIELDS = ("session_id", "name", "state", "started_at", "kind", "status")
 _METADATA_EVENT_FIELDS = ("ts", "event")
 
 EVENTS_LIMIT = 500

@@ -10,7 +10,12 @@ import sessions
 
 EXTERNAL_ROW = {
     "session_id": "abc-123", "name": "portugal", "cwd": "/home/user/proj",
-    "kind": "interactive", "status": "idle", "started_at": 1757100000000,
+    "kind": "interactive", "status": "idle",
+    # Already-normalized epoch SECONDS, as agents.normalize_started_at
+    # would produce -- not the raw millisecond value `claude` reports.
+    # This fixture feeds directly into sessions.py (bypassing agents.py),
+    # so it must look like agents.py's output, not claude's raw input.
+    "started_at": 1757100000.0,
     "pid": 2003, "waiting_for": None, "state": None,
 }
 
@@ -307,3 +312,77 @@ class PaneMatchedRcRowMergeTest(unittest.TestCase):
         self.assertEqual(id_rows[0]["claude"], pane_rows[0]["claude"])
         self.assertEqual(id_rows[0]["waiting_for"], pane_rows[0]["waiting_for"])
         self.assertEqual(id_rows[0]["status"], pane_rows[0]["status"])
+
+
+class AttachClaudeRowStartedAtTest(unittest.TestCase):
+    """_attach_claude_row sets the launcher row's top-level started_at from
+    the (already-normalized, epoch seconds) claude row started_at. A
+    claude started_at, when present, WINS OUTRIGHT over tmux's created_at
+    -- NOT the earlier of the two (min() was tried and rejected: a claude
+    session two minutes old inside a twelve-day-old tmux session, i.e.
+    restart-in-place, must report two minutes, not twelve days). tmux
+    created_at is used only as a fallback when there is no claude
+    started_at at all -- see sessions._attach_claude_row for the full
+    reasoning."""
+
+    def test_sets_started_at_from_claude_row_when_no_tmux_created_at(self):
+        launcher_row = {"name": "rc-portugal", "created_at": None}
+        claude_row = {"started_at": 500.0}
+        sessions._attach_claude_row(launcher_row, claude_row)
+        self.assertEqual(launcher_row["started_at"], 500.0)
+
+    def test_claude_started_at_wins_even_when_earlier_than_tmux_created_at(self):
+        launcher_row = {"name": "rc-portugal", "created_at": 1000.0}
+        claude_row = {"started_at": 500.0}
+        sessions._attach_claude_row(launcher_row, claude_row)
+        self.assertEqual(launcher_row["started_at"], 500.0)
+
+    def test_claude_started_at_wins_even_when_later_than_tmux_created_at(self):
+        # The restart-in-place case: tmux's created_at is much OLDER
+        # (twelve days vs. two minutes in the real incident this guards
+        # against). The claude value must still win outright -- taking
+        # the minimum here would misreport a two-minute-old session as
+        # twelve days old.
+        launcher_row = {"name": "rc-portugal", "created_at": 200.0}
+        claude_row = {"started_at": 900.0}
+        sessions._attach_claude_row(launcher_row, claude_row)
+        self.assertEqual(launcher_row["started_at"], 900.0)
+
+    def test_falls_back_to_tmux_created_at_when_claude_started_at_is_none(self):
+        launcher_row = {"name": "rc-portugal", "created_at": 200.0}
+        claude_row = {"started_at": None}
+        sessions._attach_claude_row(launcher_row, claude_row)
+        self.assertEqual(launcher_row["started_at"], 200.0)
+
+    def test_does_not_overwrite_a_known_started_at_with_none(self):
+        launcher_row = {"name": "rc-portugal", "created_at": None, "started_at": 700.0}
+        claude_row = {"started_at": None}
+        sessions._attach_claude_row(launcher_row, claude_row)
+        self.assertEqual(launcher_row["started_at"], 700.0)
+
+    def test_leaves_started_at_unset_when_neither_source_has_a_value(self):
+        launcher_row = {"name": "rc-portugal", "created_at": None}
+        claude_row = {"started_at": None}
+        sessions._attach_claude_row(launcher_row, claude_row)
+        self.assertNotIn("started_at", launcher_row)
+
+
+class LauncherRowWithoutClaudeMatchStartedAtTest(unittest.TestCase):
+    """A launcher (rc-*) tmux session with no matching claude row (not
+    started yet, or `claude agents --json` unavailable) must still get a
+    usable started_at -- falling back to tmux's own created_at rather than
+    being left blank, or an age-based rule could never fire for it."""
+
+    def setUp(self):
+        sessions._adoption_url_cache.clear()
+
+    def test_falls_back_to_created_at(self):
+        run_result = mock.Mock(returncode=0, stdout="rc-portugal\t1700000000\n")
+        with mock.patch("sessions.subprocess.run", return_value=run_result), \
+             mock.patch("sessions.agents.list_claude_sessions", return_value=[]), \
+             mock.patch("sessions.get_session_env", return_value=None):
+            rows = sessions.list_rc_sessions()
+
+        launcher_row = next(r for r in rows if r["name"] == "rc-portugal")
+        self.assertEqual(launcher_row["started_at"], 1700000000)
+        self.assertEqual(launcher_row["created_at"], 1700000000)

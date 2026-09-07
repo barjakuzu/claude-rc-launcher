@@ -1,6 +1,7 @@
 """Wraps `claude agents --json` — the device-local source of truth for
 every live Claude Code session, launcher-started or not."""
 import json
+import math
 import subprocess
 import threading
 import time
@@ -9,6 +10,52 @@ import compat
 from config import CLAUDE_BIN
 
 CACHE_TTL_SECONDS = 30
+
+# `claude agents --json` reports startedAt in epoch MILLISECONDS (verified
+# on a production box: a real value looks like 1787677948238), but nothing
+# guarantees that stays true forever, and a stale/odd `claude` build could
+# still emit epoch seconds. A value at or above this threshold is treated
+# as milliseconds; a value from MIN_STARTED_AT_SECONDS up to (but not
+# including) this threshold is treated as already-seconds. Anything else
+# (0, negative, too small to be a real timestamp, NaN, inf) is not usable.
+MS_THRESHOLD = 1e11
+MIN_STARTED_AT_SECONDS = 1e9
+
+
+def normalize_started_at(value):
+    """Convert a raw `startedAt` value to epoch SECONDS as a float, or
+    None if it is not a usable timestamp. Never raises.
+
+    Accepts numeric strings (a JSON producer may quote the number).
+    Rejects bool (True/False are technically ints but are never
+    timestamps), NaN, inf, and anything else that isn't a finite number
+    in a plausible epoch range."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, str):
+        try:
+            value = float(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+    elif isinstance(value, (int, float)):
+        # An int with roughly 308+ digits can't convert to a float at all
+        # ("int too large to convert to float") -- not a plausible
+        # timestamp either way, so treat it the same as any other
+        # not-a-usable-value case instead of letting the OverflowError
+        # escape this function's "never raises" contract.
+        try:
+            value = float(value)
+        except OverflowError:
+            return None
+    else:
+        return None
+    if not math.isfinite(value):
+        return None
+    if value >= MS_THRESHOLD:
+        return value / 1000.0
+    if value >= MIN_STARTED_AT_SECONDS:
+        return value
+    return None
 
 # Cache is keyed on the claude_bin it was fetched for (a caller passing a
 # different binary must not be served rows fetched for another one).
@@ -30,13 +77,18 @@ def _normalize(raw):
     session_id = raw.get("sessionId")
     if not session_id:
         return None
+    started_at_raw = raw.get("startedAt")
     return {
         "session_id": session_id,
         "name": raw.get("name"),
         "cwd": raw.get("cwd"),
         "kind": raw.get("kind"),
         "status": raw.get("status"),
-        "started_at": raw.get("startedAt"),
+        "started_at": normalize_started_at(started_at_raw),
+        # The raw value as `claude` reported it, untouched, so a future
+        # debugging session can see what the CLI actually said instead of
+        # only the normalized (or None) result.
+        "started_at_raw": started_at_raw,
         "pid": raw.get("pid"),
         "waiting_for": raw.get("waitingFor"),
         # Background-row-only field (working|blocked|done|failed|stopped).
