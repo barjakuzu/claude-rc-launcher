@@ -95,6 +95,27 @@ def default_rules():
     return copy.deepcopy(DEFAULT_RULES)
 
 
+def _is_finite_threshold(value):
+    """True for a value that is safe to use as a numeric threshold: an
+    int (any size) or a finite float, and not a bool (bool is technically
+    a subclass of int in Python - excluded explicitly so a stray `true`
+    doesn't silently become 1). json.loads accepts bare
+    NaN/Infinity/-Infinity, so a float must also be finite - a NaN
+    threshold would compare as never-exceeded yet still surface in
+    messages like "over the nan h limit". The isfinite check applies to
+    floats only: math.isfinite() itself raises OverflowError on a huge
+    JSON integer (more digits than fit in a float's range), and every
+    Python int is finite by construction anyway, so there is nothing to
+    check for one."""
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int):
+        return True
+    if isinstance(value, float):
+        return math.isfinite(value)
+    return False
+
+
 def _merge_rules(raw):
     """Merge one parsed JSON value over the defaults.
 
@@ -136,15 +157,7 @@ def _merge_rules(raw):
                                 f"rules.{rule_name}.enabled must be a bool, "
                                 f"kept default")
                     else:
-                        # Numeric threshold. bool is technically a subclass
-                        # of int in Python - excluded explicitly so a stray
-                        # `true` doesn't silently become 1. json.loads
-                        # accepts bare NaN/Infinity/-Infinity, so isfinite
-                        # is required too - a NaN threshold would compare
-                        # as never-exceeded yet still surface in messages
-                        # like "over the nan h limit".
-                        if (isinstance(value, bool) or not isinstance(value, (int, float))
-                                or not math.isfinite(value)):
+                        if not _is_finite_threshold(value):
                             problems.append(
                                 f"rules.{rule_name}.{key} must be a finite number, "
                                 f"kept default")
@@ -284,14 +297,27 @@ def _finite_or_none(v):
     return v if _is_number(v) else None
 
 
+def _json_safe(v):
+    """Same NaN/inf sanitization as _finite_or_none, but for identity
+    fields (device_id, session_id, name) that are ordinarily strings, not
+    numbers: only a value that IS itself a non-finite float is nulled
+    out; every other type (str, None, int, ...) passes through
+    unchanged. _finite_or_none can't be reused here directly - it treats
+    "not a number at all" the same as "a bad number", which would null
+    out every normal string device_id/session_id/name."""
+    if isinstance(v, float) and not math.isfinite(v):
+        return None
+    return v
+
+
 def _session_finding(rule, severity, s, message, value, threshold, since):
     return {
         "rule": rule,
         "severity": severity,
         "target_type": "session",
-        "device_id": s.get("device_id"),
-        "session_id": s.get("session_id"),
-        "name": s.get("name"),
+        "device_id": _json_safe(s.get("device_id")),
+        "session_id": _json_safe(s.get("session_id")),
+        "name": _json_safe(s.get("name")),
         "message": message,
         "value": _finite_or_none(value),
         "threshold": _finite_or_none(threshold),
@@ -304,9 +330,9 @@ def _device_finding(rule, severity, d, message, value, threshold, since):
         "rule": rule,
         "severity": severity,
         "target_type": "device",
-        "device_id": d.get("id"),
+        "device_id": _json_safe(d.get("id")),
         "session_id": None,
-        "name": d.get("name"),
+        "name": _json_safe(d.get("name")),
         "message": message,
         "value": _finite_or_none(value),
         "threshold": _finite_or_none(threshold),
@@ -510,6 +536,37 @@ def _is_ignored(f, ignore_devices, ignore_sessions, ignore_names):
     return False
 
 
+def _validated_rule_cfg(name, rc):
+    """A per-rule config dict with "enabled" and every threshold key
+    guaranteed sane, falling back key by key to _DEFAULTS[name] exactly
+    the way _merge_rules validates a loaded file - but this runs on
+    whatever `rc` a caller handed evaluate() directly, which may have
+    skipped _merge_rules entirely (evaluate()'s `rules` argument is not
+    required to have come from load_rules()).
+
+    Without this, a caller-supplied NaN or bool threshold reaches the
+    rule function unvalidated: the finding's own `threshold` field is
+    sanitized at construction (see _finite_or_none), but the MESSAGE is
+    built from the raw value beforehand, so the two would disagree - a
+    message reading "over the nan h limit" or "over the 1.0 h limit"
+    next to a `"threshold": null` field. Validating here, before the
+    rule ever sees the value, means the message and the field are always
+    built from the same (real, defaulted-if-invalid) number."""
+    defaults = _DEFAULTS[name]
+    out = dict(defaults)
+    if not isinstance(rc, dict):
+        return out
+    for key, value in rc.items():
+        if key not in defaults:
+            continue
+        if key == "enabled":
+            if isinstance(value, bool):
+                out[key] = value
+        elif _is_finite_threshold(value):
+            out[key] = value
+    return out
+
+
 def evaluate(snapshot, rules=None, now_fn=time.time):
     """Evaluate every enabled rule against `snapshot`.
 
@@ -609,9 +666,8 @@ def evaluate(snapshot, rules=None, now_fn=time.time):
     findings = []
 
     for name, func in _SESSION_RULES:
-        rc = rules_cfg.get(name)
-        rc = rc if isinstance(rc, dict) else {}
-        if not rc.get("enabled", _DEFAULTS[name]["enabled"]):
+        rc = _validated_rule_cfg(name, rules_cfg.get(name))
+        if not rc["enabled"]:
             continue
         for s in sessions:
             if not isinstance(s, dict):
@@ -653,9 +709,8 @@ def evaluate(snapshot, rules=None, now_fn=time.time):
         concurrency_targets.append({"id": did})
 
     for name, func in _DEVICE_RULES:
-        rc = rules_cfg.get(name)
-        rc = rc if isinstance(rc, dict) else {}
-        if not rc.get("enabled", _DEFAULTS[name]["enabled"]):
+        rc = _validated_rule_cfg(name, rules_cfg.get(name))
+        if not rc["enabled"]:
             continue
         targets = concurrency_targets if name == "device_concurrency" else devices
         for d in targets:
