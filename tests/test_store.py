@@ -830,14 +830,17 @@ class UsageCostAlertsTest(unittest.TestCase):
 
     def test_upsert_session_usage_skips_row_with_non_coercible_numeric_field(self):
         # Fix round 2, review Important 2: a device payload is untrusted --
-        # None, NaN, +/-inf and a non-numeric type must all be rejected for
-        # any of the numeric fields, and the whole row dropped rather than
-        # written with a partial value.
+        # NaN, +/-inf and a non-numeric type, PRESENT in a numeric field,
+        # must be rejected and the whole row dropped rather than written
+        # with a partial value. None is deliberately NOT in this list --
+        # see test_upsert_session_usage_none_field_is_absent_not_invalid
+        # below (fix round 3, review Important 2: a present field of None
+        # is "absent", not "bad", and must not cause a skip).
         self.store.upsert_sessions("local", [
             {"session_id": "s1", "name": "rc-foo", "cwd": "/tmp", "kind": "interactive",
              "state": "idle"},
         ])
-        bad_values = (None, float("nan"), float("inf"), float("-inf"), "n/a",
+        bad_values = (float("nan"), float("inf"), float("-inf"), "n/a",
                       [1], {"a": 1}, True)
         for bad in bad_values:
             with self.subTest(bad=bad):
@@ -850,6 +853,70 @@ class UsageCostAlertsTest(unittest.TestCase):
         # partially-written or garbage value.
         view = self.store.fleet_view()
         self.assertIsNone(view["sessions"][0]["usage"])
+
+    def test_upsert_session_usage_none_field_is_absent_not_invalid(self):
+        # Fix round 3, review Important 2 (a regression fix round 2's own
+        # change introduced): a numeric field present as None is treated
+        # the same as an absent field -- stored as NULL, never a reason to
+        # drop the whole row.
+        self.store.upsert_sessions("local", [
+            {"session_id": "s1", "name": "rc-foo", "cwd": "/tmp", "kind": "interactive",
+             "state": "idle"},
+        ])
+        result = self.store.upsert_session_usage("local", [
+            {"session_id": "s1", "input": None, "cache_read": 1, "cache_write": 1,
+             "output": 1, "effective": 100, "last_ts": None},
+        ])
+        self.assertEqual(result["skipped"], 0)
+        view = self.store.fleet_view()
+        self.assertEqual(view["sessions"][0]["usage"]["effective"], 100)
+        self.assertIsNone(view["sessions"][0]["usage"]["input"])
+        self.assertIsNone(view["sessions"][0]["usage"]["last_ts"])
+
+    def test_upsert_session_usage_accepts_the_literal_metadata_role_shape(self):
+        # Fix round 3, review Important 2: CONTRACT.md section 1's
+        # metadata role sends exactly {"session_id", "effective"} for
+        # per-session usage -- nothing else. This device must still
+        # contribute its effective total, per "contributes to per-device
+        # totals only, never to the projects table" (metadata never
+        # reports cost_daily/project data at all, only this).
+        self.store.upsert_sessions("local", [
+            {"session_id": "hashed-abc", "name": None, "cwd": None, "kind": "interactive",
+             "state": "idle"},
+        ])
+        result = self.store.upsert_session_usage("local", [
+            {"session_id": "hashed-abc", "effective": 43361000},
+        ])
+        self.assertEqual(result["skipped"], 0)
+        view = self.store.fleet_view()
+        usage = view["sessions"][0]["usage"]
+        self.assertEqual(usage["effective"], 43361000)
+        self.assertIsNone(usage["input"])
+        self.assertIsNone(usage["cache_read"])
+        self.assertIsNone(usage["cache_write"])
+        self.assertIsNone(usage["output"])
+        self.assertIsNone(usage["last_ts"])
+
+    def test_upsert_session_usage_rejects_out_of_range_ints_without_losing_other_rows_in_the_batch(self):
+        # Fix round 3, review Important 1: an out-of-range int must not
+        # raise OverflowError out of the whole batch.
+        self.store.upsert_sessions("local", [
+            {"session_id": "good", "name": "rc-good", "cwd": "/tmp", "kind": "interactive",
+             "state": "idle"},
+            {"session_id": "bad", "name": "rc-bad", "cwd": "/tmp", "kind": "interactive",
+             "state": "idle"},
+        ])
+        result = self.store.upsert_session_usage("local", [
+            {"session_id": "good", "input": 1, "cache_read": 1, "cache_write": 1,
+             "output": 1, "effective": 100, "last_ts": 1.0},
+            {"session_id": "bad", "input": 1, "cache_read": 1, "cache_write": 1,
+             "output": 1, "effective": 2 ** 63, "last_ts": 1.0},
+        ])
+        self.assertEqual(result["skipped"], 1)
+        view = self.store.fleet_view()
+        by_id = {s["session_id"]: s["usage"] for s in view["sessions"]}
+        self.assertEqual(by_id["good"]["effective"], 100)
+        self.assertIsNone(by_id["bad"])
 
     def test_upsert_session_usage_coerces_numeric_strings(self):
         result = self.store.upsert_session_usage("local", [
@@ -900,8 +967,11 @@ class UsageCostAlertsTest(unittest.TestCase):
     def test_upsert_cost_daily_skips_row_with_non_coercible_numeric_field(self):
         # Fix round 2, review Important 2: this is the exact probe that
         # broke /api/cost fleet-wide in the review -- effective: "n/a" must
-        # never reach the table, not raise later out of cost_view.
-        bad_values = (None, float("nan"), float("inf"), float("-inf"), "n/a",
+        # never reach the table, not raise later out of cost_view. None is
+        # deliberately NOT in this list -- see
+        # test_upsert_cost_daily_none_field_is_absent_not_invalid below
+        # (fix round 3: a present field of None is "absent", not "bad").
+        bad_values = (float("nan"), float("inf"), float("-inf"), "n/a",
                       [1], {"a": 1}, True)
         for bad in bad_values:
             with self.subTest(bad=bad):
@@ -926,6 +996,67 @@ class UsageCostAlertsTest(unittest.TestCase):
         view = self.store.cost_view(days=30)
         dev = next(d for d in view["devices"] if d["device_id"] == "local")
         self.assertEqual(dev["total_effective"], 5000)
+
+    def test_upsert_cost_daily_none_field_is_absent_not_invalid(self):
+        # Fix round 3, review Important 2 (a regression fix round 2's own
+        # change introduced): a numeric field present as None is treated
+        # the same as an absent field -- stored as NULL (cost_view's `or
+        # 0` already handles that), never a reason to drop the whole row.
+        result = self.store.upsert_cost_daily("local", [
+            {"day": _day(0), "project": "p1", "input": None, "cache_read": 1,
+             "cache_write": 1, "output": 1, "effective": 100},
+        ])
+        self.assertEqual(result["skipped"], 0)
+        view = self.store.cost_view(days=30)
+        dev = next(d for d in view["devices"] if d["device_id"] == "local")
+        self.assertEqual(dev["total_effective"], 100)
+
+    def test_upsert_cost_daily_accepts_the_literal_metadata_role_shape(self):
+        # Fix round 3, review Important 2: CONTRACT.md section 1's
+        # metadata role reports cost_daily rows as exactly {"day",
+        # "effective"} -- no project (stored as ""), no
+        # input/cache_read/cache_write/output at all. The row must still
+        # contribute to the device's own total ("contributes to per-device
+        # totals only, never to the projects table" -- a "" project is
+        # still technically a projects-table row, but a metadata device
+        # never contributes a REAL project name, matching the contract's
+        # intent that its data is device-level, not per-project).
+        result = self.store.upsert_cost_daily("local", [
+            {"day": _day(0), "effective": 43361000},
+        ])
+        self.assertEqual(result["skipped"], 0)
+        view = self.store.cost_view(days=30)
+        dev = next(d for d in view["devices"] if d["device_id"] == "local")
+        self.assertEqual(dev["total_effective"], 43361000)
+        self.assertEqual(dev["daily"][0]["input"], 0)  # NULL summed via `or 0`
+
+    def test_upsert_cost_daily_rejects_out_of_range_ints_without_losing_other_rows_in_the_batch(self):
+        # Fix round 3, review Important 1: an out-of-range int must not
+        # raise OverflowError out of the whole batch (rolling back rows
+        # that coerced fine).
+        result = self.store.upsert_cost_daily("local", [
+            {"day": _day(0), "project": "good", "input": 1, "cache_read": 1,
+             "cache_write": 1, "output": 1, "effective": 100},
+            {"day": _day(0), "project": "bad-2-63", "input": 1, "cache_read": 1,
+             "cache_write": 1, "output": 1, "effective": 2 ** 63},
+            {"day": _day(0), "project": "bad-10-30", "input": 1, "cache_read": 1,
+             "cache_write": 1, "output": 1, "effective": 10 ** 30},
+            {"day": _day(0), "project": "bad-20-digit-string", "input": 1, "cache_read": 1,
+             "cache_write": 1, "output": 1, "effective": "99999999999999999999"},
+        ])
+        self.assertEqual(result["skipped"], 3)
+        view = self.store.cost_view(days=30)
+        projects = {p["project"] for p in view["projects"]}
+        self.assertEqual(projects, {"good"})
+
+    def test_upsert_cost_daily_accepts_the_exact_sqlite_int64_boundary(self):
+        result = self.store.upsert_cost_daily("local", [
+            {"day": _day(0), "project": "p-max", "input": 0, "cache_read": 0,
+             "cache_write": 0, "output": 0, "effective": 2 ** 63 - 1},
+            {"day": _day(0), "project": "p-min", "input": -(2 ** 63), "cache_read": 0,
+             "cache_write": 0, "output": 0, "effective": 1},
+        ])
+        self.assertEqual(result["skipped"], 0)
 
     def test_upsert_cost_daily_bad_row_from_one_device_does_not_break_others(self):
         # Fix round 2, review Important 2: a bad value from one device must
