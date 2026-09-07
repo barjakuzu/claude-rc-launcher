@@ -126,6 +126,11 @@ export function PreviewModal({ deviceId, name, mode, sessionId, onClose }: Previ
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [showHistory, setShowHistory] = useState(false);
   const [status, setStatus] = useState<string>('connecting…');
+  // After 3 consecutive failed polls, show an inline "device unreachable"
+  // notice and back the poll interval off (700ms -> 2s -> 5s, capped)
+  // until a poll succeeds again.
+  const [deviceUnreachable, setDeviceUnreachable] = useState(false);
+  const pollFailuresRef = useRef(0);
   // Transport: try WebSocket streaming first (instant echo, fluid output);
   // fall back to capture-pane polling if WS can't connect.
   const [transport, setTransport] = useState<'connecting' | 'ws' | 'poll'>('connecting');
@@ -416,6 +421,9 @@ export function PreviewModal({ deviceId, name, mode, sessionId, onClose }: Previ
   useEffect(() => {
     if (!autoRefresh || transport !== 'poll') return;
     let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const FAST_INTERVAL = 700;
+    const BACKOFF_STEPS = [700, 2000, 5000];
     const fetchOnce = async () => {
       try {
         const { cols, rows } = sizeRef.current;
@@ -428,6 +436,10 @@ export function PreviewModal({ deviceId, name, mode, sessionId, onClose }: Previ
             : undefined,
         );
         if (cancelled || !mounted.current) return;
+        // Poll succeeded — clear failure streak and restore the fast
+        // interval immediately.
+        pollFailuresRef.current = 0;
+        setDeviceUnreachable(false);
         const output: string = data?.output ?? '';
         const cursor = data?.cursor as { x: number; y: number; visible: boolean } | null;
         altRef.current = !!data?.alt;
@@ -461,14 +473,30 @@ export function PreviewModal({ deviceId, name, mode, sessionId, onClose }: Previ
           setStatus('live');
         }
       } catch {
-        if (mounted.current) setStatus('reconnecting…');
+        if (cancelled || !mounted.current) return;
+        pollFailuresRef.current += 1;
+        setStatus('reconnecting…');
+        if (pollFailuresRef.current >= 3) setDeviceUnreachable(true);
+      } finally {
+        if (!cancelled) {
+          const step = Math.min(pollFailuresRef.current, BACKOFF_STEPS.length - 1);
+          const delay = pollFailuresRef.current >= 3 ? BACKOFF_STEPS[step] : FAST_INTERVAL;
+          timer = setTimeout(fetchOnce, delay);
+        }
       }
     };
     // Let input handlers trigger an immediate refresh (typed echo, PgUp).
-    refreshRef.current = () => { if (!cancelled) fetchOnce(); };
+    refreshRef.current = () => {
+      if (cancelled) return;
+      clearTimeout(timer);
+      fetchOnce();
+    };
     fetchOnce();
-    const id = setInterval(fetchOnce, 700);
-    return () => { cancelled = true; clearInterval(id); refreshRef.current = () => {}; };
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+      refreshRef.current = () => {};
+    };
   }, [autoRefresh, deviceId, name, transport]);
 
   // Esc closes
@@ -590,6 +618,17 @@ export function PreviewModal({ deviceId, name, mode, sessionId, onClose }: Previ
             }}
           />
           {showHistory && <TranscriptView deviceId={deviceId} name={name} />}
+          {!showHistory && transport === 'poll' && deviceUnreachable && (
+            <div style={{
+              position: 'absolute', top: 12, left: '50%', transform: 'translateX(-50%)',
+              zIndex: Z.raised, background: RT.panel, border: `1px solid ${RT.amber}`,
+              borderRadius: 8, padding: '7px 14px', fontFamily: FONT_MONO, fontSize: 11.5,
+              color: RT.amber, boxShadow: '0 8px 20px rgba(0,0,0,.45)',
+              display: 'inline-flex', alignItems: 'center', gap: 6, whiteSpace: 'nowrap',
+            }}>
+              device unreachable, retrying…
+            </div>
+          )}
           {!showHistory && status === 'paused (scrolled)' && (
             <button
               onClick={() => { scrollIntentRef.current = 0; termRef.current?.scrollToBottom(); }}
