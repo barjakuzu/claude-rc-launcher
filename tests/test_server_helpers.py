@@ -1462,11 +1462,93 @@ class AuditLogTest(unittest.TestCase):
             self.assertIn("_audit(", next_block, f"{name} branch missing _audit() call")
 
 
-class ApiAuditRouteTest(unittest.TestCase):
-    def test_get_api_audit_is_hub_only(self):
-        import inspect
-        src = inspect.getsource(server.Handler.do_GET)
-        self.assertIn('"/api/audit"', src)
+class ApiRouteQueryStringToleranceTest(unittest.TestCase):
+    """Regression test: the hub's exact-match GET routes must match on the
+    query-stripped path, not on self.path verbatim. A request carrying a
+    query string (as the SPA's /api/audit?limit=N call always does) used to
+    404 because these routes compared against a path that still had the
+    query string attached."""
+
+    def setUp(self):
+        self._role = server.config.RC_ROLE
+        server.config.RC_ROLE = "full"
+        import tempfile
+        self.tmp = tempfile.TemporaryDirectory()
+        server.HUB_STORE = store.Store(os.path.join(self.tmp.name, "hub.db"))
+        self._orig_get_cached = server._get_cached_config_report
+
+    def tearDown(self):
+        server.config.RC_ROLE = self._role
+        server.HUB_STORE.close()
+        server.HUB_STORE = None
+        self.tmp.cleanup()
+        server._get_cached_config_report = self._orig_get_cached
+
+    def _make_handler(self, path):
+        h = server.Handler.__new__(server.Handler)
+        h.path = path
+        h.headers = {}
+        h.client_address = ("127.0.0.1", 12345)
+        h.rfile = io.BytesIO(b"")
+        h.wfile = io.BytesIO()
+        return h
+
+    def _get_json(self, path):
+        h = self._make_handler(path)
+        captured = {}
+
+        def fake_json(data, code=200, _captured=captured):
+            _captured["data"] = data
+            _captured["code"] = code
+            return None
+
+        h._json = fake_json
+        with mock.patch.object(server, "_check_auth", return_value=True):
+            h.do_GET()
+        self.assertIn("data", captured, f"{path} did not reach a _json() response")
+        return captured["data"], captured.get("code", 200)
+
+    def test_api_fleet_ok_with_and_without_query_string(self):
+        for path in ("/api/fleet", "/api/fleet?x=1"):
+            data, code = self._get_json(path)
+            self.assertEqual(code, 200, path)
+            self.assertIn("devices", data, path)
+            self.assertIn("sessions", data, path)
+
+    def test_api_audit_ok_with_and_without_query_string(self):
+        for path in ("/api/audit", "/api/audit?limit=5"):
+            data, code = self._get_json(path)
+            self.assertEqual(code, 200, path)
+            self.assertIn("audit", data, path)
+
+    def test_api_audit_honours_limit_query_param(self):
+        for i in range(5):
+            server.HUB_STORE.add_audit(actor="tok", action=f"action{i}",
+                                        target="rc-foo", device_id="local")
+        data, code = self._get_json("/api/audit?limit=2")
+        self.assertEqual(code, 200)
+        self.assertEqual(len(data["audit"]), 2)
+
+    def test_api_config_matrix_ok_with_and_without_query_string(self):
+        server._get_cached_config_report = lambda: {}
+        with mock.patch.object(server.overview, "build_config_matrix",
+                                return_value={"ok": True}):
+            for path in ("/api/config-matrix", "/api/config-matrix?x=1"):
+                data, code = self._get_json(path)
+                self.assertEqual(code, 200, path)
+                self.assertEqual(data, {"ok": True}, path)
+
+
+class ShouldProxyQueryStringTest(unittest.TestCase):
+    def test_should_proxy_classifies_correctly_with_query_string(self):
+        h = server.Handler.__new__(server.Handler)
+        h.path = "/some/other/path?x=1"
+        self.assertTrue(h._should_proxy("some-device"))
+
+    def test_should_proxy_hub_only_route_not_proxied_with_query_string(self):
+        h = server.Handler.__new__(server.Handler)
+        h.path = "/api/audit?limit=5"
+        self.assertFalse(h._should_proxy("some-device"))
 
 
 if __name__ == "__main__":

@@ -1216,7 +1216,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if static_path.startswith("/static/"):
             return self._serve_static(static_path)
 
-        path = self.path
+        path = self.path.split('?')[0]
         if path.startswith("/rc"):
             path = path[3:] or "/"
 
@@ -1238,7 +1238,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._json(resp)
 
         elif path.split('?')[0] == "/fleet":
-            from urllib.parse import parse_qs
             qs = parse_qs(urlparse(self.path).query)
             since = qs.get("since", [None])[0]
             self._json(fleet.build_fleet(since=since))
@@ -1653,7 +1652,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self._json({"error": "unknown device"}, 404)
             return self._proxy_to_device(device)
 
-        path = self.path
+        path = self.path.split('?')[0]
         if path.startswith("/rc"):
             path = path[3:]
 
