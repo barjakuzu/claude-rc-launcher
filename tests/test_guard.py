@@ -4,6 +4,8 @@ Fixtures use neutral device names (dev-a, dev-b) and synthetic epoch
 timestamps - CI greps tracked files for personal identifiers, so no real
 hostnames, usernames or IP-like strings appear anywhere here.
 """
+import json
+import math
 import os
 import shutil
 import sys
@@ -866,6 +868,122 @@ class LoadRulesErrorHygieneTest(unittest.TestCase):
         self.assertIsNotNone(guard.LAST_LOAD_ERROR)
         self.assertNotIn(self.tmpdir, guard.LAST_LOAD_ERROR)
         self.assertIn("bad.json", guard.LAST_LOAD_ERROR)
+
+
+# ---------------------------------------------------------------------------
+# Fix round 2 (scoped Opus re-review): one test per finding item.
+# ---------------------------------------------------------------------------
+
+class IgnoreExpansionOrderIndependenceTest(unittest.TestCase):
+    """Important 1. Device A: id "dev-a", name "Dev Alpha". Device B: id
+    "dev-b", name "dev-a" - B's name is the same string as A's id, the
+    setup that exposes a self-feeding expansion. ignore.devices names
+    only "Dev Alpha" (A). The old bug: iterating [A, B] adds A's id
+    "dev-a" to the live ignore_devices set, which then matches B's NAME
+    ("dev-a") on the very next iteration and silently pulls in B's id too
+    - dropping a real runaway on B. Iterating [B, A] never bugs, because
+    A hasn't been processed yet when B's name is checked. Both orderings
+    must produce the identical (correct: not suppressed) result."""
+
+    def test_both_device_orderings_produce_identical_findings(self):
+        device_a = device(id="dev-a", name="Dev Alpha")
+        device_b = device(id="dev-b", name="dev-a")
+        runaway = session(
+            device_id="dev-b", session_id="s-runaway",
+            usage={"effective": 900_000_000, "last_ts": NOW})
+        rules = guard.default_rules()
+        rules["ignore"]["devices"] = ["Dev Alpha"]
+
+        findings_ab = guard.evaluate(
+            snap([runaway], [device_a, device_b]), rules=rules, now_fn=now_fn)
+        findings_ba = guard.evaluate(
+            snap([runaway], [device_b, device_a]), rules=rules, now_fn=now_fn)
+
+        self.assertEqual(findings_ab, findings_ba)
+        # Not just "equally suppressed" in both - the runaway must
+        # actually be reported, in both orderings.
+        self.assertGreaterEqual(len(findings_ab), 1)
+        self.assertTrue(all(f["session_id"] == "s-runaway" for f in findings_ab))
+
+
+class NumericFieldsFiniteTest(unittest.TestCase):
+    """Important 2. NaN in a finding's value/threshold/since reaches
+    json.dumps as the bare token NaN, which is not valid JSON and which
+    browser JSON.parse rejects outright - one poisoned session would
+    break the whole alerts response. token_total's `since` (the session's
+    started_at) and device_offline's `since`/`value` (last_seen /
+    minutes_offline, when only the online flag fired it) are the two
+    paths that don't otherwise validate the field before it reaches the
+    finding."""
+
+    def test_nan_never_reaches_a_finding_field_and_json_dumps_cleanly(self):
+        s = session(started_at=float("nan"), usage={"effective": 90_000_000, "last_ts": NOW})
+        d = device(online=0, last_seen=float("nan"))
+        rules = guard.default_rules()
+        rules["rules"]["device_offline"]["enabled"] = True
+        findings = guard.evaluate(snap([s], [d]), rules=rules, now_fn=now_fn)
+
+        self.assertGreaterEqual(len(findings), 2)  # token_total + device_offline
+        for f in findings:
+            for field in ("value", "threshold", "since"):
+                v = f[field]
+                if v is not None:
+                    self.assertTrue(math.isfinite(v), f"{field}={v!r} in {f}")
+
+        # allow_nan=False raises on any NaN/inf still present - the
+        # direct proof that the browser's JSON.parse would not choke.
+        encoded = json.dumps(findings, allow_nan=False)
+        self.assertEqual(json.loads(encoded), findings)
+
+
+class LoadRulesOSErrorHygieneTest(unittest.TestCase):
+    """Minor 3. The basename fix only replaced the interpolated path; it
+    still interpolated str(e), and an OSError's own message re-embeds the
+    full path (e.g. "[Errno 21] Is a directory: '/home/x/.claude-rc/
+    guard.json'"), reopening the exact leak the basename switch closed."""
+
+    def test_oserror_message_does_not_leak_the_full_path(self):
+        tmpdir = tempfile.mkdtemp()
+        try:
+            dir_path = os.path.join(tmpdir, "dir.json")
+            os.mkdir(dir_path)  # open()ing a directory raises IsADirectoryError
+            guard.load_rules(path=dir_path)
+            self.assertIsNotNone(guard.LAST_LOAD_ERROR)
+            self.assertNotIn(tmpdir, guard.LAST_LOAD_ERROR)
+            self.assertIn("dir.json", guard.LAST_LOAD_ERROR)
+            self.assertIn("Error", guard.LAST_LOAD_ERROR)
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+class ConfigNanThresholdRejectedTest(unittest.TestCase):
+    """Minor 4. json.loads accepts bare NaN/Infinity/-Infinity, so a
+    guard.json on disk can hand _merge_rules a non-finite threshold,
+    which would otherwise pass the int/float type check and produce
+    messages like "over the nan h limit"."""
+
+    def test_nan_threshold_in_config_file_is_rejected(self):
+        tmpdir = tempfile.mkdtemp()
+        try:
+            path = os.path.join(tmpdir, "guard.json")
+            with open(path, "w") as f:
+                f.write('{"rules": {"session_age": {"max_age_hours": NaN}}}')
+            rules = guard.load_rules(path=path)
+            self.assertEqual(
+                rules["rules"]["session_age"]["max_age_hours"],
+                guard.default_rules()["rules"]["session_age"]["max_age_hours"])
+            self.assertIsNotNone(guard.LAST_LOAD_ERROR)
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+class FormatCountSubThousandRoundingTest(unittest.TestCase):
+    """Nit 5. The M/B tier promotion (round 1) left the k tier's own
+    lower boundary unfixed: a raw value just under 1000 rounded to
+    "1000.0" with no unit at all, instead of promoting into the k tier."""
+
+    def test_value_that_would_round_to_1000_promotes_to_k_tier(self):
+        self.assertEqual(guard._fmt_count(999.95), "1.0 k")
 
 
 if __name__ == "__main__":
