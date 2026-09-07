@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 import os
 import threading
 import time
@@ -81,8 +82,10 @@ _lock = threading.Lock()
 # Memoizes the last successfully parsed-and-merged config, keyed by the
 # resolved path and its mtime at read time. A failed parse never writes
 # here (see load_rules) so it can't poison a good prior memo, and a
-# changed mtime always forces a re-read.
-_cache = {"path": None, "mtime": None, "rules": None}
+# changed mtime always forces a re-read. "error" travels with the cached
+# result so a cache hit can restore LAST_LOAD_ERROR correctly instead of
+# leaving whatever an unrelated prior call last set it to.
+_cache = {"path": None, "mtime": None, "rules": None, "error": None}
 
 
 def default_rules():
@@ -187,17 +190,26 @@ def load_rules(path=None):
                 _cache["path"] = None
                 _cache["mtime"] = None
                 _cache["rules"] = None
+                _cache["error"] = None
             return default_rules()
 
         if (_cache["path"] == resolved and _cache["mtime"] == mtime
                 and _cache["rules"] is not None):
+            # Cache hit: still restore LAST_LOAD_ERROR to what this path's
+            # cached load actually produced, rather than leaving it at
+            # whatever an unrelated prior call (a different path, or a
+            # since-fixed failed parse) last set it to.
+            LAST_LOAD_ERROR = _cache["error"]
             return copy.deepcopy(_cache["rules"])
 
         try:
             with open(resolved, "r") as f:
                 raw = json.load(f)
         except Exception as e:
-            LAST_LOAD_ERROR = f"failed to parse {resolved}: {e}"
+            # Basename only: the full path would carry the home directory
+            # (and so the username) into a string that may end up in an
+            # API response.
+            LAST_LOAD_ERROR = f"failed to parse {os.path.basename(resolved)}: {e}"
             return default_rules()
 
         merged, error = _merge_rules(raw)
@@ -205,6 +217,7 @@ def load_rules(path=None):
         _cache["path"] = resolved
         _cache["mtime"] = mtime
         _cache["rules"] = merged
+        _cache["error"] = error
         return copy.deepcopy(merged)
 
 
@@ -223,9 +236,12 @@ def _fmt_count(n):
         return str(n)
     sign = "-" if n < 0 else ""
     a = abs(n)
-    if a >= 1_000_000_000:
+    # Thresholds sit half a display-unit below the round number so a value
+    # that would ROUND to "1000.0" at one tier is promoted to the next
+    # instead (e.g. 999_999 reads "1.0 M", not "1000.0 k").
+    if a >= 999_950_000:
         return f"{sign}{a / 1_000_000_000:.1f} B"
-    if a >= 1_000_000:
+    if a >= 999_950:
         return f"{sign}{a / 1_000_000:.1f} M"
     if a >= 1_000:
         return f"{sign}{a / 1_000:.1f} k"
@@ -278,12 +294,20 @@ def _device_finding(rule, severity, d, message, value, threshold, since):
 
 
 def _is_live(s):
-    """A session with ended_at set produces no findings from any rule."""
-    return s.get("ended_at") is None
+    """A session with ended_at set (any truthy value) produces no findings
+    from any rule. A falsy ended_at (None, or 0, which can leak in from a
+    numeric-default column instead of a real epoch timestamp) is treated
+    as not-yet-ended rather than as a session that ended in 1970."""
+    return not s.get("ended_at")
 
 
 def _is_number(v):
-    return isinstance(v, (int, float)) and not isinstance(v, bool)
+    """True only for a real, finite int/float. NaN and +/-inf pass
+    isinstance checks but blow up arithmetic and formatting downstream
+    (int(nan) raises, comparisons against nan are silently always False),
+    so every rule treats them the same as a missing field: no finding,
+    no crash, nothing swallowed into LAST_RULE_ERRORS."""
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
 
 
 # ---------------------------------------------------------------------------
@@ -434,14 +458,33 @@ def _sort_key(f):
     return (_SEVERITY_RANK.get(f.get("severity"), 99), since_val)
 
 
+def _safe_in(value, container):
+    """`value in container` that returns False instead of raising when
+    `value` is an unhashable type (a list or dict slipping in from a
+    malformed snapshot field). The "never raises" constraint on
+    evaluate() is unconditional, not contingent on the input having come
+    from sqlite today."""
+    try:
+        return value in container
+    except TypeError:
+        return False
+
+
 def _is_ignored(f, ignore_devices, ignore_sessions, ignore_names):
-    if f.get("device_id") in ignore_devices:
+    """`ignore_devices` is expected to already be expanded (by the
+    caller) to include device ids reachable by display name, not just
+    ids. `ignore_names` applies only to session-target findings: a
+    device's `name` field is its hostname/label, not a session name, and
+    must not be cross-matched against the session ignore-by-name list."""
+    if _safe_in(f.get("device_id"), ignore_devices):
         return True
+    if f.get("target_type") != "session":
+        return False
     sid = f.get("session_id")
-    if sid is not None and sid in ignore_sessions:
+    if sid is not None and _safe_in(sid, ignore_sessions):
         return True
     name = f.get("name")
-    if name is not None and name in ignore_names:
+    if name is not None and _safe_in(name, ignore_names):
         return True
     return False
 
@@ -465,8 +508,13 @@ def evaluate(snapshot, rules=None, now_fn=time.time):
     recorded in LAST_RULE_ERRORS rather than aborting the whole
     evaluation.
     """
-    global LAST_RULE_ERRORS
-    LAST_RULE_ERRORS = []
+    # Accumulated locally and published to the module global exactly once,
+    # at the end, in a single assignment. Appending straight to the global
+    # list is not safe under concurrent evaluate() calls: each call resets
+    # LAST_RULE_ERRORS to a fresh list, so once another thread's reset
+    # rebinds the name, this call's later .append()s land on that OTHER
+    # thread's list instead of its own, corrupting both counts.
+    local_errors = []
 
     if isinstance(rules, dict):
         cfg = rules
@@ -491,13 +539,42 @@ def evaluate(snapshot, rules=None, now_fn=time.time):
     ignore_cfg = ignore_cfg if isinstance(ignore_cfg, dict) else {}
 
     def _str_set(value):
-        return set(x for x in (value or []) if isinstance(x, str))
+        # A bare string is iterable character-by-character; without this
+        # guard a caller-constructed rules dict with e.g.
+        # ignore.devices = "dev-a" would silently build {'d','e','v','-','a'}
+        # instead of being treated as an invalid (so: empty) ignore list.
+        if not isinstance(value, list):
+            return set()
+        return set(x for x in value if isinstance(x, str))
 
     ignore_devices = _str_set(ignore_cfg.get("devices"))
     ignore_sessions = _str_set(ignore_cfg.get("sessions"))
     ignore_names = _str_set(ignore_cfg.get("names"))
 
-    now = now_fn()
+    # ignore.devices may name a device by id or by display name (users see
+    # names in the UI, ids in the config) - expand it to every id whose
+    # current name matches one of the given entries. A name is not unique
+    # the way an id is, so one name entry can pull in more than one
+    # device's id; that is intended, not a bug.
+    for d in devices:
+        if not isinstance(d, dict):
+            continue
+        dname = d.get("name")
+        did = d.get("id")
+        if isinstance(dname, str) and dname in ignore_devices and did is not None:
+            try:
+                ignore_devices.add(did)
+            except TypeError:
+                continue  # unhashable id (malformed snapshot): nothing to add
+
+    try:
+        now = now_fn()
+    except Exception:
+        # An injected clock is caller-supplied and can misbehave; "never
+        # raises" is unconditional, so fall back to the real clock rather
+        # than letting evaluate() blow up on a broken now_fn.
+        now = time.time()
+
     findings = []
 
     for name, func in _SESSION_RULES:
@@ -511,17 +588,46 @@ def evaluate(snapshot, rules=None, now_fn=time.time):
             try:
                 f = func(s, rc, now)
             except Exception as e:
-                LAST_RULE_ERRORS.append((name, type(e).__name__))
+                local_errors.append((name, type(e).__name__))
                 continue
             if f:
                 findings.append(f)
+
+    # device_concurrency needs a target for every device_id that shows up
+    # in sessions[], even one absent from devices[] (a stale or not-yet-
+    # synced device row) - otherwise a device with no row at all could
+    # never trip concurrency no matter how many live sessions it has.
+    # device_offline has no such need: it reads fields (online, last_seen)
+    # that only exist on a real device row, so it stays scoped to devices[].
+    known_device_ids = set()
+    for d in devices:
+        if not isinstance(d, dict):
+            continue
+        try:
+            known_device_ids.add(d.get("id"))
+        except TypeError:
+            continue  # unhashable id (malformed snapshot): can't track it, skip
+    concurrency_targets = list(devices)
+    seen_missing = set()
+    for s in sessions:
+        if not isinstance(s, dict):
+            continue
+        did = s.get("device_id")
+        if did is None or _safe_in(did, known_device_ids) or _safe_in(did, seen_missing):
+            continue
+        try:
+            seen_missing.add(did)
+        except TypeError:
+            continue  # unhashable device_id: can't synthesize a target for it
+        concurrency_targets.append({"id": did})
 
     for name, func in _DEVICE_RULES:
         rc = rules_cfg.get(name)
         rc = rc if isinstance(rc, dict) else {}
         if not rc.get("enabled", _DEFAULTS[name]["enabled"]):
             continue
-        for d in devices:
+        targets = concurrency_targets if name == "device_concurrency" else devices
+        for d in targets:
             if not isinstance(d, dict):
                 continue
             try:
@@ -530,13 +636,16 @@ def evaluate(snapshot, rules=None, now_fn=time.time):
                 else:
                     f = func(d, rc, now)
             except Exception as e:
-                LAST_RULE_ERRORS.append((name, type(e).__name__))
+                local_errors.append((name, type(e).__name__))
                 continue
             if f:
                 findings.append(f)
 
     findings = [f for f in findings if not _is_ignored(f, ignore_devices, ignore_sessions, ignore_names)]
     findings.sort(key=_sort_key)
+
+    global LAST_RULE_ERRORS
+    LAST_RULE_ERRORS = local_errors
     return findings
 
 
