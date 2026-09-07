@@ -622,5 +622,251 @@ class EndToEndFourResumeLoopsTest(unittest.TestCase):
         self.assertEqual(guard.LAST_RULE_ERRORS, [])
 
 
+# ---------------------------------------------------------------------------
+# Fix round 1 (Opus review): unhashable fields, NaN/inf, crossed ignore
+# lists, the LAST_RULE_ERRORS race, and small regression locks for the
+# other minors.
+# ---------------------------------------------------------------------------
+
+class UnhashableFieldsTest(unittest.TestCase):
+    """A list/dict slipping into device_id, session_id or name (a
+    malformed snapshot, not sqlite's normal output) must not raise out of
+    evaluate() - the crash site is the ignore-list membership test, which
+    always hashes its left operand even against an empty set."""
+
+    def test_unhashable_device_id_does_not_raise(self):
+        s = session(device_id=["weird", "list"], started_at=NOW - 100 * 3600)
+        findings = guard.evaluate(snap([s]), rules=guard.default_rules(), now_fn=now_fn)
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0]["rule"], "session_age")
+
+    def test_unhashable_session_id_does_not_raise(self):
+        s = session(session_id={"nested": "dict"}, started_at=NOW - 100 * 3600)
+        findings = guard.evaluate(snap([s]), rules=guard.default_rules(), now_fn=now_fn)
+        self.assertEqual(len(findings), 1)
+
+    def test_unhashable_name_does_not_raise(self):
+        s = session(name=["not", "a", "string"], started_at=NOW - 100 * 3600)
+        findings = guard.evaluate(snap([s]), rules=guard.default_rules(), now_fn=now_fn)
+        self.assertEqual(len(findings), 1)
+
+    def test_unhashable_fields_with_active_ignore_lists_does_not_raise(self):
+        s = session(device_id=["x"], session_id={"y": 1}, name=[1, 2], started_at=NOW - 100 * 3600)
+        rules = guard.default_rules()
+        rules["ignore"]["devices"] = ["dev-a"]
+        rules["ignore"]["sessions"] = ["sess-1"]
+        rules["ignore"]["names"] = ["rc-foo"]
+        findings = guard.evaluate(snap([s]), rules=rules, now_fn=now_fn)
+        self.assertIsInstance(findings, list)
+
+
+class NanInfHandlingTest(unittest.TestCase):
+    """json.loads accepts bare NaN/Infinity/-Infinity, so these are
+    reachable from a real (if malformed) guard.json or a corrupted usage
+    payload, not just a contrived test. None of them may produce a bogus
+    finding, a crash, or a swallowed rule (empty LAST_RULE_ERRORS)."""
+
+    def test_nan_effective_produces_no_cost_findings_and_nothing_swallowed(self):
+        s = session(started_at=NOW - 2 * 3600, usage={"effective": float("nan"), "last_ts": NOW})
+        findings = guard.evaluate(snap([s]), rules=guard.default_rules(), now_fn=now_fn)
+        rules_fired = {f["rule"] for f in findings}
+        self.assertNotIn("token_rate", rules_fired)
+        self.assertNotIn("token_total", rules_fired)
+        self.assertEqual(guard.LAST_RULE_ERRORS, [])
+
+    def test_inf_effective_produces_no_cost_findings(self):
+        s = session(started_at=NOW - 2 * 3600, usage={"effective": float("inf"), "last_ts": NOW})
+        findings = guard.evaluate(snap([s]), rules=guard.default_rules(), now_fn=now_fn)
+        rules_fired = {f["rule"] for f in findings}
+        self.assertNotIn("token_rate", rules_fired)
+        self.assertNotIn("token_total", rules_fired)
+        self.assertEqual(guard.LAST_RULE_ERRORS, [])
+
+    def test_nan_started_at_produces_no_session_age_finding(self):
+        s = session(started_at=float("nan"), usage=None)
+        findings = guard.evaluate(snap([s]), rules=guard.default_rules(), now_fn=now_fn)
+        self.assertEqual(findings, [])
+        self.assertEqual(guard.LAST_RULE_ERRORS, [])
+
+    def test_inf_started_at_disables_session_age_and_token_rate_but_not_token_total(self):
+        s = session(started_at=float("inf"), usage={"effective": 90_000_000, "last_ts": NOW})
+        findings = guard.evaluate(snap([s]), rules=guard.default_rules(), now_fn=now_fn)
+        rules_fired = {f["rule"] for f in findings}
+        self.assertNotIn("session_age", rules_fired)
+        self.assertNotIn("token_rate", rules_fired)
+        self.assertIn("token_total", rules_fired)
+        self.assertEqual(guard.LAST_RULE_ERRORS, [])
+        for f in findings:
+            self.assertNotIn("nan", f["message"].lower())
+            self.assertNotIn("inf", f["message"].lower())
+
+    def test_nan_last_seen_does_not_stall_or_go_offline(self):
+        s = session(state="busy", last_event_ts=None, last_seen=float("nan"), usage=None)
+        findings = guard.evaluate(snap([s]), rules=guard.default_rules(), now_fn=now_fn)
+        self.assertEqual(findings, [])
+
+        d = device(online=1, last_seen=float("nan"))
+        rules = guard.default_rules()
+        rules["rules"]["device_offline"]["enabled"] = True
+        findings = guard.evaluate(snap([], [d]), rules=rules, now_fn=now_fn)
+        self.assertEqual(findings, [])
+        self.assertEqual(guard.LAST_RULE_ERRORS, [])
+
+    def test_no_message_ever_contains_nan_or_inf_text(self):
+        s1 = session(
+            started_at=float("nan"),
+            usage={"effective": float("nan"), "last_ts": float("nan")})
+        s2 = session(
+            session_id="sess-2", state="busy",
+            last_event_ts=float("nan"), last_seen=float("nan"), usage=None)
+        findings = guard.evaluate(snap([s1, s2]), rules=guard.default_rules(), now_fn=now_fn)
+        for f in findings:
+            self.assertNotIn("nan", f["message"].lower())
+            self.assertNotIn("inf", f["message"].lower())
+        self.assertEqual(guard.LAST_RULE_ERRORS, [])
+
+
+class DeviceNameIgnoreTest(unittest.TestCase):
+    """ignore.devices matches either the device id or its current display
+    name, since users see names in the UI and ids in the config file."""
+
+    def test_ignore_devices_matches_by_display_name(self):
+        d = device(id="dev-a", name="Dev Alpha")
+        rules = guard.default_rules()
+        rules["rules"]["device_concurrency"]["max_sessions_per_device"] = 0
+        rules["ignore"]["devices"] = ["Dev Alpha"]
+        findings = guard.evaluate(snap([session(device_id="dev-a")], [d]), rules=rules, now_fn=now_fn)
+        self.assertEqual(findings, [])
+
+    def test_ignore_devices_still_matches_by_id(self):
+        d = device(id="dev-a", name="Dev Alpha")
+        rules = guard.default_rules()
+        rules["rules"]["device_concurrency"]["max_sessions_per_device"] = 0
+        rules["ignore"]["devices"] = ["dev-a"]
+        findings = guard.evaluate(snap([session(device_id="dev-a")], [d]), rules=rules, now_fn=now_fn)
+        self.assertEqual(findings, [])
+
+    def test_name_match_can_suppress_every_device_sharing_that_name(self):
+        d1 = device(id="dev-a", name="shared-name")
+        d2 = device(id="dev-b", name="shared-name")
+        rules = guard.default_rules()
+        rules["rules"]["device_concurrency"]["max_sessions_per_device"] = 0
+        rules["ignore"]["devices"] = ["shared-name"]
+        sessions = [session(device_id="dev-a"), session(session_id="sess-2", device_id="dev-b")]
+        findings = guard.evaluate(snap(sessions, [d1, d2]), rules=rules, now_fn=now_fn)
+        self.assertEqual(findings, [])
+
+
+class IgnoreNamesDoesNotAffectDevicesTest(unittest.TestCase):
+    def test_ignore_names_matching_a_device_name_does_not_suppress_it(self):
+        d = device(id="dev-a", name="dev-a")
+        rules = guard.default_rules()
+        rules["rules"]["device_concurrency"]["max_sessions_per_device"] = 0
+        rules["ignore"]["names"] = ["dev-a"]
+        findings = guard.evaluate(snap([session(device_id="dev-a")], [d]), rules=rules, now_fn=now_fn)
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0]["rule"], "device_concurrency")
+
+
+class ConcurrentEvaluateErrorsTest(unittest.TestCase):
+    def test_concurrent_evaluate_calls_leave_exact_error_count(self):
+        rules = guard.default_rules()
+        rules["rules"]["session_age"]["max_age_hours"] = "not-a-number"
+        sessions = [session(session_id=f"s-{i}") for i in range(5)]
+        snapshot = snap(sessions)
+        errors = []
+
+        def worker():
+            try:
+                for _ in range(20):
+                    guard.evaluate(snapshot, rules=rules, now_fn=now_fn)
+            except Exception as e:
+                errors.append(e)
+
+        threads = [threading.Thread(target=worker) for _ in range(6)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(errors, [])
+        self.assertEqual(len(guard.LAST_RULE_ERRORS), 5)
+        for rule_name, exc_type in guard.LAST_RULE_ERRORS:
+            self.assertEqual(rule_name, "session_age")
+            self.assertEqual(exc_type, "TypeError")
+
+
+class EndedAtZeroTest(unittest.TestCase):
+    def test_ended_at_zero_is_treated_as_still_live(self):
+        s = session(started_at=NOW - 100 * 3600, ended_at=0)
+        findings = guard.evaluate(snap([s]), rules=guard.default_rules(), now_fn=now_fn)
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0]["rule"], "session_age")
+
+
+class DeviceConcurrencyMissingDeviceRowTest(unittest.TestCase):
+    def test_fires_for_a_device_id_absent_from_devices_list(self):
+        rules = guard.default_rules()
+        rules["rules"]["device_concurrency"]["max_sessions_per_device"] = 1
+        sessions = [session(session_id=f"s-{i}", device_id="ghost-device") for i in range(2)]
+        findings = guard.evaluate(snap(sessions, []), rules=rules, now_fn=now_fn)
+        self.assertEqual(len(findings), 1)
+        f = findings[0]
+        self.assertEqual(f["rule"], "device_concurrency")
+        self.assertEqual(f["device_id"], "ghost-device")
+        self.assertIsNone(f["name"])
+
+    def test_device_offline_does_not_fire_for_a_missing_device_row(self):
+        # device_offline needs real fields (online, last_seen) that only
+        # exist on an actual device row - a synthesized target would be
+        # meaningless for it, unlike for device_concurrency.
+        rules = guard.default_rules()
+        rules["rules"]["device_offline"]["enabled"] = True
+        sessions = [session(device_id="ghost-device")]
+        findings = guard.evaluate(snap(sessions, []), rules=rules, now_fn=now_fn)
+        self.assertEqual([f for f in findings if f["rule"] == "device_offline"], [])
+
+
+class LoadRulesErrorHygieneTest(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_cache_hit_restores_this_paths_own_last_load_error(self):
+        a_path = os.path.join(self.tmpdir, "a.json")
+        b_path = os.path.join(self.tmpdir, "b.json")
+        with open(a_path, "w") as f:
+            # Bad type: a successful parse with a validation problem, so
+            # (unlike a JSON syntax error) it IS cached, with its error.
+            f.write('{"rules": {"session_age": {"max_age_hours": "nope"}}}')
+        os.utime(a_path, (1000, 1000))
+        with open(b_path, "w") as f:
+            f.write('{"rules": {}}')
+        os.utime(b_path, (1000, 1000))
+
+        guard.load_rules(path=a_path)
+        self.assertIsNotNone(guard.LAST_LOAD_ERROR)
+
+        guard.load_rules(path=b_path)
+        self.assertIsNone(guard.LAST_LOAD_ERROR)
+
+        # a_path's mtime is unchanged since the first load: this is a
+        # cache hit. It must still restore a_path's own error rather than
+        # leaving b_path's None sitting there.
+        guard.load_rules(path=a_path)
+        self.assertIsNotNone(guard.LAST_LOAD_ERROR)
+
+    def test_parse_error_message_carries_basename_not_full_path(self):
+        bad_path = os.path.join(self.tmpdir, "bad.json")
+        with open(bad_path, "w") as f:
+            f.write('{not valid json')
+        guard.load_rules(path=bad_path)
+        self.assertIsNotNone(guard.LAST_LOAD_ERROR)
+        self.assertNotIn(self.tmpdir, guard.LAST_LOAD_ERROR)
+        self.assertIn("bad.json", guard.LAST_LOAD_ERROR)
+
+
 if __name__ == "__main__":
     unittest.main()
