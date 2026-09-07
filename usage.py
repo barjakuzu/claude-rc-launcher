@@ -1,9 +1,17 @@
 """Turns Claude Code transcript JSONL files (~/.claude/projects/<encoded
-cwd>/<session-uuid>.jsonl) into per-session and per-day token rollups.
+cwd>/<session-uuid>.jsonl, plus each session's
+<session-uuid>/subagents/agent-<id>.jsonl files) into per-session and
+per-day token rollups.
 
 Incremental: a module-level cache keyed by file path remembers how far
 each file has been read so a poll every 30s only parses newly appended
 bytes, not the whole history. See rollup() for the read/cache contract.
+
+A session's own file and its subagents' files are separate files on disk
+but the same session for accounting purposes: subagent usage rolls up
+into the parent session's totals, keyed by the record's own "sessionId"
+field rather than by filename, since a subagent file's name is
+"agent-<id>.jsonl", not the session's uuid.
 
 Security note (public repo): this module must never return a decoded cwd,
 username, home path, or prompt/response content. "project" is only ever
@@ -38,19 +46,24 @@ MAX_CACHE_ENTRIES = 2000
 # Module-level cache, keyed by absolute transcript file path. An
 # OrderedDict so "least recently stat'ed" eviction is a cheap
 # move_to_end() on every visit plus a popitem(last=False) when over cap.
-# Guarded by _lock for every read and write, including by rollup()'s own
-# aggregation pass, so a concurrent reader never sees a half-updated entry.
+# Guarded by _lock for every _cache read and write. The lock is held only
+# around cache bookkeeping, never around the disk read of a transcript
+# file: _update_entry() acquires and releases it itself, per file, so a
+# multi-file rollup() never blocks a concurrent session_usage() (or
+# another rollup()) caller for the whole scan, only for whichever single
+# file either side happens to be touching at that instant.
 _cache = collections.OrderedDict()
 _lock = threading.Lock()
 
 
 def _as_int(value):
-    """Coerce a raw usage field to int. Missing/non-int values (including
-    bool, which is technically an int subclass but never a legitimate
-    token count) count as 0. A corrupt line must never raise."""
+    """Coerce a raw usage field to int. Missing/non-int/negative values
+    (including bool, which is technically an int subclass but never a
+    legitimate token count) count as 0: a token count can't be negative,
+    and a corrupt line must never raise."""
     if isinstance(value, bool):
         return 0
-    if isinstance(value, int):
+    if isinstance(value, int) and value >= 0:
         return value
     return 0
 
@@ -97,15 +110,28 @@ def _parse_timestamp(ts):
 def _discover_files(root):
     """(entries, skipped) for every *.jsonl under root, newest-mtime-first.
     entries are (path, project, size, mtime, inode) tuples. `project` is
-    the immediate parent directory name (the encoded, already-lossy cwd
-    Claude Code uses, never decoded here). Files that fail os.stat (raced
-    away, permission denied on the directory entry) count toward
-    `skipped` rather than raising. A missing root simply yields nothing,
-    since os.walk silently ignores a root it can't list."""
+    the FIRST path segment under root, e.g. for
+    root/<encoded-cwd>/<uuid>/subagents/agent-1.jsonl that's
+    <encoded-cwd>, matching the top-level file
+    root/<encoded-cwd>/<uuid>.jsonl's own project, not "subagents" or a
+    "wf_..." workflow directory name (the already-encoded, already-lossy
+    cwd Claude Code uses, never decoded here).
+
+    Files that fail os.stat (raced away, permission denied on the
+    directory entry) count toward `skipped` rather than raising. A root
+    that can't be listed at all (missing, or not a directory) also counts
+    toward `skipped` via the os.walk onerror hook, instead of silently
+    reporting zero files (which would be indistinguishable from "no usage
+    yet")."""
     entries = []
     skipped = 0
-    for dirpath, _dirnames, filenames in os.walk(root):
-        project = os.path.basename(dirpath)
+
+    def _count_walk_error(_exc):
+        nonlocal skipped
+        skipped += 1
+
+    for dirpath, _dirnames, filenames in os.walk(root, onerror=_count_walk_error):
+        project = os.path.relpath(dirpath, root).split(os.sep)[0]
         for fname in filenames:
             if not fname.endswith(".jsonl"):
                 continue
@@ -120,7 +146,7 @@ def _discover_files(root):
     return entries, skipped
 
 
-def _new_entry(project, session_id, inode):
+def _new_entry(project, inode):
     return {
         "inode": inode,
         "size": 0,
@@ -130,7 +156,11 @@ def _new_entry(project, session_id, inode):
         "totals": {"input": 0, "cache_read": 0, "cache_write": 0, "output": 0},
         "first_ts": None,
         "last_ts": None,
-        "session_id": session_id,
+        # Filled in from the first usage-bearing record's own "sessionId"
+        # field (see _consume_line); a file whose records never carry one
+        # falls back to its filename stem, decided at aggregation time in
+        # rollup(), not here, since that fallback needs the path.
+        "session_id": None,
         "project": project,
         "models": {},
         "messages": 0,
@@ -139,18 +169,24 @@ def _new_entry(project, session_id, inode):
         # already scrolled out of the cache's read window by the time a
         # later rollup() call re-sums across files.
         "daily": {},
+        # True once at least one read of this file has completed without
+        # raising. Gates whether the entry is surfaced in rollup()'s
+        # output: a file that has only ever failed to open (permissions,
+        # raced away) must stay absent, not appear as a bogus all-zero
+        # session.
+        "synced": False,
     }
 
 
-def _read_new_bytes(path, offset):
-    """Read a transcript file from `offset` to EOF. Its own function
-    (rather than inlined) purely so tests can make one specific path fail
-    to open/read (simulating a permission error or a file that vanished
-    mid-read) without depending on real filesystem permission bits, which
-    root ignores."""
+def _read_new_bytes(path, offset, max_bytes):
+    """Read up to `max_bytes` of a transcript file starting at `offset`.
+    Its own function (rather than inlined) purely so tests can make one
+    specific path fail to open/read (simulating a permission error or a
+    file that vanished mid-read) without depending on real filesystem
+    permission bits, which root ignores."""
     with open(path, "rb") as f:
         f.seek(offset)
-        return f.read()
+        return f.read(max_bytes)
 
 
 def _consume_line(entry, raw_line):
@@ -170,6 +206,16 @@ def _consume_line(entry, raw_line):
     usage = message.get("usage")
     if not isinstance(usage, dict):
         return
+
+    # First usage-bearing record wins: subagent files carry the PARENT
+    # session's id in their own "sessionId" field, which is how their
+    # spend rolls up into the parent rather than becoming a phantom
+    # session named after the subagent's filename.
+    if entry["session_id"] is None:
+        row_session_id = row.get("sessionId")
+        if isinstance(row_session_id, str) and row_session_id:
+            entry["session_id"] = row_session_id
+
     model = message.get("model")
     if model == "<synthetic>":
         return  # API error placeholder, not billable
@@ -221,32 +267,91 @@ def _consume_line(entry, raw_line):
         day["output"] += output_i
 
 
-def _update_entry(path, project, session_id, size, mtime, inode):
+def _merge_scratch(entry, scratch):
+    """Fold a scratch entry's freshly-parsed contribution into the live
+    shared `entry`, additively (never overwrites totals/messages/models/
+    daily, only adds to them: `entry` may already carry contributions
+    from earlier reads of this same file)."""
+    entry["seen_keys"] = scratch["seen_keys"]
+    entry["session_id"] = scratch["session_id"]
+    for k in ("input", "cache_read", "cache_write", "output"):
+        entry["totals"][k] += scratch["totals"][k]
+    entry["messages"] += scratch["messages"]
+    for model, count in scratch["models"].items():
+        entry["models"][model] = entry["models"].get(model, 0) + count
+    if scratch["first_ts"] is not None and (
+            entry["first_ts"] is None or scratch["first_ts"] < entry["first_ts"]):
+        entry["first_ts"] = scratch["first_ts"]
+    if scratch["last_ts"] is not None and (
+            entry["last_ts"] is None or scratch["last_ts"] > entry["last_ts"]):
+        entry["last_ts"] = scratch["last_ts"]
+    for date_str, day in scratch["daily"].items():
+        bucket = entry["daily"].setdefault(
+            date_str, {"input": 0, "cache_read": 0, "cache_write": 0, "output": 0})
+        bucket["input"] += day["input"]
+        bucket["cache_read"] += day["cache_read"]
+        bucket["cache_write"] += day["cache_write"]
+        bucket["output"] += day["output"]
+
+
+def _update_entry(path, project, size, mtime, inode, max_bytes):
     """Bring the cache entry for `path` up to date with what's on disk,
-    parsing only newly appended complete lines. Returns the number of new
-    bytes actually read (0 for a pure cache hit). Must be called with
-    _lock held. Raises OSError if the file can't be opened/read, in which
-    case nothing is committed to _cache: a file that has never been read
-    successfully stays absent (not a bogus zero-valued entry), and a file
-    that WAS cached keeps its last-known-good totals instead of being
-    wiped by a transient failure. The caller counts a raise as skipped."""
-    existing = _cache.get(path)
-    if existing is not None and (existing["inode"] != inode or size < existing["size"]):
-        # Rotated or truncated out from under us: the old offset and
-        # dedup set no longer describe this file's contents. Don't reuse
-        # the object in place, build fresh below, and only replace the
-        # cached one once a read actually succeeds.
-        existing = None
-    entry = existing if existing is not None else _new_entry(project, session_id, inode)
-    entry["inode"] = inode
-    entry["project"] = project
+    parsing only newly appended complete lines, clipped to at most
+    `max_bytes` of new data (the caller's remaining per-call budget).
+    Returns (bytes_read, clipped). Raises OSError if the file can't be
+    opened/read; nothing is committed in that case, so a file that has
+    never been read successfully stays absent from rollup()'s output
+    (see the "synced" field) rather than appearing as a bogus zero-valued
+    session, and a file that WAS already synced keeps its last-known-good
+    totals instead of being wiped by a transient failure.
 
-    if size == entry["size"] and mtime == entry["mtime"]:
-        _cache[path] = entry  # no-op for an already-cached, unchanged entry
-        return 0  # unchanged since last read: reuse cached totals as-is
+    Acquires the module lock itself, twice: once (briefly) to look up or
+    create the cache entry, decide whether a read is even needed, and
+    snapshot its dedup set and offset; again (also briefly) to commit.
+    The disk read, and the JSON/line parsing, run with NO lock held and
+    touch no shared state: they parse into a private scratch entry (see
+    _merge_scratch), never the live one, so two callers racing on the
+    same file (a poll and a concurrent session_usage() call, say) never
+    mutate the same dict/set at the same time. This is what keeps a
+    multi-file rollup() from blocking a concurrent caller for the whole
+    scan: the lock is only ever held for one file's cheap bookkeeping,
+    not its I/O.
 
-    start_offset = entry["offset"]
-    data = _read_new_bytes(path, start_offset)  # may raise OSError; nothing committed if so
+    If another caller has already advanced (or reset) this same entry by
+    the time we finish reading (detected by the live entry's offset no
+    longer matching what we snapshotted), our scratch result is discarded
+    rather than merged: whichever caller commits first wins, and the
+    loser's data will simply be re-read on the next rollup() call.
+    """
+    with _lock:
+        existing = _cache.get(path)
+        if existing is not None and (existing["inode"] != inode or size < existing["offset"]):
+            # Rotated or truncated out from under us: the old offset and
+            # dedup set no longer describe this file's contents.
+            existing = None
+        if existing is None:
+            entry = _new_entry(project, inode)
+            _cache[path] = entry
+        else:
+            entry = existing
+            entry["inode"] = inode
+            entry["project"] = project
+
+        if size == entry["size"] and mtime == entry["mtime"]:
+            _cache.move_to_end(path)
+            return 0, False  # unchanged since last read: nothing to do
+
+        start_offset = entry["offset"]
+        seen_snapshot = set(entry["seen_keys"])
+        session_id_snapshot = entry["session_id"]
+
+    # --- disk I/O and parsing, no lock held, no shared state touched ---
+    data = _read_new_bytes(path, start_offset, max_bytes)  # may raise OSError
+    clipped = len(data) >= max_bytes
+
+    scratch = _new_entry(project, inode)
+    scratch["seen_keys"] = seen_snapshot
+    scratch["session_id"] = session_id_snapshot
 
     pos = start_offset
     for line in data.splitlines(keepends=True):
@@ -255,21 +360,43 @@ def _update_entry(path, project, session_id, size, mtime, inode):
             # offset before it so the next poll re-reads it whole.
             break
         pos += len(line)
-        _consume_line(entry, line)
+        _consume_line(scratch, line)
 
-    entry["offset"] = pos
-    entry["size"] = size
-    entry["mtime"] = mtime
-    _cache[path] = entry
-    _cache.move_to_end(path)
-    return pos - start_offset
+    with _lock:
+        current = _cache.get(path)
+        if current is None or current is not entry or current["offset"] != start_offset:
+            # Someone else already advanced (or reset) this entry while
+            # we were reading unlocked. Merging our scratch on top would
+            # double count or resurrect data a rotation already
+            # discarded, so drop it; the next rollup() call will simply
+            # re-read whatever this call didn't get to.
+            return 0, False
+        _merge_scratch(entry, scratch)
+        entry["offset"] = pos
+        # A clipped read stopped short of the file's true current EOF on
+        # purpose (the budget), so only vouch for what was actually
+        # parsed (pos): there's more, already-complete, data waiting.
+        # An unclipped read reached the file's true EOF at read time,
+        # which may differ from the pre-read `size` if the file grew (or,
+        # rarely, shrank) between the stat and the read, so vouch for
+        # what was actually observed (start_offset + len(data)) rather
+        # than the possibly-stale stat value.
+        entry["size"] = pos if clipped else start_offset + len(data)
+        entry["mtime"] = mtime
+        entry["synced"] = True
+        _cache.move_to_end(path)
+        return pos - start_offset, clipped
 
 
-def _evict_missing():
-    """Drop cache entries for files that no longer exist on disk. Called
-    with _lock held; bounded by MAX_CACHE_ENTRIES so this is at most 2000
-    stat-ish lookups."""
+def _evict_missing(discovered_paths):
+    """Drop cache entries for files that no longer exist on disk. Only
+    checks paths NOT in `discovered_paths` (files this call's os.walk
+    already confirmed exist via a successful stat), so a steady-state
+    poll against an unchanged root does zero exists() calls instead of
+    up to MAX_CACHE_ENTRIES every time. Called with _lock held."""
     for path in list(_cache.keys()):
+        if path in discovered_paths:
+            continue
         if not os.path.exists(path):
             del _cache[path]
 
@@ -286,37 +413,66 @@ def rollup(root=None, max_bytes_per_call=DEFAULT_MAX_BYTES_PER_CALL,
     """Per-session and per-day token rollups for every transcript under
     `root` (default ~/.claude/projects, honouring CLAUDE_CONFIG_DIR).
 
+    A session's own file and its subagents/agent-*.jsonl files are summed
+    together under the session id carried in their records (see
+    _consume_line), not overwritten: multiple files legitimately
+    contribute to one session's totals, and each file keeps its own
+    (message.id, requestId) dedup set (see _update_entry / _consume_line)
+    rather than sharing one across files.
+
     Reads incrementally via the module cache: unchanged files are served
     from cache without being opened, changed files have only their new
-    bytes parsed. Newest-mtime-first, so live sessions stay current even
-    when `max_bytes_per_call` (default 64 MiB, summed across every file
-    touched this call) forces the rest to fall back to their last-known
-    cached totals, in which case the result's "partial" is True.
+    bytes parsed, clipped to `max_bytes_per_call` (default 64 MiB, summed
+    across every file touched this call). Newest-mtime-first, so live
+    sessions stay current even when the budget forces the rest to fall
+    back to their last-known cached totals or a single file's read to be
+    clipped short of its true pending data, in which case the result's
+    "partial" is True.
     """
     root = _default_root() if root is None else root
     file_entries, discover_skipped = _discover_files(root)
+    discovered_paths = {e[0] for e in file_entries}
 
     with _lock:
-        _evict_missing()
-        for path, _project, _size, _mtime, _inode in file_entries:
+        _evict_missing(discovered_paths)
+
+    total_bytes_read = 0
+    skipped = discover_skipped
+    partial = False
+
+    # Newest-mtime-first, same order as file_entries, so a byte budget
+    # that runs out mid-call spends itself on the most active sessions
+    # first: _update_entry() does its own (per-file) locking around this.
+    for path, project, size, mtime, inode in file_entries:
+        remaining = max_bytes_per_call - total_bytes_read
+        if remaining <= 0:
+            partial = True
+            continue
+        try:
+            bytes_read, clipped = _update_entry(path, project, size, mtime, inode, remaining)
+        except OSError:
+            skipped += 1
+            continue
+        total_bytes_read += bytes_read
+        if clipped:
+            partial = True
+
+    with _lock:
+        # Bump every file this call stat'ed (whether or not it was
+        # actually read: os.stat happened for all of them in
+        # _discover_files) to reflect "least recently stat'ed" LRU order,
+        # authoritatively overriding whatever order _update_entry's own
+        # per-file move_to_end() calls left things in above (which runs
+        # newest-first for budget prioritization, not LRU purposes).
+        # Bumping in oldest-mtime-first order here means the LAST
+        # move_to_end() call (the newest file) ends up truly last, i.e.
+        # most protected from _enforce_cache_cap()'s popitem(last=False),
+        # which evicts from the front. Bumping newest-first would do the
+        # opposite: push the most active files toward the front, where
+        # they'd be the FIRST evicted past the cache cap.
+        for path, _project, _size, _mtime, _inode in reversed(file_entries):
             if path in _cache:
                 _cache.move_to_end(path)
-
-        total_bytes_read = 0
-        skipped = discover_skipped
-        partial = False
-
-        for path, project, size, mtime, inode in file_entries:
-            if total_bytes_read >= max_bytes_per_call:
-                partial = True
-                continue
-            session_id = os.path.splitext(os.path.basename(path))[0]
-            try:
-                bytes_read = _update_entry(path, project, session_id, size, mtime, inode)
-            except OSError:
-                skipped += 1
-                continue
-            total_bytes_read += bytes_read
 
         _enforce_cache_cap()
 
@@ -326,28 +482,70 @@ def rollup(root=None, max_bytes_per_call=DEFAULT_MAX_BYTES_PER_CALL,
             - datetime.timedelta(days=days)
         ).date().isoformat()
 
-        sessions_out = {}
-        daily_accum = {}
+        # Merge per-file cache entries into per-session accumulators.
+        # Multiple files (a session's own transcript plus any of its
+        # subagents/agent-*.jsonl files) can map to the same session id
+        # and must SUM, not overwrite: each is a genuinely different
+        # slice of that session's cost.
+        session_accum = {}
         for path, _project, _size, _mtime, _inode in file_entries:
             entry = _cache.get(path)
-            if entry is None:
+            if entry is None or not entry["synced"]:
                 continue  # never successfully read (e.g. always failed to open)
+            session_id = entry["session_id"] or os.path.splitext(os.path.basename(path))[0]
+            acc = session_accum.get(session_id)
+            if acc is None:
+                acc = {
+                    "session_id": session_id,
+                    "project": entry["project"],
+                    "input": 0, "cache_read": 0, "cache_write": 0, "output": 0,
+                    "first_ts": None, "last_ts": None,
+                    "models": {}, "messages": 0,
+                    "daily": {},
+                }
+                session_accum[session_id] = acc
             totals = entry["totals"]
-            sessions_out[entry["session_id"]] = {
-                "session_id": entry["session_id"],
-                "project": entry["project"],
-                "input": totals["input"],
-                "cache_read": totals["cache_read"],
-                "cache_write": totals["cache_write"],
-                "output": totals["output"],
-                "effective": effective(**totals),
-                "first_ts": entry["first_ts"],
-                "last_ts": entry["last_ts"],
-                "models": dict(entry["models"]),
-                "messages": entry["messages"],
-            }
+            acc["input"] += totals["input"]
+            acc["cache_read"] += totals["cache_read"]
+            acc["cache_write"] += totals["cache_write"]
+            acc["output"] += totals["output"]
+            acc["messages"] += entry["messages"]
+            for model, count in entry["models"].items():
+                acc["models"][model] = acc["models"].get(model, 0) + count
+            if entry["first_ts"] is not None and (
+                    acc["first_ts"] is None or entry["first_ts"] < acc["first_ts"]):
+                acc["first_ts"] = entry["first_ts"]
+            if entry["last_ts"] is not None and (
+                    acc["last_ts"] is None or entry["last_ts"] > acc["last_ts"]):
+                acc["last_ts"] = entry["last_ts"]
             for date_str, day in entry["daily"].items():
-                if date_str < cutoff_str:
+                bucket = acc["daily"].setdefault(
+                    date_str, {"input": 0, "cache_read": 0, "cache_write": 0, "output": 0})
+                bucket["input"] += day["input"]
+                bucket["cache_read"] += day["cache_read"]
+                bucket["cache_write"] += day["cache_write"]
+                bucket["output"] += day["output"]
+
+        sessions_out = {}
+        daily_accum = {}
+        for session_id, acc in session_accum.items():
+            sessions_out[session_id] = {
+                "session_id": session_id,
+                "project": acc["project"],
+                "input": acc["input"],
+                "cache_read": acc["cache_read"],
+                "cache_write": acc["cache_write"],
+                "output": acc["output"],
+                "effective": effective(
+                    input=acc["input"], cache_read=acc["cache_read"],
+                    cache_write=acc["cache_write"], output=acc["output"]),
+                "first_ts": acc["first_ts"],
+                "last_ts": acc["last_ts"],
+                "models": acc["models"],
+                "messages": acc["messages"],
+            }
+            for date_str, day in acc["daily"].items():
+                if date_str <= cutoff_str:  # strict: `days` buckets, not days+1
                     continue
                 bucket = daily_accum.setdefault(
                     date_str, {"input": 0, "cache_read": 0, "cache_write": 0, "output": 0})
@@ -375,7 +573,8 @@ def rollup(root=None, max_bytes_per_call=DEFAULT_MAX_BYTES_PER_CALL,
 def session_usage(session_id, root=None):
     """One session's totals, or None if it hasn't been seen. Uses the
     same cache as rollup() (implemented as a thin lookup over a rollup()
-    call, so a single code path owns the read/cache/dedup contract)."""
+    call, so a single code path owns the read/cache/dedup/merge
+    contract)."""
     data = rollup(root=root)
     return data["sessions"].get(session_id)
 
