@@ -644,6 +644,15 @@ def rollup(root=None, max_bytes_per_call=DEFAULT_MAX_BYTES_PER_CALL,
     at roughly 2K, one-time (it does not recur once every stalled file
     has either recovered or hit its own give-up threshold and stopped
     being attempted at all under that budget).
+
+    Also returns `daily_by_project`: the same totals as `daily`, the
+    same 30 day window, the same sparse rule (only days actually seen),
+    just grouped by (day, project) instead of summed across every
+    project. Built from the same per-file entries this function already
+    reads (each one already knows its own `project` and `daily`, see
+    _new_entry), so this is one extra grouping pass, not a second read
+    or parse. `daily` itself is unchanged: several callers already read
+    it as the device-wide trend.
     """
     root = _default_root() if root is None else root
     file_entries, discover_skipped = _discover_files(root)
@@ -726,6 +735,13 @@ def rollup(root=None, max_bytes_per_call=DEFAULT_MAX_BYTES_PER_CALL,
         # and must SUM, not overwrite: each is a genuinely different
         # slice of that session's cost.
         session_accum = {}
+        # (day, project) accumulator for daily_by_project below: filled
+        # from the same per-file entries as session_accum above, just
+        # grouped differently. Each file already knows its own project
+        # (entry["project"], set in _new_entry/_update_entry) and its own
+        # daily buckets (entry["daily"]), so this reuses data already
+        # being read in the loop below rather than re-parsing anything.
+        project_daily_accum = {}
         for path, _project, _size, _mtime, _inode in file_entries:
             entry = _cache.get(path)
             if entry is None or not entry["synced"]:
@@ -771,6 +787,14 @@ def rollup(root=None, max_bytes_per_call=DEFAULT_MAX_BYTES_PER_CALL,
                 bucket["cache_read"] += day["cache_read"]
                 bucket["cache_write"] += day["cache_write"]
                 bucket["output"] += day["output"]
+            for date_str, day in entry["daily"].items():
+                proj_bucket = project_daily_accum.setdefault(
+                    (date_str, entry["project"]),
+                    {"input": 0, "cache_read": 0, "cache_write": 0, "output": 0})
+                proj_bucket["input"] += day["input"]
+                proj_bucket["cache_read"] += day["cache_read"]
+                proj_bucket["cache_write"] += day["cache_write"]
+                proj_bucket["output"] += day["output"]
 
         sessions_out = {}
         daily_accum = {}
@@ -805,9 +829,21 @@ def rollup(root=None, max_bytes_per_call=DEFAULT_MAX_BYTES_PER_CALL,
             for date_str, bucket in daily_accum.items()
         }
 
+        # Same cutoff_str window and sparse rule as daily_out above, just
+        # kept split by project instead of summed across all of them. A
+        # list, not a dict: (day, project) is a compound key with no
+        # single obvious string form, and the eventual consumer wants
+        # rows anyway (fleet.py, then the hub's cost_daily table).
+        daily_by_project_out = [
+            dict(bucket, day=date_str, project=project, effective=effective(**bucket))
+            for (date_str, project), bucket in project_daily_accum.items()
+            if date_str > cutoff_str  # strict: `days` buckets, not days+1, same as daily_out
+        ]
+
         return {
             "sessions": sessions_out,
             "daily": daily_out,
+            "daily_by_project": daily_by_project_out,
             "generated_at": now,
             "files": len(file_entries) + discover_skipped,
             "bytes_read": total_bytes_read,
