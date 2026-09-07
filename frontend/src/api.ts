@@ -206,14 +206,70 @@ export interface AlertsReport {
 
 const REQUEST_TIMEOUT_MS = 10_000;
 
+// Element-level guards. A round of review found the depth-1 checks below
+// this comment correct (every top-level malformation rejected, no valid
+// payload wrongly rejected) but insufficient: `devices: [null]`,
+// `devices: [{}]`, a device with no `daily`, `projects: [null]` and
+// `alerts: [null]` all pass an array-is-array check and then throw deep in
+// a render (`d.day`, `p.device_id`, the alert row's key, etc.), with no
+// ErrorBoundary in main.tsx to catch it, blanking the app. A partially
+// shipped backend produces exactly this shape, so these are load-bearing,
+// not defensive theater.
+//
+// Each guard checks only the fields this app actually reads off that
+// element (see CostView.tsx/AlertsIndicator.tsx), and only that they have
+// the right type, not that the object has no other fields, so a valid
+// element carrying fields this app doesn't know about yet is still
+// accepted.
+function isCostDailyBucket(v: unknown): v is CostDailyBucket {
+  if (!v || typeof v !== 'object') return false;
+  const d = v as Record<string, unknown>;
+  return typeof d.day === 'string' && typeof d.effective === 'number';
+}
+
+function isCostDevice(v: unknown): v is CostDevice {
+  if (!v || typeof v !== 'object') return false;
+  const d = v as Record<string, unknown>;
+  return typeof d.device_id === 'string'
+    && typeof d.name === 'string'
+    && typeof d.total_effective === 'number'
+    && Array.isArray(d.daily)
+    && d.daily.every(isCostDailyBucket);
+}
+
+function isCostProject(v: unknown): v is CostProject {
+  if (!v || typeof v !== 'object') return false;
+  const p = v as Record<string, unknown>;
+  return typeof p.device_id === 'string'
+    && typeof p.project === 'string'
+    && typeof p.effective === 'number';
+}
+
 function isCostReport(v: unknown): v is CostReport {
   if (!v || typeof v !== 'object') return false;
   const r = v as Record<string, unknown>;
   return typeof r.generated_at === 'number'
     && typeof r.days === 'number'
-    && Array.isArray(r.devices)
-    && Array.isArray(r.projects)
+    && Array.isArray(r.devices) && r.devices.every(isCostDevice)
+    && Array.isArray(r.projects) && r.projects.every(isCostProject)
     && !!r.totals && typeof r.totals === 'object';
+}
+
+function isAlertFinding(v: unknown): v is AlertFinding {
+  if (!v || typeof v !== 'object') return false;
+  const f = v as Record<string, unknown>;
+  return typeof f.rule === 'string'
+    && typeof f.severity === 'string'
+    && typeof f.target_type === 'string'
+    && typeof f.device_id === 'string'
+    && typeof f.session_id === 'string'
+    && typeof f.name === 'string'
+    && typeof f.message === 'string'
+    && typeof f.value === 'number'
+    && typeof f.threshold === 'number'
+    && typeof f.since === 'number'
+    && typeof f.first_seen === 'number'
+    && typeof f.last_seen === 'number';
 }
 
 function isAlertsReport(v: unknown): v is AlertsReport {
@@ -223,7 +279,7 @@ function isAlertsReport(v: unknown): v is AlertsReport {
   if (!r.summary || typeof r.summary !== 'object') return false;
   const s = r.summary as Record<string, unknown>;
   if (typeof s.alert !== 'number' || typeof s.warn !== 'number') return false;
-  if (!Array.isArray(r.alerts)) return false;
+  if (!Array.isArray(r.alerts) || !r.alerts.every(isAlertFinding)) return false;
   return 'config_error' in r;
 }
 
