@@ -3,6 +3,7 @@ via sessions.list_rc_sessions) merged with recent hook events (events.py),
 role-gated. Called in-process by the hub for itself, and over HTTP
 (GET /fleet, proxied as GET /rc/fleet) for every other device.
 """
+import datetime
 import hashlib
 import os
 import time
@@ -65,23 +66,25 @@ def _redact_usage(usage_row):
     return {"effective": usage_row["effective"]}
 
 
-def _usage_lookup(usage_result):
-    """session_id -> the contract's per-session usage shape, or a
-    lookup that always returns None if rollup() itself failed."""
-    usage_sessions = usage_result["sessions"] if usage_result is not None else {}
+def _today_str(now):
+    return datetime.datetime.fromtimestamp(now, datetime.timezone.utc).date().isoformat()
 
-    def usage_for(session_id):
-        # usage.rollup() keys sessions by the UUID carried in the
-        # transcript record itself. A launcher/external row's session_id
-        # matches that UUID, but an adopted row may carry a tmux-derived
-        # id (e.g. "tmux:rc-foo") that no transcript will ever have.
-        # dict.get() returns None for both "no transcript yet" and "this
-        # id will never have one", which is exactly the distinction the
-        # contract wants: None means unknown, never a dict of zeros.
-        entry = usage_sessions.get(session_id)
-        if entry is None:
-            return None
-        return {
+
+def _usage_by_session(usage_result):
+    """usage.rollup()['sessions'], eagerly reshaped to the contract's
+    per-session usage dict, keyed by session id. This runs INSIDE
+    build_fleet's usage try/except (see there), and reads every field of
+    every entry right here rather than lazily later: a malformed
+    rollup() return (sessions not a dict, an entry that isn't a dict,
+    missing/wrong-typed fields) must raise HERE, where it is caught and
+    turned into one ("usage", e) error, not later while building session
+    rows outside any guard (fix round 1, Important 1)."""
+    sessions_in = usage_result["sessions"]
+    if not isinstance(sessions_in, dict):
+        raise TypeError("usage.rollup()['sessions'] is not a dict")
+    out = {}
+    for session_id, entry in sessions_in.items():
+        out[session_id] = {
             "input": entry["input"],
             "cache_read": entry["cache_read"],
             "cache_write": entry["cache_write"],
@@ -89,40 +92,84 @@ def _usage_lookup(usage_result):
             "effective": entry["effective"],
             "last_ts": entry["last_ts"],
         }
+    return out
 
-    return usage_for
 
-
-def _usage_daily_rows(usage_result):
-    """Full-shape usage_daily list, newest day first, capped at
-    USAGE_DAILY_MAX_DAYS. Empty when rollup() failed (see build_fleet):
-    an empty list, not 30 zero-filled days, because no data was read at
-    all, which is a different fact than every day being genuinely zero."""
-    if usage_result is None:
-        return []
-    daily_items = sorted(usage_result["daily"].items(), key=lambda kv: kv[0], reverse=True)
-    return [
-        {
+def _usage_daily_rows(usage_result, today_str):
+    """usage.rollup()['daily'], eagerly reshaped to the usage_daily list:
+    newest day first, capped at USAGE_DAILY_MAX_DAYS. Any day after
+    `today_str` is dropped BEFORE sorting/capping so a handful of
+    future-dated records (clock skew on some device) can't evict real
+    days out of the capped window (fix round 1, Minor)."""
+    daily_in = usage_result["daily"]
+    if not isinstance(daily_in, dict):
+        raise TypeError("usage.rollup()['daily'] is not a dict")
+    rows = []
+    for day, bucket in daily_in.items():
+        if not isinstance(day, str) or day > today_str:
+            continue
+        rows.append({
             "day": day,
             "input": bucket["input"],
             "cache_read": bucket["cache_read"],
             "cache_write": bucket["cache_write"],
             "output": bucket["output"],
             "effective": bucket["effective"],
-        }
-        for day, bucket in daily_items[:USAGE_DAILY_MAX_DAYS]
-    ]
+        })
+    rows.sort(key=lambda row: row["day"], reverse=True)
+    return rows[:USAGE_DAILY_MAX_DAYS]
+
+
+def _usage_daily_by_project_rows(usage_result, today_str):
+    """usage.rollup()['daily_by_project'], eagerly reshaped and validated
+    the same way as _usage_daily_rows, including the same future-date
+    guard. NOT capped at USAGE_DAILY_MAX_DAYS by row count: several
+    projects can share one day, so that cap would cut real rows instead
+    of just bounding a per-day list. The 30 day WINDOW is already
+    enforced by usage.rollup() itself (same cutoff as daily)."""
+    rows_in = usage_result["daily_by_project"]
+    if not isinstance(rows_in, list):
+        raise TypeError("usage.rollup()['daily_by_project'] is not a list")
+    rows = []
+    for row in rows_in:
+        day = row["day"]
+        if not isinstance(day, str) or day > today_str:
+            continue
+        rows.append({
+            "day": day,
+            "project": row["project"],
+            "input": row["input"],
+            "cache_read": row["cache_read"],
+            "cache_write": row["cache_write"],
+            "output": row["output"],
+            "effective": row["effective"],
+        })
+    # Stable sort twice: project ascending first, then day descending, so
+    # rows for the same day come out project-ascending (day is the only
+    # order the contract actually asks for; project order is just for a
+    # deterministic, testable payload).
+    rows.sort(key=lambda row: row["project"])
+    rows.sort(key=lambda row: row["day"], reverse=True)
+    return rows
 
 
 def _usage_meta(usage_result):
-    if usage_result is None:
-        return None
     return {
         "files": usage_result["files"],
         "skipped": usage_result["skipped"],
         "partial": usage_result["partial"],
         "generated_at": usage_result["generated_at"],
     }
+
+
+def _failed_usage_meta(now):
+    """usage_meta must always be a dict, never None: a hub reading
+    `(meta or {}).get("partial")` would otherwise see "complete" at
+    exactly the moment usage.rollup() failed and the device actually
+    knows nothing (fix round 1, Important 2). partial=True and files=0
+    both say the same thing here: no usable usage data this poll, not
+    "zero files exist"."""
+    return {"files": 0, "skipped": 0, "partial": True, "generated_at": now}
 
 
 def _remember(cache_key, role, result, now):
@@ -181,25 +228,44 @@ def build_fleet(since=None, role=None, events_root=None, now_fn=time.time):
     # max_bytes_per_call is passed explicitly at usage.py's own default so
     # a future reader sees the budget was a deliberate choice, not an
     # accident of whatever the default happens to be later.
+    #
+    # Everything this function hands out about usage (per-session usage,
+    # usage_daily, usage_daily_by_project, usage_meta) is built INSIDE
+    # this try, not just the rollup() call itself: a malformed return
+    # (wrong types, missing keys, a session entry that isn't even a
+    # dict) must fail HERE, where it becomes one ("usage", e) error like
+    # any other, never as an uncaught KeyError/TypeError while building
+    # session rows further down (fix round 1, Important 1). Treated as
+    # all-or-nothing on purpose: a poll where usage.rollup() only
+    # half-validates is exactly as unusable to a guard cost rule as one
+    # that raised outright, so there is no reason to keep a partially
+    # validated result around.
+    today_str = _today_str(now)
     try:
         usage_result = usage.rollup(
             max_bytes_per_call=usage.DEFAULT_MAX_BYTES_PER_CALL,
             now_fn=lambda: now,
             days=USAGE_DAILY_MAX_DAYS,
         )
+        if not isinstance(usage_result, dict):
+            raise TypeError(f"usage.rollup returned {type(usage_result).__name__}, expected dict")
+        usage_by_session = _usage_by_session(usage_result)
+        usage_daily_full = _usage_daily_rows(usage_result, today_str)
+        usage_daily_by_project_full = _usage_daily_by_project_rows(usage_result, today_str)
+        usage_meta = _usage_meta(usage_result)
     except Exception as e:
-        usage_result, errors_raw = None, errors_raw + [("usage", e)]
+        errors_raw = errors_raw + [("usage", e)]
+        usage_by_session = {}
+        usage_daily_full = []
+        usage_daily_by_project_full = []
+        usage_meta = _failed_usage_meta(now)
 
     caps = compat.get_caps()
     salt = getattr(config, "RC_HASH_SALT", "") or os.environ.get("RC_HASH_SALT", "")
 
-    usage_for = _usage_lookup(usage_result)
-    usage_daily_full = _usage_daily_rows(usage_result)
-    usage_meta = _usage_meta(usage_result)
-
     if role == "metadata":
         out_sessions = [
-            dict(_redact_session(s, salt), usage=_redact_usage(usage_for(s.get("session_id"))))
+            dict(_redact_session(s, salt), usage=_redact_usage(usage_by_session.get(s.get("session_id"))))
             for s in raw_sessions
         ]
         out_events = [_redact_event(e) for e in raw_events]
@@ -208,7 +274,7 @@ def build_fleet(since=None, role=None, events_root=None, now_fn=time.time):
         # home path/username) once role gates cwd/session identity too.
         errors = [f"{label}: {type(e).__name__}" for label, e in errors_raw]
     else:
-        out_sessions = [dict(s, usage=usage_for(s.get("session_id"))) for s in raw_sessions]
+        out_sessions = [dict(s, usage=usage_by_session.get(s.get("session_id"))) for s in raw_sessions]
         out_events = raw_events
         usage_daily = usage_daily_full
         errors = [f"{label}: {e}" for label, e in errors_raw]
@@ -227,5 +293,11 @@ def build_fleet(since=None, role=None, events_root=None, now_fn=time.time):
         "usage_meta": usage_meta,
         "errors": errors,
     }
+    # A project name is the cwd by another name, so under metadata role
+    # it is dropped entirely (key absent), not merely reduced the way
+    # usage/usage_daily are above: there is no aggregate-only shape of
+    # "which project" that doesn't itself identify the project.
+    if role != "metadata":
+        result["usage_daily_by_project"] = usage_daily_by_project_full
     _remember(cache_key, role, result, now)
     return result
