@@ -1,4 +1,5 @@
-"""Hub-side SQLite store: devices, sessions, session_events, audit_log.
+"""Hub-side SQLite store: devices, sessions, session_events, audit_log,
+session_usage, cost_daily, alerts.
 
 One writer thread drains a queue.Queue (SQLite/WAL allows one writer at a
 time; funneling every write through one thread avoids "database is locked"
@@ -86,7 +87,33 @@ CREATE TABLE IF NOT EXISTS audit_log (
     target TEXT, device_id TEXT, detail TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_log(ts);
+CREATE TABLE IF NOT EXISTS session_usage (
+    device_id TEXT, session_id TEXT,
+    input INTEGER, cache_read INTEGER, cache_write INTEGER,
+    output INTEGER, effective INTEGER,
+    last_ts REAL, updated_at REAL,
+    PRIMARY KEY (device_id, session_id)
+);
+CREATE TABLE IF NOT EXISTS cost_daily (
+    device_id TEXT, day TEXT, project TEXT,
+    input INTEGER, cache_read INTEGER, cache_write INTEGER,
+    output INTEGER, effective INTEGER, updated_at REAL,
+    PRIMARY KEY (device_id, day, project)
+);
+CREATE INDEX IF NOT EXISTS idx_cost_daily_day ON cost_daily(day);
+CREATE TABLE IF NOT EXISTS alerts (
+    device_id TEXT, session_id TEXT, rule TEXT,
+    severity TEXT, message TEXT, value REAL, threshold REAL,
+    since REAL, first_seen REAL, last_seen REAL,
+    PRIMARY KEY (device_id, session_id, rule)
+);
 """
+# session_usage, cost_daily and alerts (Phase 3 wiring, CONTRACT.md section
+# 2) are all brand-new tables, so CREATE TABLE IF NOT EXISTS above is safe
+# against the live hub.db as it stands today -- no ALTER TABLE / additive
+# migration needed for them. That pattern (_NEW_SESSION_COLUMNS /
+# _migrate_session_columns below) is only for adding columns to a table
+# that already exists on disk.
 
 # session_events natural key: (device_id, session_id, ts, event). A poller
 # cursor rewind re-submits the same rows; INSERT OR IGNORE against this
@@ -446,15 +473,161 @@ class Store:
                 (now_fn(), actor, action, target, device_id, detail))
         return self._write(_do)
 
+    def upsert_session_usage(self, device_id, rows, now_fn=time.time):
+        """Upsert per-session token-usage totals for `device_id` (usage.py's
+        per-session accounting, one row per live/known session). Each row
+        in `rows` is a dict with session_id, input, cache_read,
+        cache_write, output, effective, last_ts.
+
+        A row with no session_id is skipped and logged, matching
+        upsert_sessions: session_id is the natural key here too (paired
+        with device_id) and there is no safe fallback key."""
+        def _do(conn):
+            now = now_fn()
+            skipped = 0
+            for r in rows:
+                sid = r.get("session_id")
+                if not sid:
+                    skipped += 1
+                    _LOG.warning(
+                        "upsert_session_usage: skipping row for device %r with no session_id: %r",
+                        device_id, r)
+                    continue
+                conn.execute(
+                    "INSERT INTO session_usage (device_id, session_id, input, cache_read, "
+                    "cache_write, output, effective, last_ts, updated_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?) "
+                    "ON CONFLICT(device_id, session_id) DO UPDATE SET "
+                    "input=excluded.input, cache_read=excluded.cache_read, "
+                    "cache_write=excluded.cache_write, output=excluded.output, "
+                    "effective=excluded.effective, last_ts=excluded.last_ts, "
+                    "updated_at=excluded.updated_at",
+                    (device_id, sid, r.get("input"), r.get("cache_read"), r.get("cache_write"),
+                     r.get("output"), r.get("effective"), r.get("last_ts"), now))
+            return {"skipped": skipped}
+        return self._write(_do)
+
+    def upsert_cost_daily(self, device_id, rows, now_fn=time.time):
+        """Replace (never accumulate) this device's per-project daily cost
+        totals. Each row in `rows` is a dict with day, project, input,
+        cache_read, cache_write, output, effective. The device reports
+        CUMULATIVE totals for a given day on every poll, so this upsert
+        overwrites the stored values for (device_id, day, project) rather
+        than adding to them -- adding would multiply every number by the
+        poll count.
+
+        A row with no `day` is skipped and logged: (device_id, day,
+        project) is the natural key, and unlike session_id above, SQLite
+        does not even reject a NULL day here (PRIMARY KEY alone does not
+        imply NOT NULL for non-INTEGER columns), so an unguarded NULL
+        would silently pile up its own duplicate rows instead of erroring
+        -- skip-and-log makes the failure visible instead. `project`
+        missing/empty is valid (CONTRACT.md: the empty string when the
+        device did not report one, e.g. metadata role) and is stored as
+        "" rather than skipped."""
+        def _do(conn):
+            now = now_fn()
+            skipped = 0
+            for r in rows:
+                day = r.get("day")
+                if not day:
+                    skipped += 1
+                    _LOG.warning(
+                        "upsert_cost_daily: skipping row for device %r with no day: %r",
+                        device_id, r)
+                    continue
+                project = r.get("project") or ""
+                conn.execute(
+                    "INSERT INTO cost_daily (device_id, day, project, input, cache_read, "
+                    "cache_write, output, effective, updated_at) VALUES (?,?,?,?,?,?,?,?,?) "
+                    "ON CONFLICT(device_id, day, project) DO UPDATE SET "
+                    "input=excluded.input, cache_read=excluded.cache_read, "
+                    "cache_write=excluded.cache_write, output=excluded.output, "
+                    "effective=excluded.effective, updated_at=excluded.updated_at",
+                    (device_id, day, project, r.get("input"), r.get("cache_read"),
+                     r.get("cache_write"), r.get("output"), r.get("effective"), now))
+            return {"skipped": skipped}
+        return self._write(_do)
+
+    def replace_alerts(self, findings, now_fn=time.time):
+        """Make the alerts table equal `findings` (guard.evaluate()'s
+        output) exactly: every finding upserts its row, preserving
+        first_seen and moving last_seen to now, and then every row NOT
+        present in this batch is deleted -- so after this call the table
+        holds precisely the current findings, nothing stale.
+
+        Both halves run inside this single _do, which is the writer
+        thread's one transaction (see _writer_loop: conn.commit() only
+        after `fn` returns without raising, conn.rollback() otherwise),
+        so a crash or exception partway through leaves the table exactly
+        as it was before this call -- never a mix of old and new rows.
+
+        A finding's session_id is None for device-targeted findings
+        (guard._device_finding always sets it to None); stored here as
+        the empty string, never NULL. SQLite does not enforce uniqueness
+        across multiple NULLs in a composite PRIMARY KEY (SQL NULL !=
+        NULL), so a device finding upserted twice with session_id=NULL
+        would insert a second row instead of replacing the first -- the
+        same failure mode the session_events unique index works around
+        elsewhere in this file, just hit here via PRIMARY KEY instead of
+        a UNIQUE index.
+
+        A finding missing `device_id` or `rule` cannot form the primary
+        key at all; such findings are skipped and logged rather than
+        raising, since evaluate() itself is documented to never raise and
+        replace_alerts must not turn a malformed finding into a lost
+        poll cycle for every other finding in the same batch."""
+        def _do(conn):
+            now = now_fn()
+            current_keys = set()
+            for f in findings:
+                device_id = f.get("device_id")
+                rule = f.get("rule")
+                if not device_id or not rule:
+                    _LOG.warning("replace_alerts: skipping malformed finding: %r", f)
+                    continue
+                session_id = f.get("session_id") or ""
+                current_keys.add((device_id, session_id, rule))
+                conn.execute(
+                    "INSERT INTO alerts (device_id, session_id, rule, severity, message, "
+                    "value, threshold, since, first_seen, last_seen) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?) "
+                    "ON CONFLICT(device_id, session_id, rule) DO UPDATE SET "
+                    "severity=excluded.severity, message=excluded.message, "
+                    "value=excluded.value, threshold=excluded.threshold, "
+                    "since=excluded.since, last_seen=excluded.last_seen",
+                    (device_id, session_id, rule, f.get("severity"), f.get("message"),
+                     f.get("value"), f.get("threshold"), f.get("since"), now, now))
+            existing_keys = [
+                (row["device_id"], row["session_id"], row["rule"])
+                for row in conn.execute("SELECT device_id, session_id, rule FROM alerts")]
+            for key in existing_keys:
+                if key not in current_keys:
+                    conn.execute(
+                        "DELETE FROM alerts WHERE device_id=? AND session_id=? AND rule=?", key)
+            return {"count": len(current_keys)}
+        return self._write(_do)
+
     def prune(self, days=14, now_fn=time.time):
         def _do(conn):
             cutoff = now_fn() - days * 86400
+            cutoff_day = time.strftime("%Y-%m-%d", time.gmtime(cutoff))
             ev = conn.execute("DELETE FROM session_events WHERE ts < ?", (cutoff,)).rowcount
             au = conn.execute("DELETE FROM audit_log WHERE ts < ?", (cutoff,)).rowcount
             se = conn.execute(
                 "DELETE FROM sessions WHERE ended_at IS NOT NULL AND ended_at < ?",
                 (cutoff,)).rowcount
-            return {"events": ev, "audit_log": au, "sessions": se}
+            # Orphans: a session_usage row whose (device_id, session_id) no
+            # longer has a sessions row at all -- including one just pruned
+            # by `se` above, in the same transaction, since this SELECT
+            # sees this connection's own uncommitted deletes.
+            su = conn.execute(
+                "DELETE FROM session_usage WHERE NOT EXISTS ("
+                "SELECT 1 FROM sessions s WHERE s.device_id = session_usage.device_id "
+                "AND s.session_id = session_usage.session_id)").rowcount
+            cd = conn.execute("DELETE FROM cost_daily WHERE day < ?", (cutoff_day,)).rowcount
+            return {"events": ev, "audit_log": au, "sessions": se,
+                    "session_usage": su, "cost_daily": cd}
         return self._write(_do)
 
     # -- reads -----------------------------------------------------------
@@ -465,7 +638,14 @@ class Store:
         list forever (nothing ever called prune() from the poll loop
         before, so store.py alone couldn't rely on rows disappearing).
         Pass include_ended=True for callers that still need dead sessions
-        -- e.g. activity/history views keyed off session_id."""
+        -- e.g. activity/history views keyed off session_id.
+
+        Each session row gains `usage`, joined from session_usage on
+        (device_id, session_id): a dict with input/cache_read/
+        cache_write/output/effective/last_ts when a row exists there,
+        else None -- never a dict of zeros, since "no transcript data
+        yet" and "confirmed zero usage" are different facts a guard rule
+        (and the UI) must be able to tell apart."""
         conn = self._read_conn()
         try:
             devices_rows = [dict(r) for r in conn.execute(
@@ -476,10 +656,115 @@ class Store:
             else:
                 session_rows = [dict(r) for r in conn.execute(
                     "SELECT * FROM sessions WHERE ended_at IS NULL ORDER BY last_seen DESC")]
+            usage_map = {
+                (u["device_id"], u["session_id"]): {
+                    "input": u["input"], "cache_read": u["cache_read"],
+                    "cache_write": u["cache_write"], "output": u["output"],
+                    "effective": u["effective"], "last_ts": u["last_ts"],
+                }
+                for u in conn.execute(
+                    "SELECT device_id, session_id, input, cache_read, cache_write, "
+                    "output, effective, last_ts FROM session_usage")
+            }
             for s in session_rows:
                 s["tmux"] = _parse_json_or_none(s.get("tmux"))
                 s["claude"] = _parse_json_or_none(s.get("claude"))
+                s["usage"] = usage_map.get((s["device_id"], s["session_id"]))
             return {"devices": devices_rows, "sessions": session_rows}
+        finally:
+            conn.close()
+
+    def cost_view(self, days=30):
+        """Hub-wide cost aggregation over the last `days` days, built from
+        cost_daily. Returns {"devices": [...], "projects": [...],
+        "generated_at": float} -- CONTRACT.md section 2/3: this is the
+        already-aggregated "devices"/"projects" portion of the /api/cost
+        response; the API layer wraps it with the request's own `days`
+        and a `totals` rollup rather than reshaping what comes back here.
+
+        devices: [{"device_id", "name", "total_effective",
+                   "daily": [{"day","input","cache_read","cache_write",
+                              "output","effective"}, ...newest first]},
+                  ...sorted by total_effective descending]
+        projects: [{"device_id","project","effective"}, ...sorted by
+                   effective descending, capped at 50]
+
+        No now_fn parameter (per CONTRACT.md): cost_daily.day is a
+        calendar-date string, not an epoch, written once per real day by
+        the poll loop -- there is no meaningful way to fake "now" here
+        independent of also faking every seeded row's own day string, so
+        tests control the window by choosing real day strings relative to
+        the actual wall clock instead."""
+        conn = self._read_conn()
+        try:
+            now = time.time()
+            cutoff_day = time.strftime("%Y-%m-%d", time.gmtime(now - days * 86400))
+            rows = [dict(r) for r in conn.execute(
+                "SELECT * FROM cost_daily WHERE day >= ? ORDER BY day DESC", (cutoff_day,))]
+            device_names = {r["id"]: r["name"] for r in conn.execute(
+                "SELECT id, name FROM devices")}
+
+            # Multiple projects can contribute to the same (device_id, day);
+            # collapse those before building the per-device daily list.
+            by_device_day = {}
+            for r in rows:
+                key = (r["device_id"], r["day"])
+                agg = by_device_day.setdefault(key, {
+                    "day": r["day"], "input": 0, "cache_read": 0, "cache_write": 0,
+                    "output": 0, "effective": 0})
+                agg["input"] += r["input"] or 0
+                agg["cache_read"] += r["cache_read"] or 0
+                agg["cache_write"] += r["cache_write"] or 0
+                agg["output"] += r["output"] or 0
+                agg["effective"] += r["effective"] or 0
+
+            devices_map = {}
+            for (device_id, _day), agg in by_device_day.items():
+                dev = devices_map.setdefault(device_id, {
+                    "device_id": device_id,
+                    "name": device_names.get(device_id, device_id),
+                    "total_effective": 0, "daily": []})
+                dev["daily"].append(agg)
+                dev["total_effective"] += agg["effective"]
+            for dev in devices_map.values():
+                dev["daily"].sort(key=lambda d: d["day"], reverse=True)
+            devices_out = sorted(
+                devices_map.values(), key=lambda d: d["total_effective"], reverse=True)
+
+            by_project = {}
+            for r in rows:
+                key = (r["device_id"], r["project"])
+                by_project[key] = by_project.get(key, 0) + (r["effective"] or 0)
+            projects_out = sorted(
+                ({"device_id": device_id, "project": project, "effective": effective}
+                 for (device_id, project), effective in by_project.items()),
+                key=lambda p: p["effective"], reverse=True)[:50]
+
+            return {"devices": devices_out, "projects": projects_out, "generated_at": now}
+        finally:
+            conn.close()
+
+    def live_alerts(self):
+        """All current findings, most severe first (alert before warn),
+        then oldest first_seen first within a severity -- the same
+        ordering as guard._sort_key, so a caller doesn't need to re-sort.
+
+        Returns the raw alerts rows as dicts: device_id, session_id,
+        rule, severity, message, value, threshold, since, first_seen,
+        last_seen. The alerts table (CONTRACT.md section 2) has no
+        `name` or `target_type` column -- those are cheap to derive
+        (target_type from session_id == "", name via a lookup against
+        fleet_view()/devices) and are left to the API layer rather than
+        duplicated into this table, since alerts persists only the
+        fields that must survive across polls."""
+        conn = self._read_conn()
+        try:
+            rows = [dict(r) for r in conn.execute("SELECT * FROM alerts")]
+            rank = {"alert": 0, "warn": 1}
+            rows.sort(key=lambda r: (
+                rank.get(r["severity"], 99),
+                r["first_seen"] if r["first_seen"] is not None else float("inf")))
+            return rows
         finally:
             conn.close()
 
