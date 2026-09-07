@@ -106,6 +106,18 @@ class FleetPoller:
         })
         sessions_in = snapshot.get("sessions") or []
         for s in sessions_in:
+            if not isinstance(s, dict):
+                continue
+            # Fix round 1 (Important): sessions.list_rc_sessions() emits
+            # `workdir` (+ a basename-only `project`, a different thing)
+            # for a launcher row and never `cwd` -- only an external row
+            # carries `cwd`. Without this, every launcher session's stored
+            # `cwd` column is NULL, which makes store._encode_cwd_as_project
+            # -- used by cost_view().sessions -- report project="" for
+            # every launcher session regardless of its real project.
+            # setdefault, not assignment: never overwrite an external
+            # row's real `cwd` with a `workdir` it doesn't have.
+            s.setdefault("cwd", s.get("workdir"))
             # CONTROLLER RULING: needs_attention is derived from each
             # session's own polled state (waiting_for/blocked/busy/idle),
             # not from Stop/UserPromptSubmit events which no longer exist.
@@ -367,6 +379,22 @@ class FleetPoller:
                 # the SSE stream) may still be holding this exact list.
                 s = dict(s)
                 s["last_event_ts"] = event_ts_map.get((s.get("device_id"), s.get("session_id")))
+
+                # Fix round 1 (Critical): store.upsert_sessions refreshes
+                # `last_seen` to the real wall clock for EVERY reported
+                # session on EVERY poll -- it is a liveness heartbeat
+                # ("the hub saw this session in a poll"), not an activity
+                # signal, so it is always approximately "now" and elapsed
+                # time against it is always approximately zero.
+                # guard._rule_stalled treats a session's `last_seen` as
+                # one of its activity candidates; left as-is, that makes
+                # the rule permanently dead in production, which silently
+                # defeats the whole point of the status=="busy" correction
+                # just below (the case the contract carved that out for).
+                # Withheld on this local enrichment copy only -- no other
+                # rule reads session `last_seen`, and the store row (and
+                # therefore the UI) is untouched.
+                s["last_seen"] = None
 
                 # CONTRACT.md section 4, "the stalled rule needs the raw
                 # status": _derive_session_state ranks needs_attention

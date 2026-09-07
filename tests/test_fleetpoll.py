@@ -754,6 +754,62 @@ class UsageCostIngestTest(unittest.TestCase):
         self.assertIn("dev-good", dev_ids)
         self.assertNotIn("local", dev_ids)  # nothing coercible was ever written for it
 
+    @patch("fleetpoll.fleet.build_fleet")
+    @patch("fleetpoll.devices.load_devices")
+    @patch("fleetpoll.devices.get_local_name")
+    def test_launcher_session_reaches_cost_view_sessions_with_a_real_project(
+            self, get_name, load_devices, build_fleet):
+        # Fix round 1 (Important): sessions.list_rc_sessions() emits
+        # `workdir` (+ a basename-only `project`, e.g. "viewlogic" --
+        # NOT the encoded form cost_view uses) for a launcher row, never
+        # `cwd`. Before _ingest's setdefault fix, every launcher session
+        # landed in the store with cwd=NULL, so store._encode_cwd_as_project
+        # always produced "" for it regardless of its real project.
+        get_name.return_value = "hub"
+        load_devices.return_value = []
+        build_fleet.return_value = {
+            "device_name": "hub", "role": "full", "version": "1", "claude_version": "1",
+            "sessions": [{
+                "session_id": "s1", "name": "rc-a", "kind": "launcher", "state": "idle",
+                "workdir": "/var/www/viewlogic", "project": "viewlogic",
+                "usage": {"input": 0, "cache_read": 0, "cache_write": 0,
+                          "output": 0, "effective": 100, "last_ts": 10.0},
+            }],
+            "events": [], "cursor": None, "generated_at": 1000.0, "errors": [],
+        }
+        poller = fleetpoll.FleetPoller(self.store, http_get=MagicMock())
+        poller.poll_once()
+
+        cost = self.store.cost_view(days=30)
+        row = next(r for r in cost["sessions"] if r["session_id"] == "s1")
+        self.assertEqual(row["project"], "-var-www-viewlogic")
+
+    @patch("fleetpoll.fleet.build_fleet")
+    @patch("fleetpoll.devices.load_devices")
+    @patch("fleetpoll.devices.get_local_name")
+    def test_external_session_cwd_is_never_overwritten_by_workdir(
+            self, get_name, load_devices, build_fleet):
+        # setdefault, not assignment: an external row's real `cwd` (it
+        # never has `workdir` at all) must survive untouched.
+        get_name.return_value = "hub"
+        load_devices.return_value = []
+        build_fleet.return_value = {
+            "device_name": "hub", "role": "full", "version": "1", "claude_version": "1",
+            "sessions": [{
+                "session_id": "s1", "name": "rc-ext", "kind": "external", "state": "idle",
+                "cwd": "/var/www/other-project",
+                "usage": {"input": 0, "cache_read": 0, "cache_write": 0,
+                          "output": 0, "effective": 100, "last_ts": 10.0},
+            }],
+            "events": [], "cursor": None, "generated_at": 1000.0, "errors": [],
+        }
+        poller = fleetpoll.FleetPoller(self.store, http_get=MagicMock())
+        poller.poll_once()
+
+        cost = self.store.cost_view(days=30)
+        row = next(r for r in cost["sessions"] if r["session_id"] == "s1")
+        self.assertEqual(row["project"], "-var-www-other-project")
+
 
 class GuardInvocationTest(unittest.TestCase):
     """W4/integration: CONTRACT.md section 4 -- guard.evaluate() runs once
@@ -778,28 +834,40 @@ class GuardInvocationTest(unittest.TestCase):
         # A session that's still `status: busy` (its raw, device-reported
         # status) but presents as needs_attention (waiting_for is set) --
         # this is the exact "wedged inside a Stop hook" case CONTRACT.md
-        # section 4 calls out. It's been busy for a very long time with no
-        # events at all, so the stalled rule (default stalled_minutes=30)
-        # should fire if guard sees it as busy.
-        # store.upsert_sessions writes `last_seen` via its own now_fn
-        # default (real time.time()), not poll_once's injected now_fn --
-        # so `last_seen` lands at approximately real "now" regardless of
-        # what this test passes to poll_once. To make the stalled rule's
-        # elapsed-time math land somewhere predictable, this test anchors
-        # itself to the real wall clock too: guard evaluates a full hour
-        # "after" the moment upsert_sessions actually ran, well past the
-        # default 30-minute stalled threshold.
-        t0 = time.time()
+        # section 4 calls out. It last emitted an event over an hour ago,
+        # so the stalled rule (default stalled_minutes=30) should fire if
+        # guard sees it as busy.
+        #
+        # Fix round 1 (Critical, reviewer-mandated): this runs through
+        # poll_once() on a SINGLE clock -- no now_fn override at all,
+        # exactly as fleetpoll._loop calls it in production -- not two
+        # different injected clocks for ingestion vs. evaluation. The
+        # original version of this test injected now_fn=lambda: t0+3600
+        # into poll_once while store.upsert_sessions wrote `last_seen`
+        # via its own uninjectable real time.time(): that desync is not
+        # something production can ever produce, and it was only needed
+        # because the stalled rule was (before this fix) reading
+        # `last_seen`, a value that upsert_sessions refreshes to "now" on
+        # every single poll for every session, so on one real clock
+        # elapsed time against it is always ~0 and the rule can never
+        # fire. Withholding `last_seen` from guard's enrichment copy (see
+        # fleetpoll.py's `s["last_seen"] = None`) is what makes a
+        # same-clock test able to pass at all -- this test would FAIL
+        # without that fix, using nothing but a real, old event
+        # timestamp as the only activity signal.
+        now = time.time()
+        long_ago = now - 3700  # well past the default 30-minute threshold
         build_fleet.return_value = {
             "device_name": "hub", "role": "full", "version": "1", "claude_version": "1",
             "sessions": [{
                 "session_id": "s1", "name": "rc-wedged", "kind": "launcher",
-                "status": "busy", "waiting_for": "tool", "started_at": t0,
+                "status": "busy", "waiting_for": "tool", "started_at": long_ago,
             }],
-            "events": [], "cursor": None, "generated_at": 1000.0, "errors": [],
+            "events": [{"session_id": "s1", "ts": long_ago, "event": "Notification"}],
+            "cursor": None, "generated_at": now, "errors": [],
         }
         poller = fleetpoll.FleetPoller(self.store, http_get=MagicMock())
-        poller.poll_once(now_fn=lambda: t0 + 3600)
+        poller.poll_once()  # no now_fn override -- the real clock, once
 
         # The UI-facing derived state is still needs_attention...
         view = self.store.fleet_view()
