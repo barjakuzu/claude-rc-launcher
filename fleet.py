@@ -159,6 +159,15 @@ def _usage_meta(usage_result):
         "skipped": usage_result["skipped"],
         "partial": usage_result["partial"],
         "generated_at": usage_result["generated_at"],
+        # usage.rollup() caps daily_by_project at MAX_DAILY_BY_PROJECT_ENTRIES
+        # total rows, keeping the highest-effective ones (fix round 2):
+        # this says whether THIS poll's list was actually truncated, so a
+        # truncated projects list never quietly looks complete. Distinct
+        # from `partial` on purpose: `partial` means the read itself was
+        # incomplete (numbers may be LOW); this means the read was fully
+        # complete but the per-project breakdown was cut for size, which
+        # says nothing about whether the totals are trustworthy.
+        "projects_capped": usage_result["daily_by_project_capped"],
     }
 
 
@@ -168,8 +177,13 @@ def _failed_usage_meta(now):
     exactly the moment usage.rollup() failed and the device actually
     knows nothing (fix round 1, Important 2). partial=True and files=0
     both say the same thing here: no usable usage data this poll, not
-    "zero files exist"."""
-    return {"files": 0, "skipped": 0, "partial": True, "generated_at": now}
+    "zero files exist". projects_capped is False here, not unknown: the
+    empty usage_daily_by_project this failure also produces really is
+    everything (nothing), not a truncated view of something bigger."""
+    return {
+        "files": 0, "skipped": 0, "partial": True, "generated_at": now,
+        "projects_capped": False,
+    }
 
 
 def _remember(cache_key, role, result, now):
