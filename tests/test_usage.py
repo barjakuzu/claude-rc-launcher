@@ -14,6 +14,7 @@ former patches usage._read_new_bytes, the latter points root at a plain
 file instead of a directory, which os.walk's onerror hook rejects
 regardless of privilege)."""
 import datetime
+import io
 import json
 import os
 import sys
@@ -247,7 +248,11 @@ class PartialLineTest(UsageTestCase):
         sess = data["sessions"]["sess-1"]
         self.assertEqual(sess["messages"], 1)
         self.assertEqual(sess["input"], 1)
-        self.assertEqual(data["bytes_read"], len(complete.encode("utf-8")))
+        # bytes_read charges the full amount actually read off disk
+        # (round 2, Important 2), including the dangling partial line's
+        # bytes: they were genuinely read, just not yet consumed into a
+        # complete record, and that real I/O cost must not look free.
+        self.assertEqual(data["bytes_read"], len((complete + partial).encode("utf-8")))
 
         # Complete the line.
         self._write(path, "\n", mode="a")
@@ -285,31 +290,22 @@ class TruncationAndRotationTest(UsageTestCase):
         self.assertEqual(sess["input"], 1)
         self.assertEqual(sess["messages"], 1)
 
-    def test_grow_between_stat_and_read_then_truncate_is_detected(self):
-        # Critical 2 repro: the file grows AFTER _discover_files() stats it
-        # but BEFORE _read_new_bytes() actually reads it, so the read
-        # observes more bytes than the stale pre-read stat reported. If
-        # the cached "size" were left at that stale, smaller value, a
-        # later truncation back down to it would go undetected (new size
-        # >= stale cached size) and the offset would sit past the new EOF
-        # forever.
+    def test_grow_then_truncate_is_detected(self):
+        # Critical 2 repro: ordinary growth (append) is picked up on the
+        # next call, and a later truncation back down is still correctly
+        # detected via the offset comparison (not the cached size, which
+        # round 2's Important 1 fix no longer even sources from a stale
+        # pre-scan: see StaleStatDuringUnlockedWorkTest for the
+        # specific "file grew between the pre-scan and the per-file
+        # read" race, now closed by re-stat'ing inside _update_entry's
+        # own locked block instead of trusting the pre-scan value here).
         path = self._session_path()
         self._write(path, _line(_usage_row(msg_id="m1", input_tokens=1, output=1)))
+        usage.rollup(root=self.root)
 
-        real_read = usage._read_new_bytes
-        extra_line = _line(_usage_row(msg_id="m2", input_tokens=2, output=2))
-
-        def _grow_then_read(p, offset, max_bytes):
-            with open(p, "a") as f:
-                f.write(extra_line)
-            return real_read(p, offset, max_bytes)
-
-        with mock.patch.object(usage, "_read_new_bytes", side_effect=_grow_then_read):
-            data = usage.rollup(root=self.root)
+        self._write(path, _line(_usage_row(msg_id="m2", input_tokens=2, output=2)), mode="a")
+        data = usage.rollup(root=self.root)
         sess = data["sessions"]["sess-1"]
-        # The read picked up the grown content too (m1 and m2): the
-        # cached size reflects what was actually observed, not the stale
-        # pre-growth stat value.
         self.assertEqual(sess["input"], 3)
         self.assertEqual(sess["messages"], 2)
 
@@ -687,6 +683,152 @@ class UnlistableRootTest(UsageTestCase):
         data = usage.rollup(root=fake_root)
         self.assertEqual(data["sessions"], {})
         self.assertGreaterEqual(data["skipped"], 1)
+
+
+class StaleStatDuringUnlockedWorkTest(UsageTestCase):
+    """Round 2, Important 1: the pre-scan (_discover_files) stat can be
+    badly stale by the time _update_entry actually gets to a file (every
+    earlier file in the call is processed first, or a concurrent caller
+    gets there sooner), and a file that only grew in the meantime must
+    never look like a truncation. _update_entry now takes its own fresh
+    os.stat inside its first locked block instead of trusting the
+    pre-scan's (size, mtime, inode)."""
+
+    def test_growth_between_prescan_and_fresh_stat_does_not_reset(self):
+        path = self._session_path()
+        self._write(path, _line(_usage_row(msg_id="m1", input_tokens=1, output=1)))
+        usage.rollup(root=self.root)  # baseline: synced, offset > 0
+
+        extra_line = _line(_usage_row(msg_id="m2", input_tokens=2, output=2))
+        real_stat = os.stat
+        calls_for_path = [0]
+
+        def _stat_wrapper(p, *a, **kw):
+            result = real_stat(p, *a, **kw)
+            if p == path:
+                calls_for_path[0] += 1
+                if calls_for_path[0] == 1:
+                    # This is _discover_files's pre-scan stat. Grow the
+                    # file right after it, before _update_entry's own
+                    # (later, second) stat of the same path runs.
+                    with open(p, "a") as f:
+                        f.write(extra_line)
+            return result
+
+        with mock.patch("os.stat", side_effect=_stat_wrapper):
+            data = usage.rollup(root=self.root)
+
+        self.assertGreaterEqual(calls_for_path[0], 2)
+        sess = data["sessions"]["sess-1"]
+        # Not reset: the pre-existing m1 total survived AND the growth
+        # that happened between the two stats (m2) was picked up in the
+        # very same call, proving _update_entry decided this using its
+        # own fresh stat, not the stale pre-scan value.
+        self.assertEqual(sess["input"], 3)
+        self.assertEqual(sess["messages"], 2)
+
+        # Further proof of "not reset": a reset would have cleared
+        # seen_keys, so a repeat of m1 would be (wrongly) recounted.
+        self._write(path, _line(_usage_row(msg_id="m1", input_tokens=1, output=1)), mode="a")
+        data2 = usage.rollup(root=self.root)
+        self.assertEqual(data2["sessions"]["sess-1"]["messages"], 2)
+
+
+class ClippedLineTest(UsageTestCase):
+    """Round 2, Important 2: a single line longer than what a call
+    allocates to it must still charge that call's budget (so the
+    accounting doesn't lie about doing zero I/O) and must still be able
+    to complete on a later call with enough budget, rather than being
+    permanently wedged."""
+
+    def test_line_longer_than_budget_charges_bytes_and_later_completes(self):
+        path = self._session_path()
+        self._write(path, _line(_usage_row(msg_id="m1", input_tokens=5, output=5)))
+        line_size = os.path.getsize(path)
+        tiny_budget = 40
+        self.assertLess(tiny_budget, line_size)
+
+        first = usage.rollup(root=self.root, max_bytes_per_call=tiny_budget)
+        # Charged the full clipped read even though zero complete lines
+        # were parsed: this call's I/O was not free.
+        self.assertEqual(first["bytes_read"], tiny_budget)
+        self.assertTrue(first["partial"])
+        self.assertNotIn("sess-1", first["sessions"])
+
+        # A later call with enough budget makes real progress.
+        second = usage.rollup(root=self.root, max_bytes_per_call=usage.DEFAULT_MAX_BYTES_PER_CALL)
+        self.assertEqual(second["sessions"]["sess-1"]["messages"], 1)
+        self.assertEqual(second["sessions"]["sess-1"]["input"], 5)
+
+
+class ReadCapTest(UsageTestCase):
+    """Round 2, Minor 3: the actual read must be capped at what the file
+    really has pending, not the full per-call budget. f.read(n) can
+    allocate close to n bytes even when far less is available, and with
+    a large max_bytes_per_call that risks MemoryError straight out of
+    rollup(), which must never raise."""
+
+    def test_read_is_capped_at_remaining_file_bytes_not_full_budget(self):
+        path = self._session_path()
+        self._write(path, _line(_usage_row(input_tokens=1, output=1)))
+        file_size = os.path.getsize(path)
+
+        real_read = usage._read_new_bytes
+        captured = []
+
+        def _spy(p, offset, max_bytes):
+            captured.append(max_bytes)
+            return real_read(p, offset, max_bytes)
+
+        with mock.patch.object(usage, "_read_new_bytes", side_effect=_spy):
+            usage.rollup(root=self.root, max_bytes_per_call=usage.DEFAULT_MAX_BYTES_PER_CALL)
+
+        self.assertEqual(len(captured), 1)
+        self.assertEqual(captured[0], file_size)
+        self.assertLess(captured[0], usage.DEFAULT_MAX_BYTES_PER_CALL)
+
+
+class BytesIOParsingTest(UsageTestCase):
+    """Round 2, Minor 4: parsing must iterate the read buffer (via
+    io.BytesIO) instead of materializing a full list of every line via
+    bytes.splitlines(keepends=True), which peaked at roughly 2x a full
+    budget's worth of data. This checks the mechanism (io.BytesIO is
+    actually used) rather than measuring RSS/tracemalloc peaks directly,
+    since a memory-threshold assertion would be sensitive to allocator
+    and Python-version noise; correctness of the parse through the new
+    path is checked alongside it."""
+
+    def test_parsing_uses_bytesio_not_a_materialized_line_list(self):
+        path = self._session_path()
+        rows = "".join(
+            _line(_usage_row(msg_id="m%d" % i, request_id="r%d" % i, input_tokens=1, output=1))
+            for i in range(20))
+        self._write(path, rows)
+
+        with mock.patch("usage.io.BytesIO", wraps=io.BytesIO) as spy:
+            data = usage.rollup(root=self.root)
+        spy.assert_called_once()
+        self.assertEqual(data["sessions"]["sess-1"]["messages"], 20)
+
+
+class PhantomEmptySessionTest(UsageTestCase):
+    """Round 2, Minor 5: files with no usage-bearing record at all (no
+    session id could ever be captured, no message was ever counted) must
+    not fall back to a filename-stem session id, or several unrelated
+    usage-free files sharing a name (several journal.jsonl files, say)
+    merge into one meaningless phantom session."""
+
+    def test_usage_free_files_sharing_a_filename_do_not_merge_into_a_phantom_session(self):
+        non_usage_line = json.dumps(
+            {"type": "user", "message": {"role": "user", "content": "hi"}}) + "\n"
+        for i in range(7):
+            d = os.path.join(self.proj_dir, "sess-with-journal-%d" % i, "logs")
+            os.makedirs(d)
+            self._write(os.path.join(d, "journal.jsonl"), non_usage_line)
+
+        data = usage.rollup(root=self.root)
+        self.assertNotIn("journal", data["sessions"])
+        self.assertEqual(data["sessions"], {})
 
 
 class MiscTest(UsageTestCase):
