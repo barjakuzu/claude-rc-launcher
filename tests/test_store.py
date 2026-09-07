@@ -1,4 +1,6 @@
+import json
 import os
+import sqlite3
 import tempfile
 import unittest
 
@@ -167,6 +169,103 @@ class StoreTest(unittest.TestCase):
         with self.assertRaises(store.StoreClosed):
             self.store.upsert_device({"id": "local", "name": "hub", "role": "full",
                                        "version": "1", "claude_version": "1"})
+
+    def test_upsert_sessions_round_trips_full_role_fields(self):
+        self.store.upsert_device({"id": "local", "name": "hub", "role": "full",
+                                   "version": "1", "claude_version": "1"})
+        self.store.upsert_sessions("local", [
+            {"session_id": "s1", "name": "rc-foo", "cwd": "/tmp", "kind": "external",
+             "state": "idle", "started_at": 1000, "external": True, "pid": 4242,
+             "tmux": {"session_name": "rc-foo", "pane_id": "%3"},
+             "rc_url": "https://claude.ai/code/session_abc", "tokens": 12345,
+             "claude": {"status": "busy", "waitingFor": "permission", "state": "blocked",
+                        "sessionId": "s1", "pid": 4242}},
+        ], now_fn=lambda: 1010.0)
+        view = self.store.fleet_view()
+        self.assertEqual(len(view["sessions"]), 1)
+        row = view["sessions"][0]
+        self.assertEqual(row["pid"], 4242)
+        self.assertEqual(row["tmux"], {"session_name": "rc-foo", "pane_id": "%3"})
+        self.assertEqual(row["rc_url"], "https://claude.ai/code/session_abc")
+        self.assertEqual(row["tokens"], 12345)
+        self.assertEqual(row["kind"], "external")
+        self.assertEqual(row["cwd"], "/tmp")
+        self.assertEqual(row["external"], 1)
+        self.assertEqual(row["claude"], {"status": "busy", "waitingFor": "permission",
+                                          "state": "blocked", "sessionId": "s1", "pid": 4242})
+
+    def test_upsert_sessions_metadata_role_row_keeps_new_fields_absent(self):
+        self.store.upsert_device({"id": "dev1", "name": "meta-box", "role": "metadata",
+                                   "version": "1", "claude_version": "1"})
+        # A metadata-role device's /rc/fleet rows carry only session_id,
+        # name, state, started_at, kind -- pid/tmux/rc_url/tokens/claude
+        # are simply absent, not empty strings.
+        self.store.upsert_sessions("dev1", [
+            {"session_id": "hashed123", "name": "hashedname", "state": "idle",
+             "started_at": 1000, "kind": "interactive"},
+        ], now_fn=lambda: 1010.0)
+        view = self.store.fleet_view()
+        row = [s for s in view["sessions"] if s["session_id"] == "hashed123"][0]
+        self.assertIsNone(row["pid"])
+        self.assertIsNone(row["tmux"])
+        self.assertIsNone(row["rc_url"])
+        self.assertIsNone(row["tokens"])
+        self.assertIsNone(row["claude"])
+
+    def test_existing_db_created_before_new_columns_gains_them_without_data_loss(self):
+        # Simulate a hub.db created by a version of store.py before this
+        # migration: schema has no pid/tmux/rc_url/tokens/claude columns.
+        old_db = os.path.join(self.tmp.name, "old.db")
+        conn = sqlite3.connect(old_db)
+        conn.executescript("""
+            CREATE TABLE devices (
+                id TEXT PRIMARY KEY, name TEXT, role TEXT, version TEXT,
+                claude_version TEXT, last_seen REAL, online INTEGER DEFAULT 0
+            );
+            CREATE TABLE sessions (
+                device_id TEXT, session_id TEXT, name TEXT, cwd TEXT, kind TEXT,
+                state TEXT, started_at REAL, ended_at REAL, last_seen REAL,
+                external INTEGER DEFAULT 0,
+                PRIMARY KEY (device_id, session_id)
+            );
+            CREATE TABLE session_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, device_id TEXT, session_id TEXT,
+                ts REAL, event TEXT, extra_json TEXT
+            );
+            CREATE TABLE audit_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, actor TEXT, action TEXT,
+                target TEXT, device_id TEXT, detail TEXT
+            );
+        """)
+        conn.execute(
+            "INSERT INTO devices (id, name, role, version, claude_version, last_seen, online) "
+            "VALUES ('local', 'hub', 'full', '1', '1', 100.0, 1)")
+        conn.execute(
+            "INSERT INTO sessions (device_id, session_id, name, cwd, kind, state, started_at, "
+            "ended_at, last_seen, external) VALUES "
+            "('local', 's1', 'rc-old', '/tmp', 'interactive', 'idle', 100.0, NULL, 100.0, 0)")
+        conn.commit()
+        conn.close()
+        os.chmod(old_db, 0o600)
+
+        migrated = store.Store(old_db)
+        try:
+            view = migrated.fleet_view()
+            self.assertEqual(len(view["devices"]), 1)
+            self.assertEqual(view["devices"][0]["name"], "hub")
+            self.assertEqual(len(view["sessions"]), 1)
+            self.assertEqual(view["sessions"][0]["name"], "rc-old")
+            self.assertIsNone(view["sessions"][0]["pid"])
+            self.assertIsNone(view["sessions"][0]["tmux"])
+            # New columns are usable going forward.
+            migrated.upsert_sessions("local", [
+                {"session_id": "s1", "name": "rc-old", "cwd": "/tmp", "kind": "interactive",
+                 "state": "idle", "pid": 555},
+            ])
+            view2 = migrated.fleet_view()
+            self.assertEqual(view2["sessions"][0]["pid"], 555)
+        finally:
+            migrated.close()
 
     def test_add_events_rejects_rows_without_session_id(self):
         self.store.upsert_device({"id": "local", "name": "hub", "role": "full",

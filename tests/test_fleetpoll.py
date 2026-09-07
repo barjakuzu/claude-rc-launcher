@@ -45,6 +45,35 @@ class PollOnceTest(unittest.TestCase):
     @patch("fleetpoll.fleet.build_fleet")
     @patch("fleetpoll.devices.load_devices")
     @patch("fleetpoll.devices.get_local_name")
+    def test_full_role_session_fields_pass_through_to_store(self, get_name, load_devices, build_fleet):
+        get_name.return_value = "hub"
+        load_devices.return_value = []
+        build_fleet.return_value = {
+            "device_name": "hub", "role": "full", "version": "2.1.7",
+            "claude_version": "2.1.263",
+            "sessions": [{
+                "session_id": "s1", "name": "rc-a", "cwd": "/tmp", "kind": "external",
+                "external": True, "pid": 4242,
+                "tmux": {"session_name": "rc-a", "pane_id": "%3"},
+                "rc_url": "https://claude.ai/code/session_abc", "tokens": 999,
+                "claude": {"status": "busy", "waitingFor": None},
+            }],
+            "events": [], "cursor": None, "generated_at": 1000.0, "errors": [],
+        }
+        poller = fleetpoll.FleetPoller(self.store, http_get=MagicMock())
+        poller.poll_once()
+
+        view = self.store.fleet_view()
+        row = view["sessions"][0]
+        self.assertEqual(row["pid"], 4242)
+        self.assertEqual(row["tmux"], {"session_name": "rc-a", "pane_id": "%3"})
+        self.assertEqual(row["rc_url"], "https://claude.ai/code/session_abc")
+        self.assertEqual(row["tokens"], 999)
+        self.assertEqual(row["claude"], {"status": "busy", "waitingFor": None})
+
+    @patch("fleetpoll.fleet.build_fleet")
+    @patch("fleetpoll.devices.load_devices")
+    @patch("fleetpoll.devices.get_local_name")
     def test_polls_remote_device_over_http_with_cursor(self, get_name, load_devices, build_fleet):
         get_name.return_value = "hub"
         build_fleet.return_value = {"device_name": "hub", "role": "full", "version": "1",

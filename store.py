@@ -67,6 +67,41 @@ _UNIQUE_EVENTS_INDEX = (
     "ON session_events(device_id, session_id, ts, event);"
 )
 
+# v2.1.6/v2.1.7 UI actions (Preview, Keys, Stop for external sessions,
+# Enable RC, Open on claude.ai) need these fields alongside the
+# identity/state columns already in _SCHEMA. Added as an additive
+# migration (ALTER TABLE ADD COLUMN, only when absent) rather than folded
+# into _SCHEMA so an existing hub.db predating this change gains the
+# columns in place -- CREATE TABLE IF NOT EXISTS is a no-op against it, so
+# these columns would otherwise never appear.
+_NEW_SESSION_COLUMNS = (
+    ("pid", "INTEGER"),
+    ("tmux", "TEXT"),        # JSON: {"session_name": ..., "pane_id": ...} or NULL
+    ("rc_url", "TEXT"),
+    ("tokens", "INTEGER"),
+    ("claude", "TEXT"),      # JSON: the claude agents sub-object, or NULL
+)
+
+
+def _migrate_session_columns(conn):
+    existing = {row["name"] for row in conn.execute("PRAGMA table_info(sessions)")}
+    for col, coltype in _NEW_SESSION_COLUMNS:
+        if col not in existing:
+            conn.execute(f"ALTER TABLE sessions ADD COLUMN {col} {coltype}")
+
+
+def _json_or_none(value):
+    return None if value is None else json.dumps(value)
+
+
+def _parse_json_or_none(value):
+    if value is None:
+        return None
+    try:
+        return json.loads(value)
+    except ValueError:
+        return None
+
 
 class _Write:
     __slots__ = ("fn", "args", "kwargs", "result", "error", "done")
@@ -91,6 +126,8 @@ class Store:
         init_conn = self._connect()
         try:
             init_conn.executescript(_SCHEMA)
+            init_conn.commit()
+            _migrate_session_columns(init_conn)
             init_conn.commit()
             # De-duplicate any pre-existing rows (from a DB created before
             # this unique index existed) before creating the index, then
@@ -225,12 +262,17 @@ class Store:
                 started_at = existing["started_at"] if existing else (r.get("started_at") or now)
                 conn.execute(
                     "INSERT INTO sessions (device_id, session_id, name, cwd, kind, state, "
-                    "started_at, ended_at, last_seen, external) VALUES (?,?,?,?,?,?,?,NULL,?,?) "
+                    "started_at, ended_at, last_seen, external, pid, tmux, rc_url, tokens, "
+                    "claude) VALUES (?,?,?,?,?,?,?,NULL,?,?,?,?,?,?,?) "
                     "ON CONFLICT(device_id, session_id) DO UPDATE SET name=excluded.name, "
                     "cwd=excluded.cwd, kind=excluded.kind, state=excluded.state, "
-                    "last_seen=excluded.last_seen, ended_at=NULL, external=excluded.external",
+                    "last_seen=excluded.last_seen, ended_at=NULL, external=excluded.external, "
+                    "pid=excluded.pid, tmux=excluded.tmux, rc_url=excluded.rc_url, "
+                    "tokens=excluded.tokens, claude=excluded.claude",
                     (device_id, sid, r.get("name"), r.get("cwd"), r.get("kind"),
-                     r.get("state"), started_at, now, int(bool(r.get("external")))))
+                     r.get("state"), started_at, now, int(bool(r.get("external"))),
+                     r.get("pid"), _json_or_none(r.get("tmux")), r.get("rc_url"),
+                     r.get("tokens"), _json_or_none(r.get("claude"))))
             existing_ids = [row["session_id"] for row in conn.execute(
                 "SELECT session_id FROM sessions WHERE device_id=? AND ended_at IS NULL",
                 (device_id,))]
@@ -299,6 +341,9 @@ class Store:
                 "SELECT * FROM devices ORDER BY name")]
             session_rows = [dict(r) for r in conn.execute(
                 "SELECT * FROM sessions ORDER BY last_seen DESC")]
+            for s in session_rows:
+                s["tmux"] = _parse_json_or_none(s.get("tmux"))
+                s["claude"] = _parse_json_or_none(s.get("claude"))
             return {"devices": devices_rows, "sessions": session_rows}
         finally:
             conn.close()
