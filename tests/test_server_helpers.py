@@ -1167,6 +1167,62 @@ class ApiFleetStreamHeadersTest(unittest.TestCase):
         self.assertEqual(server.SSE_HEARTBEAT_SECONDS, 20)
 
 
+class SseCapacityTest(unittest.TestCase):
+    def setUp(self):
+        server.FLEET_CHANGE_SUBSCRIBERS.clear()
+
+    def tearDown(self):
+        server.FLEET_CHANGE_SUBSCRIBERS.clear()
+
+    def test_not_exceeded_below_the_cap(self):
+        import threading
+        for _ in range(server.SSE_MAX_SUBSCRIBERS - 1):
+            server.FLEET_CHANGE_SUBSCRIBERS.add(threading.Event())
+        self.assertFalse(server._sse_capacity_exceeded())
+
+    def test_exceeded_at_the_cap(self):
+        import threading
+        for _ in range(server.SSE_MAX_SUBSCRIBERS):
+            server.FLEET_CHANGE_SUBSCRIBERS.add(threading.Event())
+        self.assertTrue(server._sse_capacity_exceeded())
+
+    def test_route_responds_503_over_the_cap(self):
+        import inspect
+        src = inspect.getsource(server.Handler.do_GET)
+        block = src.split('"/api/fleet/stream"', 1)[1][:1500]
+        self.assertIn("503", block)
+        self.assertIn("SSE_MAX_SUBSCRIBERS", block)
+
+
+class SseSnapshotStoreFailureTest(unittest.TestCase):
+    """Minor fix: _sse_send_fleet_snapshot must not raise into the
+    request-handling thread when the store read itself fails (as
+    opposed to the client having disconnected)."""
+
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.TemporaryDirectory()
+        server.HUB_STORE = store.Store(os.path.join(self.tmp.name, "hub.db"))
+
+    def tearDown(self):
+        server.HUB_STORE.close()
+        server.HUB_STORE = None
+        self.tmp.cleanup()
+
+    def test_store_failure_returns_false_without_raising(self):
+        class FakeWfile:
+            def write(self, data):
+                pass
+
+            def flush(self):
+                pass
+
+        h = server.Handler.__new__(server.Handler)
+        h.wfile = FakeWfile()
+        with mock.patch.object(server.HUB_STORE, "fleet_view", side_effect=RuntimeError("db hiccup")):
+            self.assertFalse(h._sse_send_fleet_snapshot())  # must not raise
+
+
 class NotifyFleetChangedTest(unittest.TestCase):
     def test_notify_sets_all_subscriber_events(self):
         import threading
@@ -1245,6 +1301,11 @@ class AuditLogTest(unittest.TestCase):
             "/schedules/fire": 'elif path == "/schedules/fire"',
             "/update": 'elif path == "/update"',
             "/devices/rename": 'elif path == "/devices/rename"',
+            # Important-4 fix: the phase mandate is every mutating route,
+            # not just the brief's (incomplete) list.
+            "/resume/start": 'elif path == "/resume/start"',
+            "/tunnel/start": 'elif path == "/tunnel/start"',
+            "/tunnel/stop": 'elif path == "/tunnel/stop"',
         }
         for name, marker in markers.items():
             block = src.split(marker, 1)

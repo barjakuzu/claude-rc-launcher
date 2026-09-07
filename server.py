@@ -122,8 +122,25 @@ _LOG = logging.getLogger(__name__)
 HUB_STORE = None  # set by app.py at startup; store.Store instance
 
 SSE_HEARTBEAT_SECONDS = 20
+# ThreadingHTTPServer spins up one thread per open connection; an
+# unbounded number of open /api/fleet/stream connections is an easy way
+# to exhaust threads. Above this many concurrent subscribers, new
+# connections are turned away with 503 so the client falls back to
+# polling GET /api/fleet instead.
+SSE_MAX_SUBSCRIBERS = 32
 FLEET_CHANGE_SUBSCRIBERS = set()
 _fleet_change_lock = threading.Lock()
+
+
+def _sse_capacity_exceeded():
+    """True when SSE_MAX_SUBSCRIBERS open /api/fleet/stream connections
+    are already being served -- a new one should get 503 instead of
+    piling on another thread. Pure/unit-testable directly; the route
+    still does the actual add-under-lock (see FLEET_CHANGE_SUBSCRIBERS)
+    to avoid a check-then-add race letting two connections both slip in
+    at exactly the limit."""
+    with _fleet_change_lock:
+        return len(FLEET_CHANGE_SUBSCRIBERS) >= SSE_MAX_SUBSCRIBERS
 
 
 def notify_fleet_changed():
@@ -997,9 +1014,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if HUB_STORE is None:
             view = {"devices": [], "sessions": []}
         else:
-            view = HUB_STORE.fleet_view()
-            recent = HUB_STORE.recent_events(limit=500)
-            _apply_needs_attention(view["sessions"], recent)
+            try:
+                view = HUB_STORE.fleet_view()
+                recent = HUB_STORE.recent_events(limit=500)
+                _apply_needs_attention(view["sessions"], recent)
+            except Exception:
+                # A store hiccup (e.g. a transient StoreClosed during
+                # shutdown) must not be treated as "client disconnected"
+                # -- it isn't a transport error, so don't kill the SSE
+                # loop or discard the subscriber over it. Skip this one
+                # snapshot; the next heartbeat/change retries.
+                _LOG.exception("fleet stream: snapshot read failed")
+                return False
         return self._sse_write(f"data: {json.dumps(view)}\n\n")
 
     def _html(self, content):
@@ -1172,15 +1198,24 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._json(view)
 
         elif path == "/api/fleet/stream":
+            my_event = threading.Event()
+            with _fleet_change_lock:
+                if len(FLEET_CHANGE_SUBSCRIBERS) >= SSE_MAX_SUBSCRIBERS:
+                    self.send_response(503)
+                    self.send_header("Content-Type", "text/plain")
+                    self.send_header("Retry-After", "5")
+                    body = b"too many open fleet streams, poll GET /api/fleet instead\n"
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+                FLEET_CHANGE_SUBSCRIBERS.add(my_event)
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Cache-Control", "no-cache")
             self.send_header("Connection", "keep-alive")
             self.send_header("X-Accel-Buffering", "no")
             self.end_headers()
-            my_event = threading.Event()
-            with _fleet_change_lock:
-                FLEET_CHANGE_SUBSCRIBERS.add(my_event)
             try:
                 if not self._sse_send_fleet_snapshot():
                     return
@@ -1778,6 +1813,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._json({"ok": False, "message": cap_msg}, 429)
                 return
             ok, msg, name = resume_session(session_id, session_title, project, mode)
+            _audit(self, action="resume/start", target=name or session_id)
             self._json({"ok": ok, "message": msg, "name": name})
 
         elif path == "/tunnel/start":
@@ -1785,10 +1821,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._json({"ok": False, "message": "cloudflared not installed"}, 400)
                 return
             start_tunnel()
+            _audit(self, action="tunnel/start", target="")
             self._json({"ok": True, "message": "Tunnel starting"})
 
         elif path == "/tunnel/stop":
             stop_tunnel()
+            _audit(self, action="tunnel/stop", target="")
             self._json({"ok": True, "message": "Tunnel stopped"})
 
         elif path == "/schedules":
