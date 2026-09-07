@@ -40,6 +40,24 @@ def _valid_started_at(value):
         return False
 
 
+# SQLite's INTEGER storage class (and, more fundamentally, Python's own
+# sqlite3 C binding for ANY int parameter, regardless of the destination
+# column's declared type/affinity) is a 64-bit signed integer. Fix round 3
+# (review Important 1): math.isfinite() alone is the wrong magnitude gate
+# for this -- it only rejects a Python int too large to convert to a C
+# double (roughly 309+ digits), which is a much looser bound than 64-bit
+# signed range (~19 digits). An int in between those two bounds (2**63,
+# 10**30, a 20-digit numeric string) passes _coerce_number's old check
+# cleanly, then raises OverflowError out of sqlite3 at conn.execute() time
+# -- too late to skip just that row, since earlier rows in the same batch
+# have already been INSERTed into this call's shared, uncommitted
+# transaction, so the OverflowError rolls back the WHOLE batch, losing
+# every good row sitting beside the one bad value. It also directly
+# contradicts this function's own "never raises" promise.
+_SQLITE_INT64_MIN = -(2 ** 63)
+_SQLITE_INT64_MAX = 2 ** 63 - 1
+
+
 def _coerce_number(value):
     """Best-effort coercion of a device-reported numeric field (token
     counts, effective cost, a transcript timestamp) to a plain int/float,
@@ -52,15 +70,23 @@ def _coerce_number(value):
     A real int/float is accepted if finite (NaN/+-inf rejected -- Python's
     own json.loads happily parses the bare tokens `NaN`/`Infinity` by
     default, so "arrived via json.loads" does not imply "is a real
-    number"). A numeric-looking string ("123", "12.5") is coerced, since
+    number") AND, if it's an int, within SQLite's signed 64-bit range
+    (fix round 3, review Important 1) -- a float this large already lost
+    integer precision and isn't the same failure mode, since a float
+    binds as SQLite REAL with no 64-bit restriction regardless of
+    magnitude. A numeric-looking string ("123", "12.5") is coerced, since
     JSON has no separate "numeric string" type worth punishing a device
-    for. bool is rejected even though it's technically an int subclass --
-    `True`/`False` are never a legitimate token count. Anything else
-    (None, a list, a dict, a non-numeric string) returns None.
+    for -- including one that parses to an out-of-range int, which is
+    rejected the same as a native Python int would be. bool is rejected
+    even though it's technically an int subclass -- `True`/`False` are
+    never a legitimate token count. Anything else (None, a list, a dict,
+    a non-numeric string) returns None.
 
     Never raises: like _valid_started_at, math.isfinite() itself can raise
     OverflowError on an integer too large to convert to a C double, caught
-    here rather than left to blow up the write."""
+    here rather than left to blow up the write -- and the explicit 64-bit
+    range check above never raises at all, since Python's int comparison
+    has no magnitude limit."""
     if isinstance(value, bool):
         return None
     if isinstance(value, (int, float)):
@@ -76,9 +102,48 @@ def _coerce_number(value):
     else:
         return None
     try:
-        return num if math.isfinite(num) else None
+        if not math.isfinite(num):
+            return None
     except OverflowError:
         return None
+    if isinstance(num, int) and not (_SQLITE_INT64_MIN <= num <= _SQLITE_INT64_MAX):
+        return None
+    return num
+
+
+def _coerce_sparse_fields(row, fields):
+    """Coerce only the numeric `fields` of `row` that are actually present
+    and non-None, via _coerce_number; a field that's absent OR explicitly
+    None is left as None (stored as SQL NULL) without being treated as an
+    error. Fix round 3 (review Important 2, a regression fix round 2's own
+    change introduced): requiring every field to be present, rather than
+    only rejecting a present-but-bad value, silently dropped exactly the
+    sparse shapes CONTRACT.md section 1 documents for the metadata role --
+    {"session_id", "effective"} for per-session usage, {"day", "effective"}
+    for cost -- so a metadata device contributed nothing at all, directly
+    contradicting "contributes to per-device totals only, never to the
+    projects table". It also dropped any row merely missing `last_ts`.
+    Before fix round 2's coercion existed, an absent field's None simply
+    became a stored NULL that cost_view's `r["input"] or 0` already
+    handles -- this restores that for "absent", while still rejecting a
+    field that IS present but garbage (the actual bug fix round 2 fixed).
+
+    Returns (coerced_dict, name_of_first_bad_field_or_None). The caller
+    skips the whole row only when the second element is not None -- a bad
+    element midway through `fields` short-circuits the rest, same as
+    before, since a partially-coerced dict for a row about to be dropped
+    is never used."""
+    coerced = {}
+    for f in fields:
+        raw = row.get(f)
+        if raw is None:
+            coerced[f] = None
+            continue
+        value = _coerce_number(raw)
+        if value is None:
+            return coerced, f
+        coerced[f] = value
+    return coerced, None
 
 
 # A row can go missing from a single poll's `rows` without the underlying
@@ -567,10 +632,16 @@ class Store:
 
         A row with no session_id is skipped and logged, matching
         upsert_sessions: session_id is the natural key here too (paired
-        with device_id) and there is no safe fallback key. A row where any
-        of the numeric fields fails to coerce via _coerce_number (missing,
-        None, NaN, +/-inf, or a non-numeric type) is likewise skipped and
-        logged in full, not written with a partial/zeroed value."""
+        with device_id) and there is no safe fallback key.
+
+        Rows may be sparse -- CONTRACT.md section 1's metadata role sends
+        exactly {"session_id", "effective"}, nothing else -- so a numeric
+        field that is simply absent (or explicitly None) is stored as
+        NULL, not treated as an error; only a field that IS present and
+        fails to coerce via _coerce_number (NaN, +/-inf, a non-numeric
+        type, or an int outside SQLite's 64-bit range) skips the whole
+        row, logged in full, rather than writing it with a partial value.
+        See _coerce_sparse_fields."""
         def _do(conn):
             now = now_fn()
             skipped = 0
@@ -582,12 +653,12 @@ class Store:
                         "upsert_session_usage: skipping row for device %r with no session_id: %r",
                         device_id, r)
                     continue
-                coerced = {f: _coerce_number(r.get(f)) for f in self._USAGE_NUMERIC_FIELDS}
-                if any(v is None for v in coerced.values()):
+                coerced, bad_field = _coerce_sparse_fields(r, self._USAGE_NUMERIC_FIELDS)
+                if bad_field is not None:
                     skipped += 1
                     _LOG.warning(
                         "upsert_session_usage: skipping row for device %r session %r "
-                        "with a non-numeric field: %r", device_id, sid, r)
+                        "with a non-numeric %r field: %r", device_id, sid, bad_field, r)
                     continue
                 conn.execute(
                     "INSERT INTO session_usage (device_id, session_id, input, cache_read, "
@@ -621,10 +692,16 @@ class Store:
         -- skip-and-log makes the failure visible instead. `project`
         missing/empty is valid (CONTRACT.md: the empty string when the
         device did not report one, e.g. metadata role) and is stored as
-        "" rather than skipped. A row where any of the numeric fields
-        fails to coerce via _coerce_number is skipped and logged in full,
-        same as upsert_session_usage above -- see that method's docstring
-        and _coerce_number itself for what counts as coercible."""
+        "" rather than skipped.
+
+        Rows may be sparse -- CONTRACT.md section 1's metadata role sends
+        exactly {"day", "effective"}, nothing else -- so a numeric field
+        that is simply absent (or explicitly None) is stored as NULL, not
+        treated as an error; only a field that IS present and fails to
+        coerce via _coerce_number skips the whole row, logged in full,
+        same as upsert_session_usage above -- see that method's docstring,
+        _coerce_sparse_fields and _coerce_number itself for exactly what
+        counts as coercible."""
         def _do(conn):
             now = now_fn()
             skipped = 0
@@ -636,12 +713,12 @@ class Store:
                         "upsert_cost_daily: skipping row for device %r with no day: %r",
                         device_id, r)
                     continue
-                coerced = {f: _coerce_number(r.get(f)) for f in self._COST_NUMERIC_FIELDS}
-                if any(v is None for v in coerced.values()):
+                coerced, bad_field = _coerce_sparse_fields(r, self._COST_NUMERIC_FIELDS)
+                if bad_field is not None:
                     skipped += 1
                     _LOG.warning(
                         "upsert_cost_daily: skipping row for device %r day %r "
-                        "with a non-numeric field: %r", device_id, day, r)
+                        "with a non-numeric %r field: %r", device_id, day, bad_field, r)
                     continue
                 project = r.get("project") or ""
                 conn.execute(
