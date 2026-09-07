@@ -1038,6 +1038,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return False
 
     def _sse_send_fleet_snapshot(self):
+        """Tri-state: True on a successful write, False only on an actual
+        client disconnect (caller should stop the stream), None on a
+        store-side read error (caller should keep the subscriber and
+        retry on the next heartbeat/change -- a store hiccup is not the
+        client going away)."""
         if HUB_STORE is None:
             view = {"devices": [], "sessions": []}
         else:
@@ -1052,7 +1057,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 # loop or discard the subscriber over it. Skip this one
                 # snapshot; the next heartbeat/change retries.
                 _LOG.exception("fleet stream: snapshot read failed")
-                return False
+                return None
         return self._sse_write(f"data: {json.dumps(view)}\n\n")
 
     def _html(self, content):
@@ -1252,13 +1257,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_header("X-Accel-Buffering", "no")
             self.end_headers()
             try:
-                if not self._sse_send_fleet_snapshot():
+                if self._sse_send_fleet_snapshot() is False:
                     return
                 while True:
                     changed = my_event.wait(timeout=SSE_HEARTBEAT_SECONDS)
                     if changed:
                         my_event.clear()
-                        if not self._sse_send_fleet_snapshot():
+                        if self._sse_send_fleet_snapshot() is False:
                             break
                     else:
                         # A heartbeat as an SSE comment line never

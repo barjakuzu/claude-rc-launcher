@@ -1329,7 +1329,10 @@ class SseSnapshotStoreFailureTest(unittest.TestCase):
         server.HUB_STORE = None
         self.tmp.cleanup()
 
-    def test_store_failure_returns_false_without_raising(self):
+    def test_store_failure_returns_none_without_raising(self):
+        # Tri-state: None (not False) on a store-side error -- False is
+        # reserved for an actual client disconnect. A caller checking
+        # `is False` correctly keeps the subscriber on a store hiccup.
         class FakeWfile:
             def write(self, data):
                 pass
@@ -1340,7 +1343,32 @@ class SseSnapshotStoreFailureTest(unittest.TestCase):
         h = server.Handler.__new__(server.Handler)
         h.wfile = FakeWfile()
         with mock.patch.object(server.HUB_STORE, "fleet_view", side_effect=RuntimeError("db hiccup")):
-            self.assertFalse(h._sse_send_fleet_snapshot())  # must not raise
+            result = h._sse_send_fleet_snapshot()  # must not raise
+        self.assertIsNone(result)
+        self.assertIsNot(result, False)
+
+    def test_client_disconnect_returns_false(self):
+        class DisconnectingWfile:
+            def write(self, data):
+                raise BrokenPipeError()
+
+            def flush(self):
+                pass
+
+        h = server.Handler.__new__(server.Handler)
+        h.wfile = DisconnectingWfile()
+        self.assertIs(h._sse_send_fleet_snapshot(), False)
+
+    def test_sse_stream_loop_does_not_stop_on_store_error(self):
+        # Regression for the bug itself: the do_GET stream loop must use
+        # `is False`, not a truthiness check, or a None (store-error)
+        # return is indistinguishable from False and the subscriber gets
+        # dropped on a transient store hiccup.
+        import inspect
+        src = inspect.getsource(server.Handler.do_GET)
+        block = src.split('"/api/fleet/stream"', 1)[1][:2500]
+        self.assertIn("_sse_send_fleet_snapshot() is False", block)
+        self.assertNotIn("if not self._sse_send_fleet_snapshot()", block)
 
 
 class NotifyFleetChangedTest(unittest.TestCase):
