@@ -70,12 +70,18 @@ export function AlertsIndicator() {
   if (status === 'loading') return null;
 
   const unavailable = status === 'unavailable';
-  const alertCount = report?.summary.alert ?? 0;
-  const warnCount = report?.summary.warn ?? 0;
   const configError = report?.config_error ?? null;
   const findings = report?.alerts ?? [];
+  const summaryAlert = report?.summary.alert ?? 0;
+  const summaryWarn = report?.summary.warn ?? 0;
+  // The summary is a convenience, not the sole source of truth: a live
+  // alert-severity finding must never render as "0 warnings" just because
+  // the summary disagreed with the array it's supposed to summarize. Take
+  // whichever is higher rather than trusting the summary blindly.
+  const alertCount = Math.max(summaryAlert, findings.filter((f) => f.severity === 'alert').length);
+  const warnCount = Math.max(summaryWarn, findings.filter((f) => f.severity === 'warn').length);
   // A non-empty alerts[] with (inconsistently) zero summary counts must
-  // still show: the summary is a convenience, not the sole source of truth.
+  // still show: same reasoning as the count fallback above.
   const hasFindings = alertCount > 0 || warnCount > 0 || findings.length > 0;
 
   // Hidden entirely only when we positively know the route is healthy and
@@ -83,7 +89,17 @@ export function AlertsIndicator() {
   // must look different from "we checked and it's fine".
   if (!unavailable && !hasFindings && !configError) return null;
 
-  const color = unavailable ? RT.textLow : alertCount > 0 ? RT.red : warnCount > 0 ? RT.amber : RT.textLow;
+  // A broken guard.json and an unreachable endpoint are different problems
+  // and must not look the same: unavailable is always textLow (grey),
+  // never amber, even when configError alone (no live findings) is what's
+  // driving visibility here.
+  const color = unavailable
+    ? RT.textLow
+    : alertCount > 0
+      ? RT.red
+      : (warnCount > 0 || !!configError)
+        ? RT.amber
+        : RT.textLow;
   const count = unavailable ? 0 : alertCount > 0 ? alertCount : warnCount;
   const showDot = !unavailable && count === 0 && !!configError;
   const title = unavailable

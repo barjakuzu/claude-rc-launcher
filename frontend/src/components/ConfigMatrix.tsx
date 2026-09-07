@@ -4,7 +4,7 @@
 // never file contents.
 import { Fragment, useEffect, useState } from 'react';
 import type { CSSProperties } from 'react';
-import { RT, FONT_SANS, FONT_MONO } from '../tokens';
+import { RT, FONT_SANS, FONT_MONO, withAlpha } from '../tokens';
 import { fetchConfigMatrix } from '../api';
 import type { ConfigMatrix as ConfigMatrixData, ConfigReport } from '../api';
 import type { DeviceCard } from '../types';
@@ -74,7 +74,10 @@ export function ConfigMatrixView({ cards }: { cards: DeviceCard[] }) {
 
   const cellStyle = (skewed: boolean, tone: 'red' | 'amber' = 'red'): CSSProperties => ({
     padding: '6px 10px',
-    background: skewed ? `${tone === 'red' ? RT.red : RT.amber}26` : 'transparent',
+    // withAlpha, not a hex alpha suffix appended to an oklch(...) token:
+    // that syntax only works on #rrggbb hex colors, so it silently
+    // produced invalid CSS the browser dropped (see tokens.ts).
+    background: skewed ? withAlpha(tone === 'red' ? RT.red : RT.amber, 0.15) : 'transparent',
     fontFamily: FONT_MONO,
     fontSize: 11.5,
     color: RT.textDim,
