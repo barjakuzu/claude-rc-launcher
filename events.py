@@ -71,12 +71,16 @@ def read_events(root, since_cursor=None, limit=500):
             f.seek(offset)
             data = f.read()
         pos = offset
+        truncated = False
         for line in data.splitlines(keepends=True):
             line_len = len(line)
             if not line.endswith(b"\n"):
                 # Truncated last line (mid-write): stop here, do not
                 # advance the cursor past it, so it gets re-read whole
-                # next time once the writer finishes.
+                # next time once the writer finishes. Also stop scanning
+                # further (newer) files this call, so a day-boundary
+                # rollover can't let the cursor skip past this line.
+                truncated = True
                 break
             pos += line_len
             text = line.decode("utf-8", errors="replace").strip()
@@ -92,6 +96,8 @@ def read_events(root, since_cursor=None, limit=500):
                     last_file, last_offset = fname, pos
                     return rows, f"{last_file}:{last_offset}"
         last_file, last_offset = fname, pos
+        if truncated:
+            break
 
     return rows, f"{last_file}:{last_offset}"
 
