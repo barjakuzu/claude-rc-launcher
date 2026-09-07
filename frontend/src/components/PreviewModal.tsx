@@ -12,6 +12,10 @@ interface PreviewModalProps {
   name: string;
   /** Backend mode string; 'sh' sessions have no transcript to show. */
   mode?: string;
+  /** Session id for the Activity panel's /api/sessions/<device>/<id>/events
+   * lookup (Task 10/14). Absent when the caller only has the tmux/launcher
+   * name — the Activity section is simply omitted in that case. */
+  sessionId?: string;
   onClose: () => void;
 }
 
