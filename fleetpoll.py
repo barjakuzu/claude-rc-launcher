@@ -14,6 +14,11 @@ import urllib.request
 import devices
 import fleet
 
+# Imported lazily inside _ingest (not at module load) to avoid a hard
+# circular-import dependency: server.py is the much heavier module and
+# nothing in it imports fleetpoll, but keeping the import inside the
+# function makes that non-cycle explicit and cheap to change later.
+
 _LOG = logging.getLogger(__name__)
 
 BACKOFF_CEILING_SECONDS = 300
@@ -45,12 +50,25 @@ class FleetPoller:
         self._thread = None
 
     def _ingest(self, device_id, snapshot):
+        import server  # lazy import, see note above
+
         self.store.upsert_device({
             "id": device_id, "name": snapshot.get("device_name", device_id),
             "role": snapshot.get("role", "full"), "version": snapshot.get("version"),
             "claude_version": snapshot.get("claude_version"),
         })
-        self.store.upsert_sessions(device_id, snapshot.get("sessions") or [])
+        sessions_in = snapshot.get("sessions") or []
+        for s in sessions_in:
+            # CONTROLLER RULING: needs_attention is derived from each
+            # session's own polled state (waiting_for/blocked/busy/idle),
+            # not from Stop/UserPromptSubmit events which no longer exist.
+            # Compute and store it here so server.py's /api/fleet route
+            # can read it straight off the store row.
+            try:
+                s["state"] = server._derive_session_state(s)
+            except Exception:
+                pass
+        self.store.upsert_sessions(device_id, sessions_in)
         events = snapshot.get("events") or []
         if events:
             self.store.add_events(device_id, events)
