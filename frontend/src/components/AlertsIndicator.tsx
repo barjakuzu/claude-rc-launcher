@@ -50,7 +50,7 @@ function AlertRow({ f }: { f: AlertFinding }) {
   );
 }
 
-export function AlertsIndicator() {
+export function AlertsIndicator({ mobile = false }: { mobile?: boolean }) {
   const { report, status } = useAlerts();
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -115,6 +115,8 @@ export function AlertsIndicator() {
         title={title}
         style={{
           ...btn('icon'),
+          width: mobile ? 40 : 32,
+          height: mobile ? 40 : 32,
           position: 'relative',
           borderColor: (hasFindings || configError || unavailable) ? withAlpha(color, 0.4) : RT.border,
           color,
