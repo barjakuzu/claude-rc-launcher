@@ -652,6 +652,39 @@ class BuildFleetTest(unittest.TestCase):
         self.assertEqual(kwargs["now_fn"](), 5000.0)
         self.assertEqual(kwargs["days"], fleet.USAGE_DAILY_MAX_DAYS)
 
+    @patch("fleet.usage.rollup")
+    @patch("fleet.events.prune")
+    @patch("fleet.events.read_events")
+    @patch("fleet.sessions.list_rc_sessions")
+    @patch("fleet.compat.get_caps")
+    @patch("fleet.devices.get_local_name")
+    def test_pathological_now_does_not_break_build_fleet(
+            self, get_name, get_caps, list_sess, read_ev, prune, rollup):
+        # Fix round 3, Minor: _today_str(now) used to run OUTSIDE the
+        # usage try block. A NaN or a clock past year 9999 makes it raise
+        # on its own, before usage.rollup() is even called, which is
+        # exactly the class of bug Important 1 (fix round 1) exists to
+        # prevent. Covers both raise shapes seen for a bad `now`
+        # (ValueError for NaN, OverflowError for an out-of-range clock).
+        get_name.return_value = "hub"
+        get_caps.return_value = {}
+        list_sess.return_value = [{"name": "rc-foo", "session_id": "s1", "state": "idle"}]
+        read_ev.return_value = ([], None)
+
+        for bad_now in (float("nan"), 1e20):
+            with self.subTest(bad_now=bad_now):
+                fleet._cache.clear()
+                rollup.return_value = _empty_rollup(bad_now)
+                result = fleet.build_fleet(role="full", now_fn=lambda: bad_now)
+                self.assertIsNone(result["sessions"][0]["usage"])
+                self.assertEqual(result["usage_daily"], [])
+                self.assertEqual(result["usage_daily_by_project"], [])
+                self.assertTrue(result["usage_meta"]["partial"])
+                self.assertFalse(result["usage_meta"]["projects_capped"])
+                self.assertTrue(
+                    any(e.startswith("usage:") for e in result["errors"]),
+                    "expected a usage error, got %r" % (result["errors"],))
+
 
 if __name__ == "__main__":
     unittest.main()

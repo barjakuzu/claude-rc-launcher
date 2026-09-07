@@ -254,8 +254,14 @@ def build_fleet(since=None, role=None, events_root=None, now_fn=time.time):
     # half-validates is exactly as unusable to a guard cost rule as one
     # that raised outright, so there is no reason to keep a partially
     # validated result around.
-    today_str = _today_str(now)
     try:
+        # Computed here, not before the try: _today_str does real
+        # datetime math on `now` (fromtimestamp/date/isoformat), and a
+        # pathological `now` (a clock past year 9999, a NaN) can raise on
+        # its own, before usage.rollup() is even called. That is exactly
+        # the class of bug Important 1 exists to prevent, so this must
+        # fail HERE too, not outside the guard (fix round 3, Minor).
+        today_str = _today_str(now)
         usage_result = usage.rollup(
             max_bytes_per_call=usage.DEFAULT_MAX_BYTES_PER_CALL,
             now_fn=lambda: now,
