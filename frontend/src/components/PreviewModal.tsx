@@ -6,23 +6,8 @@ import { RT, FONT_MONO, FONT_SANS, Z } from '../tokens';
 import { Icons } from './primitives';
 import { api, fetchSessionEvents } from '../api';
 import type { SessionEvent } from '../api';
+import { formatRelativeTime as formatEventTime } from '../relativeTime';
 import { TranscriptView } from './TranscriptView';
-
-// events' ts is a unix-epoch-seconds float (store.py), same shape as the
-// fleet rows — small local relative-time formatter, mirrors AllSessions.tsx.
-function formatEventTime(epochSeconds: number | null | undefined): string {
-  if (epochSeconds == null) return 'unknown';
-  const diffMs = Date.now() - epochSeconds * 1000;
-  if (isNaN(diffMs)) return 'unknown';
-  const mins = Math.floor(diffMs / 60_000);
-  if (mins < 1) return 'just now';
-  if (mins < 60) return `${mins}m ago`;
-  const hrs = Math.floor(mins / 60);
-  if (hrs < 24) return `${hrs}h ago`;
-  const days = Math.floor(hrs / 24);
-  if (days === 1) return 'yesterday';
-  return `${days}d ago`;
-}
 
 // One-line rendering of an event's extra payload, when non-empty.
 function formatExtra(extra: Record<string, unknown> | undefined): string | null {
@@ -40,17 +25,25 @@ function formatExtra(extra: Record<string, unknown> | undefined): string | null 
 function ActivitySection({ deviceId, sessionId }: { deviceId: string; sessionId: string }) {
   const [events, setEvents] = useState<SessionEvent[]>([]);
   const [loading, setLoading] = useState(true);
+  // Bumped on every load() call and on unmount/session-change cleanup, so a
+  // slow response from a superseded request (previous session, or after
+  // unmount) can never land on state that has moved on.
+  const reqIdRef = useRef(0);
 
   const load = () => {
+    const id = ++reqIdRef.current;
     setLoading(true);
     fetchSessionEvents(deviceId, sessionId, 50)
-      .then((data) => setEvents(data.events ?? []))
-      .catch(() => setEvents([]))
-      .finally(() => setLoading(false));
+      .then((data) => { if (reqIdRef.current === id) setEvents(data.events ?? []); })
+      .catch(() => { if (reqIdRef.current === id) setEvents([]); })
+      .finally(() => { if (reqIdRef.current === id) setLoading(false); });
   };
 
   useEffect(() => {
+    setEvents([]);
+    setLoading(true);
     load();
+    return () => { reqIdRef.current++; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [deviceId, sessionId]);
 

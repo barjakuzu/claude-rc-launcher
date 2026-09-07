@@ -1,7 +1,14 @@
 // AllSessions.tsx — Sessions tab, rendered from the hub-wide fleet store
 // (useFleet, Task 12). Sessions on a currently-offline device still render
 // here (dimmed, with a "last seen" age) instead of being silently dropped.
-import { useState } from 'react';
+//
+// external/pid/tmux/rc_url/tokens/mode are optional on FleetSession — a
+// backend change lands them through the store into /api/fleet shaped like
+// the per-device GET /sessions rows (sessions.py's list_rc_sessions()).
+// Terminal/RC/Stop affordances below gate on those fields' *presence*, not
+// on `isExternal` alone, and degrade to read-only when they're absent —
+// mirrors SessionRow.tsx's semantics so both tabs behave identically.
+import { useEffect, useMemo, useState } from 'react';
 import { RT, FONT_MONO, tintFor, hueForId } from '../tokens';
 import { Icons, Dot, StatusPill, ExternalBadge } from './primitives';
 import { MobileHeader } from './MobileHeader';
@@ -9,35 +16,21 @@ import { mobileActionBtn } from './mobileActionBtn';
 import { useFleet } from '../hooks/useFleet';
 import type { FleetDevice, FleetSession } from '../hooks/useFleet';
 import { api } from '../api';
+import { formatRelativeTime } from '../relativeTime';
 import { PreviewModal } from './PreviewModal';
 
 interface AllSessionsProps {
   onOpenDevice: (id: string) => void;
 }
 
-interface PreviewState { deviceId: string; name: string; sessionId?: string; }
-
-// last_seen is a unix-epoch-seconds float from store.py, not the ISO
-// strings Activity.tsx's relativeTime() expects — a separate small
-// formatter for this shape.
-function formatRelativeTime(epochSeconds: number | null | undefined): string {
-  if (epochSeconds == null) return 'unknown';
-  const diffMs = Date.now() - epochSeconds * 1000;
-  if (isNaN(diffMs)) return 'unknown';
-  const mins = Math.floor(diffMs / 60_000);
-  if (mins < 1) return 'just now';
-  if (mins < 60) return `${mins}m ago`;
-  const hrs = Math.floor(mins / 60);
-  if (hrs < 24) return `${hrs}h ago`;
-  const days = Math.floor(hrs / 24);
-  if (days === 1) return 'yesterday';
-  return `${days}d ago`;
-}
+interface PreviewState { deviceId: string; name: string; sessionId?: string; mode?: string; }
 
 export function AllSessions({ onOpenDevice }: AllSessionsProps) {
-  const { devices, sessions, usingFallback } = useFleet();
+  const { devices, sessions, usingFallback, stale } = useFleet();
   const [pending, setPending] = useState<Record<string, boolean>>({});
   const [preview, setPreview] = useState<PreviewState | null>(null);
+  const [rcUrls, setRcUrls] = useState<Record<string, string>>({});
+  const [rcErrors, setRcErrors] = useState<Record<string, string>>({});
 
   const guard = async (key: string, fn: () => Promise<unknown>) => {
     if (pending[key]) return;
@@ -47,20 +40,74 @@ export function AllSessions({ onOpenDevice }: AllSessionsProps) {
     }
   };
 
-  const deviceById = new Map<string, FleetDevice>(devices.map((d) => [d.id, d]));
+  const handleEnableRc = async (key: string, deviceId: string, tmuxSessionName: string) => {
+    if (pending[`rc-${key}`]) return;
+    setPending((p) => ({ ...p, [`rc-${key}`]: true }));
+    setRcErrors((e) => { const { [key]: _drop, ...rest } = e; return rest; });
+    try {
+      const result = await api.enableRc(deviceId, tmuxSessionName);
+      if (result.ok && result.url) {
+        setRcUrls((u) => ({ ...u, [key]: result.url as string }));
+      } else {
+        setRcErrors((e) => ({ ...e, [key]: result.message || 'Failed to enable Remote Control' }));
+      }
+    } catch (err) {
+      setRcErrors((e) => ({ ...e, [key]: err instanceof Error ? err.message : 'Failed to enable Remote Control' }));
+    } finally {
+      setPending((p) => ({ ...p, [`rc-${key}`]: false }));
+    }
+  };
 
-  // needs_attention sorts first, then most-recently-seen.
-  const sortedSessions = [...sessions].sort((a, b) => {
+  // Auto-clear an rc error a few seconds after it lands.
+  useEffect(() => {
+    const keys = Object.keys(rcErrors);
+    if (keys.length === 0) return;
+    const t = setTimeout(() => setRcErrors({}), 6000);
+    return () => clearTimeout(t);
+  }, [rcErrors]);
+
+  // The server's rc_url always wins when present. If a later poll/SSE frame
+  // reports s.rc_url as null for a row we optimistically stored locally (RC
+  // was disabled/reset server-side), drop the stale local value too.
+  useEffect(() => {
+    setRcUrls((u) => {
+      let changed = false;
+      const next = { ...u };
+      for (const s of sessions) {
+        const isAdopted = !!(s.kind === 'external' || s.external) && !!s.tmux;
+        if (!isAdopted) continue;
+        const key = `${s.device_id}:${s.session_id}`;
+        if (s.rc_url === null && key in next) {
+          delete next[key];
+          changed = true;
+        }
+      }
+      return changed ? next : u;
+    });
+  }, [sessions]);
+
+  const deviceById = useMemo(
+    () => new Map<string, FleetDevice>(devices.map((d) => [d.id, d])),
+    [devices],
+  );
+
+  // needs_attention sorts first; tie-break on a stable key (started_at,
+  // then session_id) rather than last_seen, which reorders rows on every
+  // incoming event.
+  const sortedSessions = useMemo(() => [...sessions].sort((a, b) => {
     if (a.needs_attention !== b.needs_attention) return a.needs_attention ? -1 : 1;
-    return (b.last_seen ?? 0) - (a.last_seen ?? 0);
-  });
+    const started = (b.started_at ?? 0) - (a.started_at ?? 0);
+    if (started !== 0) return started;
+    return a.session_id < b.session_id ? -1 : a.session_id > b.session_id ? 1 : 0;
+  }), [sessions]);
 
   const deviceCount = new Set(sessions.map((s) => s.device_id)).size;
+  const connectionNote = stale ? ' · stream stale, polling' : usingFallback ? ' · polling' : '';
 
   return (
     <div style={{ flex: 1, overflow: 'auto', display: 'flex', flexDirection: 'column' }}>
       <MobileHeader
-        subtitle={`${sessions.length} session${sessions.length !== 1 ? 's' : ''} · across ${deviceCount} device${deviceCount !== 1 ? 's' : ''}${usingFallback ? ' · polling' : ''}`}
+        subtitle={`${sessions.length} session${sessions.length !== 1 ? 's' : ''} · across ${deviceCount} device${deviceCount !== 1 ? 's' : ''}${connectionNote}`}
         title="Sessions"
         right={
           <button style={{ background: RT.panel, border: `1px solid ${RT.border}`, borderRadius: 7, width: 34, height: 34, display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }}>
@@ -82,15 +129,24 @@ export function AllSessions({ onOpenDevice }: AllSessionsProps) {
           const isExternal = s.kind === 'external' || !!s.external;
           const name = s.name ?? s.session_id;
           const key = `${s.device_id}:${s.session_id}`;
-          // Without tmux/pid detail (not carried by the fleet roll-up),
-          // an external session's terminal can't reliably be addressed —
-          // it's shown read-only, same as an unadopted external row.
-          const canOpenTerminal = !isExternal;
+
+          // Mirrors SessionRow.tsx: an external row can only open a
+          // terminal (Preview/keys/resize) when a tmux pane was found for
+          // it. previewTarget is what api.preview/ws/keys/resize must
+          // address — the launcher's own name for a launcher row, or the
+          // adopted tmux session's real name for an external row.
+          const isAdopted = isExternal && !!s.tmux;
+          const canOpenTerminal = !isExternal || isAdopted;
+          const previewTarget = isAdopted ? s.tmux!.session_name : name;
+          const rowRcUrl = s.rc_url ?? rcUrls[key];
+          const canStopExternal = isExternal && s.pid != null;
+
+          const openPreview = () => setPreview({ deviceId: s.device_id, name: previewTarget, sessionId: s.session_id, mode: s.mode });
 
           return (
             <div
               key={key}
-              onClick={canOpenTerminal ? () => setPreview({ deviceId: s.device_id, name, sessionId: s.session_id }) : undefined}
+              onClick={canOpenTerminal ? openPreview : undefined}
               title={canOpenTerminal ? 'Open terminal' : undefined}
               style={{
                 background: RT.card, border: `1px solid ${s.needs_attention ? RT.red : RT.border}`,
@@ -103,6 +159,11 @@ export function AllSessions({ onOpenDevice }: AllSessionsProps) {
               <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                 <div style={{ flex: 1, fontSize: 14, fontWeight: 600, letterSpacing: '-.005em', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{name}</div>
                 {isExternal && <ExternalBadge />}
+                {isExternal && !isAdopted && (
+                  <span style={{ fontFamily: FONT_MONO, fontSize: 10.5, color: RT.textLow, fontStyle: 'italic' }}>
+                    not in tmux
+                  </span>
+                )}
                 <StatusPill status={s.state ?? 'idle'} />
               </div>
               {/* Device chip */}
@@ -116,51 +177,90 @@ export function AllSessions({ onOpenDevice }: AllSessionsProps) {
                 {d?.name ?? s.device_id}
                 <Icons.chevRight size={10} stroke={chipColor} />
               </button>
-              {/* Dir + offline "last seen" */}
+              {/* Dir + offline "last seen" (device's own last_seen, not the
+                  session row's — it's the device that's unreachable). */}
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontFamily: FONT_MONO, fontSize: 11, color: RT.textLow }}>
                 <Icons.folder size={10} stroke={RT.textLow} />
                 <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.cwd ?? '—'}</span>
+                {s.tokens != null && (
+                  <>
+                    <span style={{ color: RT.borderHi }}>·</span>
+                    <span>{Math.round(s.tokens / 1000)}K</span>
+                  </>
+                )}
                 {offline && (
                   <>
                     <span style={{ color: RT.borderHi }}>·</span>
-                    <span style={{ color: RT.amber }}>last seen {formatRelativeTime(s.last_seen)}</span>
+                    <span style={{ color: RT.amber }}>last seen {formatRelativeTime(d?.last_seen)}</span>
                   </>
                 )}
               </div>
-              {/* Actions: Preview | Restart | Stop — hidden for external/offline
-                  rows, since the fleet roll-up doesn't carry the pid/tmux
-                  detail those need to be addressed safely. */}
-              {!isExternal && (
-                <div onClick={(e) => e.stopPropagation()} style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-                  <button
-                    style={mobileActionBtn()}
-                    onClick={() => setPreview({ deviceId: s.device_id, name, sessionId: s.session_id })}
-                    title="Show terminal output"
-                  >
-                    <Icons.search size={13} stroke={RT.textDim} /> Preview
-                  </button>
-                  <button
-                    style={mobileActionBtn()}
-                    disabled={!!pending[`restart-${key}`] || offline}
-                    onClick={() => guard(`restart-${key}`, () => api.restart(s.device_id, name))}
-                    title="Restart this session"
-                  >
-                    <Icons.refresh size={13} stroke={RT.green} /> Restart
-                  </button>
+              {/* Actions: Preview | Restart | Stop | RC — gated on field
+                  presence (pid/tmux/rc_url), not on isExternal alone. */}
+              <div onClick={(e) => e.stopPropagation()} style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                {!isExternal && (
+                  <>
+                    <button
+                      style={mobileActionBtn()}
+                      onClick={openPreview}
+                      title="Show terminal output"
+                    >
+                      <Icons.search size={13} stroke={RT.textDim} /> Preview
+                    </button>
+                    <button
+                      style={mobileActionBtn()}
+                      disabled={!!pending[`restart-${key}`] || offline}
+                      onClick={() => guard(`restart-${key}`, () => api.restart(s.device_id, name))}
+                      title="Restart this session"
+                    >
+                      <Icons.refresh size={13} stroke={RT.green} /> Restart
+                    </button>
+                  </>
+                )}
+                {isAdopted && (
+                  <>
+                    <button
+                      style={mobileActionBtn()}
+                      onClick={openPreview}
+                      title="Show terminal output"
+                    >
+                      <Icons.search size={13} stroke={RT.textDim} /> Preview
+                    </button>
+                    {rowRcUrl ? (
+                      <button
+                        style={mobileActionBtn()}
+                        onClick={() => window.open(rowRcUrl, '_blank', 'noopener,noreferrer')}
+                        title="Open on claude.ai"
+                      >
+                        <Icons.link size={13} stroke={RT.textDim} /> Open on claude.ai
+                      </button>
+                    ) : (
+                      <button
+                        style={mobileActionBtn()}
+                        disabled={!!pending[`rc-${key}`]}
+                        onClick={() => handleEnableRc(key, s.device_id, s.tmux!.session_name)}
+                        title="Enable Remote Control"
+                      >
+                        <Icons.refresh size={13} stroke={RT.amber} /> Enable RC
+                      </button>
+                    )}
+                  </>
+                )}
+                {(!isExternal || canStopExternal) && (
                   <button
                     style={{ background: RT.panel, border: `1px solid ${RT.border}`, borderRadius: 7, width: 36, height: 36, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', marginLeft: 'auto' }}
                     disabled={!!pending[`stop-${key}`] || offline}
-                    onClick={() => guard(`stop-${key}`, () => api.stop(s.device_id, name))}
+                    onClick={() => guard(`stop-${key}`, () => api.stop(s.device_id, name, isExternal ? { external: true, pid: s.pid ?? undefined } : undefined))}
                     title="Stop this session"
                   >
                     <Icons.stop size={12} stroke={RT.red} />
                   </button>
+                )}
+              </div>
+              {rcErrors[key] && (
+                <div style={{ fontFamily: FONT_MONO, fontSize: 10.5, color: RT.red }}>
+                  {rcErrors[key]}
                 </div>
-              )}
-              {isExternal && (
-                <span style={{ fontFamily: FONT_MONO, fontSize: 10.5, color: RT.textLow, fontStyle: 'italic' }}>
-                  external session
-                </span>
               )}
             </div>
           );
@@ -171,6 +271,7 @@ export function AllSessions({ onOpenDevice }: AllSessionsProps) {
           deviceId={preview.deviceId}
           name={preview.name}
           sessionId={preview.sessionId}
+          mode={preview.mode}
           onClose={() => setPreview(null)}
         />
       )}

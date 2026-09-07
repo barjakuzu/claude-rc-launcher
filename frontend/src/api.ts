@@ -66,6 +66,21 @@ export interface FleetSession {
   last_seen: number | null;
   external: number;
   needs_attention: boolean;
+  // Optional — a parallel backend change carries these through the store
+  // into /api/fleet, shaped exactly like the per-device GET /sessions rows
+  // (sessions.py's list_rc_sessions()/SessionRow.tsx's `Session`). Absent
+  // until that lands or when a row's fields genuinely don't apply; the UI
+  // must degrade gracefully rather than assume presence.
+  pid?: number | null;
+  /** Tmux pane an external session was adopted into, or null/absent if none
+   * was found — no Preview/terminal access is possible without this. */
+  tmux?: { session_name: string; pane_id: string } | null;
+  /** Remote Control URL, once enabled — null until then. */
+  rc_url?: string | null;
+  tokens?: number;
+  /** Backend mode string ('sh' sessions have no transcript). */
+  mode?: string;
+  claude?: { pid?: number | null; state?: string | null } | Record<string, unknown>;
 }
 
 export interface FleetView {
