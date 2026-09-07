@@ -72,9 +72,12 @@ _lock = threading.Lock()
 # a full max_bytes_per_call and it's deferred (see _update_entry) again,
 # every single call, forever, as long as that newer file stays active.
 # Giving one stalled file the front of the queue each call guarantees it
-# actually reaches a call where the full allowance is available. An
-# int, not a path: cheap, and a stable mapping isn't needed since this
-# is a fairness heuristic, not a correctness guarantee. See rollup().
+# actually reaches a call where the full allowance is available. This IS
+# load-bearing, not just a nicety: an int cursor that advances is what
+# makes every currently-stalled file eventually get its turn (a liveness
+# guarantee) rather than the same one file being retried while any
+# others sharing the front of the queue starve behind it forever. See
+# rollup() and PickStallPriorityPathRotatesTest.
 _stall_priority_cursor = 0
 
 
@@ -454,10 +457,11 @@ def _update_entry(path, project, max_bytes, max_bytes_per_call):
             # call already spent part of the shared budget, so max_bytes
             # (this file's remaining share) is less than that. Don't
             # attempt a smaller read that's doomed to stall again for no
-            # reason but bad luck in ordering -- and don't let the boost
-            # itself blow past max_bytes_per_call by granting it anyway
-            # (round 4, Minor: a call once read 1.98x its documented cap
-            # this way). Defer to a call where the full allowance is
+            # reason but bad luck in ordering -- and don't grant the full
+            # allowance anyway, blowing past max_bytes_per_call, the way
+            # an earlier version of this retry logic did (round 4,
+            # Minor: a call once read 1.98x its documented cap this way).
+            # Defer to a call where the full allowance is
             # actually available; this is not "given up" (no I/O spent,
             # stall_count/stall_bytes untouched), just deferred, so it
             # still marks the result partial without counting as skipped.
@@ -470,7 +474,7 @@ def _update_entry(path, project, max_bytes, max_bytes_per_call):
         # max_bytes == max_bytes_per_call exactly (the defer branch above
         # already ruled out max_bytes < max_bytes_per_call, and max_bytes
         # can never exceed it). Either way max_bytes IS the allowance to
-        # use; no separate boosted value is needed.
+        # use directly; no separate, larger value is ever computed.
         effective_max = max_bytes
         # Cap the actual read at what the file really has pending, not
         # the full allowance: f.read(n) can allocate close to n bytes up
@@ -630,6 +634,16 @@ def rollup(root=None, max_bytes_per_call=DEFAULT_MAX_BYTES_PER_CALL,
     would see its own remaining share shrink below that the moment ANY
     newer file has anything to read, deferring it again on every single
     call for as long as that newer file stays active, indefinitely.
+
+    Tradeoff of going first: if the prioritized file stalls again, its
+    attempt still consumes the whole max_bytes_per_call it was offered,
+    so every OTHER file can see zero of this call's budget. Measured as
+    bounded and self-terminating, not a new way to starve the rest of
+    the tree: with K files simultaneously stalled, worst-case
+    consecutive calls where some non-prioritized file gets starved scale
+    at roughly 2K, one-time (it does not recur once every stalled file
+    has either recovered or hit its own give-up threshold and stopped
+    being attempted at all under that budget).
     """
     root = _default_root() if root is None else root
     file_entries, discover_skipped = _discover_files(root)
