@@ -1201,8 +1201,8 @@ class UsageCostAlertsTest(unittest.TestCase):
     def test_cost_view_sessions_name_null_for_an_orphaned_usage_row(self):
         # session_usage row with no matching sessions row at all -- e.g. a
         # session row pruned out from under it. A LEFT JOIN must still
-        # surface the usage row, with name/project/ended coming back as
-        # the "nothing known" values rather than the row disappearing.
+        # surface the usage row, with name/project coming back as the
+        # "nothing known" values rather than the row disappearing.
         self.store.upsert_device({"id": "local", "name": "hub", "role": "full",
                                    "version": "1", "claude_version": "1"})
         self.store.upsert_session_usage("local", [
@@ -1212,8 +1212,31 @@ class UsageCostAlertsTest(unittest.TestCase):
         row = next(r for r in view["sessions"] if r["session_id"] == "orphan")
         self.assertIsNone(row["name"])
         self.assertEqual(row["project"], "")
-        self.assertFalse(row["ended"])
+        # Fix round 1 (Minor): an orphan (no `sessions` row matched at
+        # all) reports ended=True, not False -- a session_usage row with
+        # no live counterpart is far more likely to be something that
+        # ended and was later pruned than something still live, and
+        # "unknown" should never read as "confirmed still running".
+        self.assertTrue(row["ended"])
         self.assertEqual(row["effective"], 42)
+
+    def test_cost_view_sessions_ended_false_for_a_genuinely_live_session(self):
+        # A real sessions row with ended_at IS NULL (still live) must
+        # report ended=False, not get swept into the orphan-defaults-to-
+        # True path above -- only a session with NO sessions row at all
+        # defaults to True.
+        self.store.upsert_device({"id": "local", "name": "hub", "role": "full",
+                                   "version": "1", "claude_version": "1"})
+        self.store.upsert_sessions("local", [
+            {"session_id": "s1", "name": "rc-live", "cwd": "/tmp",
+             "kind": "launcher", "state": "busy", "started_at": 1000},
+        ], now_fn=lambda: 1000.0)
+        self.store.upsert_session_usage("local", [
+            {"session_id": "s1", "effective": 10, "last_ts": 1000.0},
+        ])
+        view = self.store.cost_view(days=30)
+        row = next(r for r in view["sessions"] if r["session_id"] == "s1")
+        self.assertFalse(row["ended"])
 
     def test_cost_view_sessions_not_limited_to_the_days_window(self):
         # Unlike devices/projects, `sessions` has no `day` column to

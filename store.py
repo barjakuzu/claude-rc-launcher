@@ -188,6 +188,17 @@ CREATE TABLE IF NOT EXISTS session_events (
 );
 CREATE INDEX IF NOT EXISTS idx_events_session ON session_events(session_id, ts);
 CREATE INDEX IF NOT EXISTS idx_events_device ON session_events(device_id, ts);
+-- Fix round 1 (Minor): dedicated covering index for
+-- last_event_ts_map()'s `SELECT device_id, session_id, MAX(ts) ...
+-- GROUP BY device_id, session_id`, run once per poll cycle by the guard
+-- step. idx_events_unique below (device_id, session_id, ts, event)
+-- already happens to satisfy this as a covering, pre-sorted scan, but
+-- that's an accident of the unique constraint's column order, not a
+-- guarantee -- a future change to that constraint's shape (e.g. dropping
+-- `event` from the natural key) would silently regress this hot poll-
+-- loop query. This index exists for exactly this access pattern and
+-- nothing else, so it stays correct independent of that.
+CREATE INDEX IF NOT EXISTS idx_events_last_ts ON session_events(device_id, session_id, ts);
 CREATE TABLE IF NOT EXISTS audit_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, actor TEXT, action TEXT,
     target TEXT, device_id TEXT, detail TEXT
@@ -1120,7 +1131,8 @@ class Store:
             session_rows = conn.execute(
                 "SELECT su.device_id AS device_id, su.session_id AS session_id, "
                 "su.effective AS effective, su.last_ts AS last_ts, "
-                "s.name AS name, s.cwd AS cwd, s.ended_at AS ended_at "
+                "s.name AS name, s.cwd AS cwd, s.ended_at AS ended_at, "
+                "s.session_id AS joined_session_id "
                 "FROM session_usage su LEFT JOIN sessions s "
                 "ON s.device_id = su.device_id AND s.session_id = su.session_id "
                 "ORDER BY su.effective DESC LIMIT 50")
@@ -1132,7 +1144,19 @@ class Store:
                     "project": _encode_cwd_as_project(r["cwd"]),
                     "effective": r["effective"],
                     "last_ts": r["last_ts"],
-                    "ended": bool(r["ended_at"]),
+                    # Fix round 1 (Minor): `joined_session_id` is the
+                    # LEFT JOIN's own match column -- NULL if and only if
+                    # no `sessions` row matched at all (an orphan
+                    # session_usage row), as opposed to a real row whose
+                    # `ended_at` happens to be NULL (a genuinely live
+                    # session). `bool(r["ended_at"])` alone can't tell
+                    # those two apart and reported "ended: false" for an
+                    # orphan, which is backwards: a session_usage row with
+                    # no sessions counterpart at all is far more likely to
+                    # be something that ended (and was later pruned) than
+                    # something still live, so treat "unknown" as ended
+                    # rather than as live for this field.
+                    "ended": True if r["joined_session_id"] is None else bool(r["ended_at"]),
                 }
                 for r in session_rows
             ]
