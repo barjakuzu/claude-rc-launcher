@@ -1378,6 +1378,64 @@ class DailyByProjectTest(UsageTestCase):
         data = usage.rollup(root=self.root)
         self.assertEqual(data["daily_by_project"], [])
 
+    def test_daily_by_project_capped_false_under_the_limit(self):
+        path = self._session_path()
+        self._write(path, _line(_usage_row(ts="2026-09-06T08:00:00.000Z", input_tokens=1, output=1)))
+        data = usage.rollup(root=self.root)
+        self.assertFalse(data["daily_by_project_capped"])
+        self.assertEqual(len(data["daily_by_project"]), 1)
+
+
+class DailyByProjectCapTest(UsageTestCase):
+    """MAX_DAILY_BY_PROJECT_ENTRIES: fix round 2 (Opus review). 40 real
+    project directories over a 30 day window is 1200 daily_by_project
+    rows on every poll, from every device, for an API that only ever
+    surfaces the top 50 projects -- capped here at the total row count
+    (days times projects), keeping the highest-effective rows, same
+    pattern as LRUEvictionTest patching MAX_CACHE_ENTRIES down to make
+    the cap reachable without actually writing hundreds of fixture
+    files."""
+
+    def test_caps_total_rows_keeping_highest_effective(self):
+        # 4 projects, all with usage on the SAME day (so this is purely
+        # a project-count cap, not a day-count one): effective scales
+        # with input_tokens (weight 1.0), so project i's score is
+        # strictly increasing in i. Capped to 2: only the two
+        # highest-effective projects (2 and 3) must survive, not an
+        # arbitrary or insertion-order-based pair.
+        for i in range(4):
+            proj_dir = os.path.join(self.root, "-tmp-proj%d" % i)
+            os.makedirs(proj_dir)
+            path = os.path.join(proj_dir, "sess-%d.jsonl" % i)
+            self._write(path, _line(_usage_row(
+                session_id="sess-%d" % i, msg_id="m%d" % i,
+                ts="2026-09-06T08:00:00.000Z", input_tokens=(i + 1) * 10, output=0)))
+
+        with mock.patch.object(usage, "MAX_DAILY_BY_PROJECT_ENTRIES", 2):
+            data = usage.rollup(root=self.root)
+
+        self.assertTrue(data["daily_by_project_capped"])
+        self.assertEqual(len(data["daily_by_project"]), 2)
+        kept_projects = {r["project"] for r in data["daily_by_project"]}
+        self.assertEqual(kept_projects, {"-tmp-proj2", "-tmp-proj3"})
+        kept_effectives = sorted(r["effective"] for r in data["daily_by_project"])
+        self.assertEqual(kept_effectives, [30, 40])  # projects 2, 3: input_tokens 30, 40
+
+    def test_not_capped_when_row_count_is_exactly_the_limit(self):
+        for i in range(3):
+            proj_dir = os.path.join(self.root, "-tmp-proj%d" % i)
+            os.makedirs(proj_dir)
+            path = os.path.join(proj_dir, "sess-%d.jsonl" % i)
+            self._write(path, _line(_usage_row(
+                session_id="sess-%d" % i, msg_id="m%d" % i,
+                ts="2026-09-06T08:00:00.000Z", input_tokens=1, output=0)))
+
+        with mock.patch.object(usage, "MAX_DAILY_BY_PROJECT_ENTRIES", 3):
+            data = usage.rollup(root=self.root)
+
+        self.assertFalse(data["daily_by_project_capped"])  # exactly at the cap, not over it
+        self.assertEqual(len(data["daily_by_project"]), 3)
+
 
 if __name__ == "__main__":
     unittest.main()
