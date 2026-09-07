@@ -40,6 +40,47 @@ def _valid_started_at(value):
         return False
 
 
+def _coerce_number(value):
+    """Best-effort coercion of a device-reported numeric field (token
+    counts, effective cost, a transcript timestamp) to a plain int/float,
+    or None if it cannot be trusted at all. Fix round 2 (review Important
+    2): this hub trusts nothing that crosses the device/network boundary --
+    upsert_session_usage and upsert_cost_daily run every numeric field
+    through this before it ever reaches a query, the same way
+    _valid_started_at gates started_at.
+
+    A real int/float is accepted if finite (NaN/+-inf rejected -- Python's
+    own json.loads happily parses the bare tokens `NaN`/`Infinity` by
+    default, so "arrived via json.loads" does not imply "is a real
+    number"). A numeric-looking string ("123", "12.5") is coerced, since
+    JSON has no separate "numeric string" type worth punishing a device
+    for. bool is rejected even though it's technically an int subclass --
+    `True`/`False` are never a legitimate token count. Anything else
+    (None, a list, a dict, a non-numeric string) returns None.
+
+    Never raises: like _valid_started_at, math.isfinite() itself can raise
+    OverflowError on an integer too large to convert to a C double, caught
+    here rather than left to blow up the write."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        num = value
+    elif isinstance(value, str):
+        try:
+            num = int(value)
+        except ValueError:
+            try:
+                num = float(value)
+            except ValueError:
+                return None
+    else:
+        return None
+    try:
+        return num if math.isfinite(num) else None
+    except OverflowError:
+        return None
+
+
 # A row can go missing from a single poll's `rows` without the underlying
 # session actually having stopped -- e.g. `claude agents --json` timing out
 # (agents._fetch_rows returns [] on a timeout) drops every external row for
@@ -105,20 +146,22 @@ CREATE TABLE IF NOT EXISTS alerts (
     device_id TEXT, session_id TEXT, rule TEXT,
     severity TEXT, message TEXT, value REAL, threshold REAL,
     since REAL, first_seen REAL, last_seen REAL,
+    target_type TEXT, name TEXT,
     PRIMARY KEY (device_id, session_id, rule)
 );
 """
 # session_usage, cost_daily and alerts (Phase 3 wiring, CONTRACT.md section
 # 2) were brand-new tables when this comment was first written, so CREATE
-# TABLE IF NOT EXISTS above was safe on its own. That is no longer
-# guaranteed for `alerts` specifically: any hub.db that has already run a
-# store.py from between that point and fix round 1 below has an `alerts`
-# table without target_type/name, and CREATE TABLE IF NOT EXISTS is a
-# no-op against it -- so those two columns are added the same additive way
-# as _NEW_SESSION_COLUMNS/_migrate_session_columns, not folded into the
-# CREATE TABLE above. `alerts` here therefore intentionally still reflects
-# only the ORIGINAL 10 columns, same as `sessions` above never gained
-# pid/tmux/rc_url/tokens/claude/status in its own CREATE TABLE either.
+# TABLE IF NOT EXISTS above was safe on its own. `alerts`'s target_type/name
+# (fix round 1) are in the CREATE TABLE above AND behind the additive
+# migration below (fix round 2, review Minor 3): CONTRACT.md's DDL is
+# binding and another lane reads it, so it must show the true end state for
+# a genuinely fresh database, not rely on the migration alone -- but any
+# hub.db that already ran a store.py from between the original 10-column
+# alerts table and fix round 1 has the table without these columns, and
+# CREATE TABLE IF NOT EXISTS is a no-op against it, so the migration is
+# still required for that case. Both together, run unconditionally on every
+# init, is idempotent and strictly better than either alone.
 
 # session_events natural key: (device_id, session_id, ts, event). A poller
 # cursor rewind re-submits the same rows; INSERT OR IGNORE against this
@@ -504,6 +547,18 @@ class Store:
                 (now_fn(), actor, action, target, device_id, detail))
         return self._write(_do)
 
+    # Numeric fields validated/coerced by _coerce_number before either
+    # upsert below writes a row (fix round 2, review Important 2): a device
+    # payload arrives over a network and is untrusted like any other input
+    # crossing that boundary, and cost_view sums these fields with plain
+    # Python arithmetic -- one un-coerced bad value (a string, None, NaN,
+    # a list) reaching the table would raise out of cost_view/fleet_view
+    # for every caller, indefinitely, since the bad row persists until
+    # someone edits the database by hand.
+    _USAGE_NUMERIC_FIELDS = ("input", "cache_read", "cache_write", "output",
+                              "effective", "last_ts")
+    _COST_NUMERIC_FIELDS = ("input", "cache_read", "cache_write", "output", "effective")
+
     def upsert_session_usage(self, device_id, rows, now_fn=time.time):
         """Upsert per-session token-usage totals for `device_id` (usage.py's
         per-session accounting, one row per live/known session). Each row
@@ -512,7 +567,10 @@ class Store:
 
         A row with no session_id is skipped and logged, matching
         upsert_sessions: session_id is the natural key here too (paired
-        with device_id) and there is no safe fallback key."""
+        with device_id) and there is no safe fallback key. A row where any
+        of the numeric fields fails to coerce via _coerce_number (missing,
+        None, NaN, +/-inf, or a non-numeric type) is likewise skipped and
+        logged in full, not written with a partial/zeroed value."""
         def _do(conn):
             now = now_fn()
             skipped = 0
@@ -524,6 +582,13 @@ class Store:
                         "upsert_session_usage: skipping row for device %r with no session_id: %r",
                         device_id, r)
                     continue
+                coerced = {f: _coerce_number(r.get(f)) for f in self._USAGE_NUMERIC_FIELDS}
+                if any(v is None for v in coerced.values()):
+                    skipped += 1
+                    _LOG.warning(
+                        "upsert_session_usage: skipping row for device %r session %r "
+                        "with a non-numeric field: %r", device_id, sid, r)
+                    continue
                 conn.execute(
                     "INSERT INTO session_usage (device_id, session_id, input, cache_read, "
                     "cache_write, output, effective, last_ts, updated_at) "
@@ -533,8 +598,9 @@ class Store:
                     "cache_write=excluded.cache_write, output=excluded.output, "
                     "effective=excluded.effective, last_ts=excluded.last_ts, "
                     "updated_at=excluded.updated_at",
-                    (device_id, sid, r.get("input"), r.get("cache_read"), r.get("cache_write"),
-                     r.get("output"), r.get("effective"), r.get("last_ts"), now))
+                    (device_id, sid, coerced["input"], coerced["cache_read"],
+                     coerced["cache_write"], coerced["output"], coerced["effective"],
+                     coerced["last_ts"], now))
             return {"skipped": skipped}
         return self._write(_do)
 
@@ -555,7 +621,10 @@ class Store:
         -- skip-and-log makes the failure visible instead. `project`
         missing/empty is valid (CONTRACT.md: the empty string when the
         device did not report one, e.g. metadata role) and is stored as
-        "" rather than skipped."""
+        "" rather than skipped. A row where any of the numeric fields
+        fails to coerce via _coerce_number is skipped and logged in full,
+        same as upsert_session_usage above -- see that method's docstring
+        and _coerce_number itself for what counts as coercible."""
         def _do(conn):
             now = now_fn()
             skipped = 0
@@ -567,6 +636,13 @@ class Store:
                         "upsert_cost_daily: skipping row for device %r with no day: %r",
                         device_id, r)
                     continue
+                coerced = {f: _coerce_number(r.get(f)) for f in self._COST_NUMERIC_FIELDS}
+                if any(v is None for v in coerced.values()):
+                    skipped += 1
+                    _LOG.warning(
+                        "upsert_cost_daily: skipping row for device %r day %r "
+                        "with a non-numeric field: %r", device_id, day, r)
+                    continue
                 project = r.get("project") or ""
                 conn.execute(
                     "INSERT INTO cost_daily (device_id, day, project, input, cache_read, "
@@ -575,8 +651,8 @@ class Store:
                     "input=excluded.input, cache_read=excluded.cache_read, "
                     "cache_write=excluded.cache_write, output=excluded.output, "
                     "effective=excluded.effective, updated_at=excluded.updated_at",
-                    (device_id, day, project, r.get("input"), r.get("cache_read"),
-                     r.get("cache_write"), r.get("output"), r.get("effective"), now))
+                    (device_id, day, project, coerced["input"], coerced["cache_read"],
+                     coerced["cache_write"], coerced["output"], coerced["effective"], now))
             return {"skipped": skipped}
         return self._write(_do)
 
@@ -617,14 +693,22 @@ class Store:
         identity in precisely that case. Both are updated on every
         re-observation, same as severity/message/value -- unlike
         first_seen, there is no reason to freeze a finding's name/type to
-        whatever it happened to be the first time it fired."""
+        whatever it happened to be the first time it fired.
+
+        Returns {"count": <current findings written>, "skipped": <findings
+        dropped for missing device_id/rule>} -- `skipped` added in fix
+        round 2 (review Minor 6) to match every sibling upsert
+        (upsert_sessions, upsert_session_usage, upsert_cost_daily all
+        report it)."""
         def _do(conn):
             now = now_fn()
             current_keys = set()
+            skipped = 0
             for f in findings:
                 device_id = f.get("device_id")
                 rule = f.get("rule")
                 if not device_id or not rule:
+                    skipped += 1
                     _LOG.warning("replace_alerts: skipping malformed finding: %r", f)
                     continue
                 session_id = f.get("session_id") or ""
@@ -646,15 +730,56 @@ class Store:
                 for row in conn.execute("SELECT device_id, session_id, rule FROM alerts")]
             for key in existing_keys:
                 if key not in current_keys:
-                    conn.execute(
-                        "DELETE FROM alerts WHERE device_id=? AND session_id=? AND rule=?", key)
-            return {"count": len(current_keys)}
+                    device_id, session_id, rule = key
+                    # A legacy row can hold session_id IS NULL (from before
+                    # this method guaranteed "" instead) -- `session_id=?`
+                    # with a NULL parameter matches nothing in SQL (NULL is
+                    # never "=" to anything, not even another NULL), which
+                    # would leave such a row un-deletable forever no matter
+                    # how many times it stops appearing in a batch (review
+                    # Minor 6). IS NULL is required to actually match it.
+                    if session_id is None:
+                        conn.execute(
+                            "DELETE FROM alerts WHERE device_id=? AND session_id IS NULL "
+                            "AND rule=?", (device_id, rule))
+                    else:
+                        conn.execute(
+                            "DELETE FROM alerts WHERE device_id=? AND session_id=? AND rule=?",
+                            key)
+            return {"count": len(current_keys), "skipped": skipped}
         return self._write(_do)
 
-    def prune(self, days=14, now_fn=time.time):
+    def prune(self, days=14, now_fn=time.time, cost_days=35):
+        """Delete old rows. `days` (default 14) governs session_events,
+        audit_log and ended sessions, same as before this parameter
+        existed. `cost_daily` uses its OWN cutoff, `cost_days` (default
+        35), not `days` -- fix round 2, review Important 1: fleetpoll.py
+        calls prune() bare, hourly, so a shared 14-day cutoff would delete
+        every cost_daily row older than 14 days on every poll, which is
+        exactly the retrospective data /api/cost?days=30 and its 30-day
+        sparkline need. A device re-reporting its own rolling window
+        usually papers over this within a poll or two, so the visible
+        symptom is churn, not an obvious break -- but any day whose
+        transcript has since rotated off the device is gone from the hub
+        for good, and the hub is the only copy. cost_days=35 gives
+        /api/cost's default 30-day window headroom without depending on
+        prune() and the API's default `days` being hand-kept in sync
+        (either can change independently; cost_days only needs to stay
+        >= the largest `days` a caller actually asks cost_view() for).
+
+        session_usage's orphan sweep is unaffected by either cutoff -- it
+        deletes by non-existence in `sessions`, not by age.
+
+        Boundary note: both cutoffs here are "delete strictly older than
+        the cutoff day/timestamp" (`<`), which errs toward keeping one
+        extra day/interval of data rather than deleting it -- the safe
+        direction for a prune() whose whole purpose is retention, given
+        Important 1 above. cost_view()'s own `days` window (a query, not
+        a delete) is the one documented as exact."""
         def _do(conn):
-            cutoff = now_fn() - days * 86400
-            cutoff_day = time.strftime("%Y-%m-%d", time.gmtime(cutoff))
+            now = now_fn()
+            cutoff = now - days * 86400
+            cost_cutoff_day = time.strftime("%Y-%m-%d", time.gmtime(now - cost_days * 86400))
             ev = conn.execute("DELETE FROM session_events WHERE ts < ?", (cutoff,)).rowcount
             au = conn.execute("DELETE FROM audit_log WHERE ts < ?", (cutoff,)).rowcount
             se = conn.execute(
@@ -668,7 +793,8 @@ class Store:
                 "DELETE FROM session_usage WHERE NOT EXISTS ("
                 "SELECT 1 FROM sessions s WHERE s.device_id = session_usage.device_id "
                 "AND s.session_id = session_usage.session_id)").rowcount
-            cd = conn.execute("DELETE FROM cost_daily WHERE day < ?", (cutoff_day,)).rowcount
+            cd = conn.execute(
+                "DELETE FROM cost_daily WHERE day < ?", (cost_cutoff_day,)).rowcount
             return {"events": ev, "audit_log": au, "sessions": se,
                     "session_usage": su, "cost_daily": cd}
         return self._write(_do)
@@ -737,13 +863,21 @@ class Store:
         the poll loop -- there is no meaningful way to fake "now" here
         independent of also faking every seeded row's own day string, so
         tests control the window by choosing real day strings relative to
-        the actual wall clock instead."""
+        the actual wall clock instead.
+
+        The window is exactly `days` calendar days ending today (review
+        Minor 5): subtracting `days * 86400` seconds from `now` lands on
+        the same time-of-day exactly `days` days earlier, so that day
+        itself is the day BEFORE the earliest one this call should
+        include -- the boundary comparison below is therefore `>`
+        (exclusive of that day), not `>=`, or `days=30` would return 31
+        distinct days, not 30."""
         conn = self._read_conn()
         try:
             now = time.time()
             cutoff_day = time.strftime("%Y-%m-%d", time.gmtime(now - days * 86400))
             rows = [dict(r) for r in conn.execute(
-                "SELECT * FROM cost_daily WHERE day >= ? ORDER BY day DESC", (cutoff_day,))]
+                "SELECT * FROM cost_daily WHERE day > ? ORDER BY day DESC", (cutoff_day,))]
             device_names = {r["id"]: r["name"] for r in conn.execute(
                 "SELECT id, name FROM devices")}
 
@@ -789,8 +923,17 @@ class Store:
 
     def live_alerts(self):
         """All current findings, most severe first (alert before warn),
-        then oldest first_seen first within a severity -- the same
-        ordering as guard._sort_key, so a caller doesn't need to re-sort.
+        then oldest first_seen first within a severity, per CONTRACT.md's
+        live_alerts() spec and the brief -- a caller doesn't need to
+        re-sort. Fix round 2 (review Minor 4): this shares guard._sort_key's
+        severity ranking but NOT its tie-breaker -- guard._sort_key sorts
+        by `since` (a per-observation rule value guard.evaluate() computes
+        fresh every poll and never persists), while this sorts by
+        `first_seen` (the persisted "how long has this alert been open"
+        this table tracks across polls). The two are usually close but not
+        the same field; a docstring here previously claimed they matched,
+        which was wrong -- the code was always correct per the brief, only
+        that comment was not.
 
         Returns the raw alerts rows as dicts: device_id, session_id,
         rule, severity, message, value, threshold, since, first_seen,
