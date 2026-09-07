@@ -200,6 +200,69 @@ def _resolve_actor(handler):
     return "unknown"
 
 
+# Sentinel distinct from None, so _proxy_to_device can tell "no body arg
+# passed, read rfile yourself" apart from "caller read rfile and there was
+# genuinely no body".
+_UNSET = object()
+
+# Mutating POST routes that get an audit row when handled locally (see the
+# _audit() calls in do_POST). A proxied request to one of these same routes
+# is audited too, at the proxy decision point in do_POST, since forwarding
+# it to a remote device is the only place the hub ever sees the action --
+# the device's own do_POST never runs for a proxied request.
+_PROXY_AUDIT_ACTIONS = {
+    "/start": "start",
+    "/devices/rename": "devices/rename",
+    "/stop": "stop",
+    "/unstick": "unstick",
+    "/stop-all": "stop-all",
+    "/restart": "restart",
+    "/resume/start": "resume/start",
+    "/tunnel/start": "tunnel/start",
+    "/tunnel/stop": "tunnel/stop",
+    "/schedules": "schedules",
+    "/schedules/update": "schedules/update",
+    "/schedules/delete": "schedules/delete",
+    "/update": "update",
+    "/schedules/fire": "schedules/fire",
+}
+
+
+def _proxy_audit_action(path):
+    """Action name for a proxied POST route worth an audit row, or None if
+    this route isn't one of the hub's named mutating actions (so it's left
+    alone, same as it would be if handled locally)."""
+    if path in _PROXY_AUDIT_ACTIONS:
+        return _PROXY_AUDIT_ACTIONS[path]
+    if path.startswith("/sessions/"):
+        if path.endswith("/keys"):
+            return "keys"
+        if path.endswith("/enable-rc"):
+            return "enable-rc"
+    return None
+
+
+def _proxy_audit_target(path, body_bytes):
+    """Best-effort target name for a proxied audit row: prefer a name/
+    session/id field from the JSON body (matching what the local routes
+    audit), else fall back to the session name segment of a /sessions/<name>/...
+    path."""
+    if body_bytes:
+        try:
+            parsed = json.loads(body_bytes)
+            for key in ("name", "session", "id"):
+                val = parsed.get(key)
+                if val:
+                    return str(val)
+        except Exception:
+            pass
+    if path.startswith("/sessions/"):
+        parts = path.split("/")
+        if len(parts) > 2 and parts[2]:
+            return parts[2]
+    return ""
+
+
 def _audit(handler, action, target, device_id="local", detail=""):
     """Write one audit_log row. A no-op (never raises) when HUB_STORE is
     None -- a device running without a hub role, or a test that hasn't
@@ -1102,11 +1165,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return False
         return True
 
-    def _proxy_to_device(self, device):
-        """Forward the current request to a remote device's app and relay back."""
+    def _proxy_to_device(self, device, body=_UNSET):
+        """Forward the current request to a remote device's app and relay back.
+
+        `body` lets a caller that already consumed rfile (e.g. to audit a
+        mutating POST before forwarding) hand the bytes through instead of
+        this method trying to read an already-drained stream.
+        """
         target = device["base_url"].rstrip("/") + self.path
-        length = int(self.headers.get("Content-Length", 0) or 0)
-        body = self.rfile.read(length) if length > 0 else None
+        if body is _UNSET:
+            length = int(self.headers.get("Content-Length", 0) or 0)
+            body = self.rfile.read(length) if length > 0 else None
         req = urllib.request.Request(target, data=body, method=self.command)
         ct = self.headers.get("Content-Type")
         if ct:
@@ -1650,7 +1719,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
             device = get_device(dev_id)
             if device is None:
                 return self._json({"error": "unknown device"}, 404)
-            return self._proxy_to_device(device)
+            proxy_path = self.path.split('?')[0]
+            if proxy_path.startswith("/rc"):
+                proxy_path = proxy_path[3:]
+            length = int(self.headers.get("Content-Length", 0) or 0)
+            body = self.rfile.read(length) if length > 0 else None
+            action = _proxy_audit_action(proxy_path)
+            if action:
+                _audit(self, action=action,
+                       target=_proxy_audit_target(proxy_path, body),
+                       device_id=dev_id, detail="proxied=true")
+            return self._proxy_to_device(device, body=body)
 
         path = self.path.split('?')[0]
         if path.startswith("/rc"):

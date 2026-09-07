@@ -1551,5 +1551,120 @@ class ShouldProxyQueryStringTest(unittest.TestCase):
         self.assertFalse(h._should_proxy("some-device"))
 
 
+class ProxiedRequestAuditTest(unittest.TestCase):
+    """A mutating POST forwarded to a remote device is audited at the hub,
+    same as a local mutating POST -- the hub is the only place that ever
+    sees these actions happen, so it's the only place that can log them."""
+
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.TemporaryDirectory()
+        self._orig_store = server.HUB_STORE
+        server.HUB_STORE = store.Store(os.path.join(self.tmp.name, "hub.db"))
+        self.device = {"id": "dev1", "base_url": "http://10.0.0.5:9999",
+                        "auth_user": "", "auth_pass": ""}
+        self._get_device_patch = mock.patch.object(
+            server, "get_device", return_value=self.device)
+        self._get_device_patch.start()
+        self._check_auth_patch = mock.patch.object(
+            server, "_check_auth", return_value=True)
+        self._check_auth_patch.start()
+
+    def tearDown(self):
+        self._get_device_patch.stop()
+        self._check_auth_patch.stop()
+        if server.HUB_STORE is not None:
+            server.HUB_STORE.close()
+        server.HUB_STORE = self._orig_store
+        self.tmp.cleanup()
+
+    def _make_handler(self, method_path, body_bytes, headers=None):
+        h = server.Handler.__new__(server.Handler)
+        h.path = method_path
+        h.headers = dict(headers or {})
+        h.headers["Content-Length"] = str(len(body_bytes))
+        h.headers["X-RC-Device"] = "dev1"
+        h.client_address = ("127.0.0.1", 12345)
+        h.rfile = io.BytesIO(body_bytes)
+        h.wfile = io.BytesIO()
+        h.command = "POST"
+        h.send_response = lambda *a, **kw: None
+        h.send_header = lambda *a, **kw: None
+        h.end_headers = lambda *a, **kw: None
+        return h
+
+    def _fake_response(self, payload=b'{"ok": true}', status=200):
+        resp = mock.MagicMock()
+        resp.read.return_value = payload
+        resp.status = status
+        resp.headers = {"Content-Type": "application/json"}
+        resp.__enter__ = mock.Mock(return_value=resp)
+        resp.__exit__ = mock.Mock(return_value=False)
+        return resp
+
+    def test_proxied_mutating_post_writes_one_audit_row_with_device_and_proxied_marker(self):
+        body = b'{"name": "rc-foo"}'
+        h = self._make_handler("/rc/stop", body)
+        with mock.patch.object(server.urllib.request, "urlopen",
+                                return_value=self._fake_response()):
+            h.do_POST()
+        rows = server.HUB_STORE.recent_audit()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["device_id"], "dev1")
+        self.assertEqual(rows[0]["target"], "rc-foo")
+        self.assertIn("proxied", rows[0]["detail"])
+
+    def test_proxied_get_writes_no_audit_row(self):
+        h = self._make_handler("/rc/stop", b"")
+        h.command = "GET"
+        with mock.patch.object(server.urllib.request, "urlopen",
+                                return_value=self._fake_response()):
+            h.do_GET()
+        rows = server.HUB_STORE.recent_audit()
+        self.assertEqual(len(rows), 0)
+
+    def test_proxied_mutating_post_succeeds_when_audit_write_raises(self):
+        body = b'{"name": "rc-foo"}'
+        h = self._make_handler("/rc/stop", body)
+        captured = {}
+
+        def fake_json(data, code=200, _captured=captured):
+            _captured["data"] = data
+            _captured["code"] = code
+
+        h._json = fake_json
+        with mock.patch.object(server.HUB_STORE, "add_audit",
+                                side_effect=RuntimeError("boom")):
+            with mock.patch.object(server.urllib.request, "urlopen",
+                                    return_value=self._fake_response()):
+                h.do_POST()
+        rows = server.HUB_STORE.recent_audit()
+        self.assertEqual(len(rows), 0)
+        # The proxied request itself still went through -- it wasn't
+        # blocked or failed by the audit write raising.
+        self.assertEqual(len(h.wfile.getvalue()), len(b'{"ok": true}'))
+
+    def test_local_post_still_writes_exactly_one_row_no_double_audit(self):
+        h = server.Handler.__new__(server.Handler)
+        h.path = "/rc/stop"
+        body = b'{"name": "rc-foo"}'
+        h.headers = {"Content-Length": str(len(body))}
+        h.client_address = ("127.0.0.1", 12345)
+        h.rfile = io.BytesIO(body)
+        h.wfile = io.BytesIO()
+        h.command = "POST"
+
+        def fake_json(data, code=200):
+            return None
+
+        h._json = fake_json
+        with mock.patch.object(server, "session_exists", return_value=False):
+            h.do_POST()
+        rows = server.HUB_STORE.recent_audit()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["device_id"], "local")
+        self.assertNotIn("proxied", rows[0]["detail"])
+
+
 if __name__ == "__main__":
     unittest.main()
