@@ -776,7 +776,18 @@ class Store:
         dropped for missing device_id/rule>} -- `skipped` added in fix
         round 2 (review Minor 6) to match every sibling upsert
         (upsert_sessions, upsert_session_usage, upsert_cost_daily all
-        report it)."""
+        report it).
+
+        `value`/`threshold` are coerced via _coerce_number before binding
+        (fix round 4, review residual 1): guard.py's own _finite_or_none
+        rejects NaN/inf but never checks SQLite's 64-bit range the way
+        _coerce_number does, so an operator typo in guard.json (an
+        over-int64 threshold, say) reaches this method as a plain finite
+        Python int and previously raised OverflowError at conn.execute()
+        time, dropping the ENTIRE alerts batch -- silently vanishing
+        every OTHER finding in the same poll cycle, the exact failure
+        this phase exists to prevent, even though the bad value
+        originated from hub-local config rather than device input."""
         def _do(conn):
             now = now_fn()
             current_keys = set()
@@ -790,6 +801,8 @@ class Store:
                     continue
                 session_id = f.get("session_id") or ""
                 current_keys.add((device_id, session_id, rule))
+                value = _coerce_number(f.get("value"))
+                threshold = _coerce_number(f.get("threshold"))
                 conn.execute(
                     "INSERT INTO alerts (device_id, session_id, rule, severity, message, "
                     "value, threshold, since, first_seen, last_seen, target_type, name) "
@@ -800,7 +813,7 @@ class Store:
                     "since=excluded.since, last_seen=excluded.last_seen, "
                     "target_type=excluded.target_type, name=excluded.name",
                     (device_id, session_id, rule, f.get("severity"), f.get("message"),
-                     f.get("value"), f.get("threshold"), f.get("since"), now, now,
+                     value, threshold, f.get("since"), now, now,
                      f.get("target_type"), f.get("name")))
             existing_keys = [
                 (row["device_id"], row["session_id"], row["rule"])
@@ -891,7 +904,19 @@ class Store:
         cache_write/output/effective/last_ts when a row exists there,
         else None -- never a dict of zeros, since "no transcript data
         yet" and "confirmed zero usage" are different facts a guard rule
-        (and the UI) must be able to tell apart."""
+        (and the UI) must be able to tell apart.
+
+        A session_usage row can itself have every one of those six
+        columns NULL -- upsert_session_usage's sparse-row handling (fix
+        round 3) accepts a row like {"session_id": "s1"} with no numeric
+        fields at all, which writes exactly that all-NULL row. Fix round
+        4, review residual 2: such a row is joined here as None, not as
+        {"input": None, ...} -- CONTRACT.md section 1 requires None for
+        "no data", and a dict whose every field is null is the same fact
+        wearing a different shape. Two representations of "no data" is
+        exactly the ambiguity every round of this lane (and the UI lane)
+        has been removing; a row with at least one real value still comes
+        back as a dict, nulls and all, same as before."""
         conn = self._read_conn()
         try:
             devices_rows = [dict(r) for r in conn.execute(
@@ -902,16 +927,18 @@ class Store:
             else:
                 session_rows = [dict(r) for r in conn.execute(
                     "SELECT * FROM sessions WHERE ended_at IS NULL ORDER BY last_seen DESC")]
-            usage_map = {
-                (u["device_id"], u["session_id"]): {
+            usage_map = {}
+            for u in conn.execute(
+                    "SELECT device_id, session_id, input, cache_read, cache_write, "
+                    "output, effective, last_ts FROM session_usage"):
+                usage = {
                     "input": u["input"], "cache_read": u["cache_read"],
                     "cache_write": u["cache_write"], "output": u["output"],
                     "effective": u["effective"], "last_ts": u["last_ts"],
                 }
-                for u in conn.execute(
-                    "SELECT device_id, session_id, input, cache_read, cache_write, "
-                    "output, effective, last_ts FROM session_usage")
-            }
+                if all(v is None for v in usage.values()):
+                    usage = None
+                usage_map[(u["device_id"], u["session_id"])] = usage
             for s in session_rows:
                 s["tmux"] = _parse_json_or_none(s.get("tmux"))
                 s["claude"] = _parse_json_or_none(s.get("claude"))
