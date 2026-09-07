@@ -254,6 +254,22 @@ if grep -q '^RC_WORKING_DIR=\.$' "$CONFIG_FILE" 2>/dev/null; then
     rm -f "${CONFIG_FILE}.bak"
 fi
 
+# ── RC_ROLE / RC_HASH_SALT (fleet visibility redaction) ──────────────
+# rc-hook (hooks/rc-hook) and fleet.py need these even though rc-hook is
+# spawned by Claude Code and does NOT inherit this launcher's
+# systemd/launchd environment — rc-hook reads them straight out of
+# $CONFIG_FILE itself. A persistent salt means session-id hashes stay
+# stable across restarts instead of changing every boot.
+if ! grep -q '^RC_ROLE=' "$CONFIG_FILE" 2>/dev/null; then
+    echo "RC_ROLE=full" >> "$CONFIG_FILE"
+    ok "Set RC_ROLE=full"
+fi
+if ! grep -q '^RC_HASH_SALT=' "$CONFIG_FILE" 2>/dev/null; then
+    RC_HASH_SALT="$(python3 -c 'import secrets; print(secrets.token_hex(16))')"
+    echo "RC_HASH_SALT=${RC_HASH_SALT}" >> "$CONFIG_FILE"
+    ok "Generated RC_HASH_SALT"
+fi
+
 # Ensure PATH includes common binary locations (needed for launchd/systemd)
 if ! grep -q '^PATH=' "$CONFIG_FILE" 2>/dev/null; then
     if [ "$OS" = "Darwin" ]; then

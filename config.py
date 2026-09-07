@@ -14,6 +14,8 @@ WORKING_DIR = os.environ.get("RC_WORKING_DIR", ".")
 CLAUDE_BIN = os.path.expanduser(os.environ.get("RC_CLAUDE_BIN", "claude"))
 AUTH_USER = os.environ.get("RC_AUTH_USER", "")
 AUTH_PASS = os.environ.get("RC_AUTH_PASS", "")
+RC_ROLE = os.environ.get("RC_ROLE", "full")
+RC_HASH_SALT = os.environ.get("RC_HASH_SALT", "")
 SHELL_BIN = os.environ.get("RC_SHELL_BIN") or os.environ.get("SHELL") or "/bin/bash"
 RC_TRUSTED_PROXIES = set(
     p.strip() for p in os.environ.get("RC_TRUSTED_PROXIES", "127.0.0.1,::1").split(",")

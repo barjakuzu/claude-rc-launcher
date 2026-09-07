@@ -20,6 +20,15 @@ class InstallRcHookTest(unittest.TestCase):
     def test_prints_snippet_path(self):
         self.assertIn("docs/hooks/settings.snippet.json", self.src)
 
+    def test_provisions_rc_role_default_full_when_unset(self):
+        self.assertIn("grep -q '^RC_ROLE=' \"$CONFIG_FILE\"", self.src)
+        self.assertIn('echo "RC_ROLE=full" >> "$CONFIG_FILE"', self.src)
+
+    def test_provisions_persistent_random_hash_salt_when_unset(self):
+        self.assertIn("grep -q '^RC_HASH_SALT=' \"$CONFIG_FILE\"", self.src)
+        self.assertIn("secrets.token_hex(16)", self.src)
+        self.assertIn('RC_HASH_SALT=${RC_HASH_SALT}', self.src)
+
 
 if __name__ == "__main__":
     unittest.main()

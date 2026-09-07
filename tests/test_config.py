@@ -50,5 +50,37 @@ class ClaudeBinExpandsUserTest(unittest.TestCase):
         self.assertEqual(config.CLAUDE_BIN, "claude")
 
 
+
+
+class RoleAndSaltEnvTest(unittest.TestCase):
+    def setUp(self):
+        self._orig_role = os.environ.get("RC_ROLE")
+        self._orig_salt = os.environ.get("RC_HASH_SALT")
+
+    def tearDown(self):
+        for key, orig in (("RC_ROLE", self._orig_role), ("RC_HASH_SALT", self._orig_salt)):
+            if orig is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = orig
+        importlib.reload(config)
+
+    def test_role_defaults_to_full(self):
+        os.environ.pop("RC_ROLE", None)
+        importlib.reload(config)
+        self.assertEqual(config.RC_ROLE, "full")
+
+    def test_role_and_salt_read_from_env(self):
+        os.environ["RC_ROLE"] = "metadata"
+        os.environ["RC_HASH_SALT"] = "pepper"
+        importlib.reload(config)
+        self.assertEqual(config.RC_ROLE, "metadata")
+        self.assertEqual(config.RC_HASH_SALT, "pepper")
+
+    def test_salt_defaults_to_empty_string(self):
+        os.environ.pop("RC_HASH_SALT", None)
+        importlib.reload(config)
+        self.assertEqual(config.RC_HASH_SALT, "")
+
 if __name__ == "__main__":
     unittest.main()
