@@ -178,14 +178,26 @@ export interface AlertFinding {
   severity: string;
   target_type: string;
   device_id: string;
-  session_id: string;
+  /** null for a device-targeted finding: guard.py's _device_finding()
+   * always sets this to None on the wire, it is not the empty string
+   * CONTRACT.md section 2 describes (that's the hub store's SQL primary
+   * key convention, a different layer). Round 2's guard required this to
+   * be a non-null string, so it rejected every device-targeted finding,
+   * including device_concurrency, which is enabled by default: the first
+   * ordinary device warning discarded the whole report. */
+  session_id: string | null;
   name: string;
   message: string;
-  value: number;
-  threshold: number;
-  since: number;
+  /** None of these four are read by any component (AlertRow only reads
+   * rule/severity/target_type/device_id/session_id/name/message/
+   * first_seen), so isAlertFinding does not require them. Typed optional
+   * to match: requiring an unused field is exactly how round 2 ended up
+   * rejecting a legitimate device_concurrency finding. */
+  value?: number;
+  threshold?: number;
+  since?: number;
   first_seen: number;
-  last_seen: number;
+  last_seen?: number;
 }
 
 export interface AlertsSummary {
@@ -258,18 +270,23 @@ function isCostReport(v: unknown): v is CostReport {
 function isAlertFinding(v: unknown): v is AlertFinding {
   if (!v || typeof v !== 'object') return false;
   const f = v as Record<string, unknown>;
+  // Only the fields AlertRow/AlertsIndicator actually read are required.
+  // session_id is null for every device-targeted finding (guard.py's
+  // _device_finding always sets it to None, not empty string), and
+  // device_concurrency, a device-targeted rule, is enabled by default, so
+  // requiring session_id to be a non-null string rejected the single most
+  // ordinary finding guard.py produces. value/threshold/since/last_seen
+  // are not read anywhere and are not required at all, for the same
+  // reason: requiring an unused field only exists to reject a payload
+  // this app would have rendered fine.
   return typeof f.rule === 'string'
     && typeof f.severity === 'string'
     && typeof f.target_type === 'string'
     && typeof f.device_id === 'string'
-    && typeof f.session_id === 'string'
+    && (typeof f.session_id === 'string' || f.session_id === null)
     && typeof f.name === 'string'
     && typeof f.message === 'string'
-    && typeof f.value === 'number'
-    && typeof f.threshold === 'number'
-    && typeof f.since === 'number'
-    && typeof f.first_seen === 'number'
-    && typeof f.last_seen === 'number';
+    && typeof f.first_seen === 'number';
 }
 
 function isAlertsReport(v: unknown): v is AlertsReport {
