@@ -1,13 +1,28 @@
 #!/usr/bin/env python3
-"""Called by Claude Code hooks (SessionStart, UserPromptSubmit, Stop,
-StopFailure, Notification, SubagentStop, PreCompact, SessionEnd). Reads one
-JSON object from stdin, appends one normalized JSON line to
+"""Called by Claude Code hooks (StopFailure, Notification, SubagentStop,
+PreCompact, SessionEnd — see docs/hooks/settings.snippet.json for why
+SessionStart/UserPromptSubmit/Stop are deliberately not hooked here).
+Reads one JSON object from stdin, appends one normalized JSON line to
 ~/.claude-rc/events/<YYYY-MM-DD>.jsonl, and exits 0 no matter what.
 
 Never blocks a Claude Code session: at most 1 MB of stdin, at most ~2s wait
 for it, no network calls, never raises past main(). RC_ROLE=metadata drops
-cwd and hashes session_id with RC_HASH_SALT (HMAC-SHA256-ish via sha256 of
-salt+id — good enough to defeat casual correlation without a live secret).
+cwd and hashes session_id (and never falls back to the raw id, even with no
+salt) with RC_HASH_SALT (HMAC-SHA256-ish via sha256 of salt+id — good
+enough to defeat casual correlation without a live secret).
+
+Claude Code spawns this process directly: it does NOT inherit the
+launcher's systemd/launchd environment, so RC_ROLE/RC_HASH_SALT are read
+from the process env first and, if absent there, from $RC_HOME/env (the
+same file install.sh provisions them into).
+
+Retention is self-contained so it still works when the launcher isn't
+running: after every append, the spool file just written is rotated aside
+to "<date>.jsonl.1" (clobbering any previous one) once it exceeds
+ROTATE_SIZE_BYTES, and spool files older than RETENTION_DAYS are deleted.
+Worst case on disk: today's file (up to ROTATE_SIZE_BYTES) + yesterday's
+rotated ".1" file (up to ROTATE_SIZE_BYTES) + up to RETENTION_DAYS more
+same-day files that haven't hit the rotation cap yet.
 """
 import hashlib
 import io
@@ -19,14 +34,29 @@ import time
 
 MAX_STDIN_BYTES = 1024 * 1024
 STDIN_TIMEOUT_S = 2.0
+ROTATE_SIZE_BYTES = 8 * 1024 * 1024
+RETENTION_DAYS = 7
+RETENTION_SECONDS = RETENTION_DAYS * 86400
 
+# Only these five events are hooked (see docs/hooks/settings.snippet.json
+# and README "Hook events"): SessionStart/UserPromptSubmit/Stop are NOT
+# hooked here on purpose. Session existence and busy/idle already come
+# from `claude agents --json`, which the hub polls every 30s and treats
+# as the source of truth; hooks exist only to catch what polling can't
+# see - StopFailure/Notification/SubagentStop/PreCompact fire in between
+# polls, and SessionEnd's `reason` explains a vanished session a poll
+# only ever sees disappear. Adding rc-hook to SessionStart/Stop (already
+# hooked by several plugins) or UserPromptSubmit (a process per prompt,
+# for a prompt_len nobody needs) would tax every session for signal we
+# already have elsewhere.
+#
 # Per-event allowlist of extra fields kept from the hook payload. Anything
-# not listed here (including "prompt" itself) is dropped.
+# not listed here is dropped. An event name not in this dict (a future
+# hook, or one added to settings.json later) is still recorded, with an
+# empty `extra` — no code change required to add a new event's plumbing
+# later, only its allowlist entry.
 _EXTRA_ALLOWLIST = {
-    "SessionStart": ("source",),
     "SessionEnd": ("reason",),
-    "UserPromptSubmit": (),  # prompt_len is derived, not passed through
-    "Stop": ("stop_hook_active",),
     "StopFailure": ("error_type",),
     "Notification": ("notification_type",),
     "SubagentStop": ("stop_hook_active",),
@@ -34,34 +64,145 @@ _EXTRA_ALLOWLIST = {
 }
 
 
-def _read_stdin(stdin):
-    """Read at most MAX_STDIN_BYTES, never blocking past STDIN_TIMEOUT_S.
-    Falls back to a plain (unbounded-wait) read on a stdin object that
-    doesn't support select (e.g. io.StringIO in tests)."""
+def _read_stdin(stdin, deadline_fn=time.time):
+    """Read until EOF or MAX_STDIN_BYTES, never blocking past
+    STDIN_TIMEOUT_S total. Loops os.read()/select() because a single read
+    on a pipe can return a short chunk (pipe buffers are typically 64 KB,
+    well under payloads like a long UserPromptSubmit prompt). Falls back
+    to a single bounded read() on a stdin object that doesn't support
+    select (e.g. io.StringIO in tests)."""
     try:
         fd = stdin.fileno()
     except (AttributeError, OSError, io.UnsupportedOperation):
         return stdin.read(MAX_STDIN_BYTES)
-    ready, _, _ = select.select([fd], [], [], STDIN_TIMEOUT_S)
-    if not ready:
-        return ""
-    return os.read(fd, MAX_STDIN_BYTES).decode("utf-8", errors="replace")
+
+    deadline = deadline_fn() + STDIN_TIMEOUT_S
+    chunks = []
+    total = 0
+    while total < MAX_STDIN_BYTES:
+        remaining = deadline - deadline_fn()
+        if remaining <= 0:
+            break
+        ready, _, _ = select.select([fd], [], [], remaining)
+        if not ready:
+            break
+        chunk = os.read(fd, MAX_STDIN_BYTES - total)
+        if not chunk:
+            break  # EOF
+        chunks.append(chunk)
+        total += len(chunk)
+    return b"".join(chunks).decode("utf-8", errors="replace")
+
+
+def _write_all(fd, data):
+    """os.write() may write fewer bytes than given; loop until consumed."""
+    view = memoryview(data)
+    while view:
+        n = os.write(fd, view)
+        view = view[n:]
 
 
 def _hash(value, salt):
     return hashlib.sha256((salt + "|" + value).encode()).hexdigest()
 
 
+def _rc_home(env):
+    home = env.get("HOME") or os.path.expanduser("~")
+    return env.get("RC_HOME", os.path.join(home, ".claude-rc"))
+
+
 def _events_root(env, override=None):
     if override:
         return override
-    home = env.get("HOME") or os.path.expanduser("~")
-    return os.path.join(env.get("RC_HOME", os.path.join(home, ".claude-rc")), "events")
+    return os.path.join(_rc_home(env), "events")
+
+
+def _read_env_file(path):
+    """Best-effort KEY=value parse of an env-style file. Ignores blank
+    lines, comments, and a leading "export ". Tolerates a missing or
+    unreadable file (returns {})."""
+    result = {}
+    try:
+        with open(path, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if line.startswith("export "):
+                    line = line[len("export "):].strip()
+                if "=" not in line:
+                    continue
+                key, _, value = line.partition("=")
+                key = key.strip()
+                value = value.strip()
+                if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+                    value = value[1:-1]
+                if key:
+                    result[key] = value
+    except OSError:
+        pass
+    return result
+
+
+def _resolve_role_and_salt(env, rc_home):
+    """Process env takes precedence; falls back to $RC_HOME/env (the file
+    install.sh writes RC_ROLE/RC_HASH_SALT into) since a hook spawned by
+    Claude Code doesn't inherit the launcher's service environment."""
+    role = env.get("RC_ROLE")
+    salt = env.get("RC_HASH_SALT")
+    if role is not None and salt is not None:
+        return role, salt
+    file_env = _read_env_file(os.path.join(rc_home, "env"))
+    if role is None:
+        role = file_env.get("RC_ROLE", "full")
+    if salt is None:
+        salt = file_env.get("RC_HASH_SALT", "")
+    return role, salt
+
+
+def _rotate_if_large(path):
+    """Rotate the just-written spool file aside if it has grown past
+    ROTATE_SIZE_BYTES, clobbering any previous ".1". Never raises."""
+    try:
+        if os.path.getsize(path) > ROTATE_SIZE_BYTES:
+            os.replace(path, path + ".1")
+    except OSError:
+        pass
+
+
+def _prune_old(root, now_fn):
+    """Delete spool files (and rotated ".1" siblings) older than
+    RETENTION_DAYS. Cheap os.scandir pass, guarded end-to-end so a
+    permission error or unwritable directory never affects the exit
+    code. Runs once per rc-hook invocation (each invocation is its own
+    short-lived process, so "once per process" needs no extra guard)."""
+    try:
+        now = now_fn()
+        with os.scandir(root) as it:
+            for entry in it:
+                name = entry.name
+                if name.endswith(".jsonl.1"):
+                    date_str = name[:-len(".jsonl.1")]
+                elif name.endswith(".jsonl"):
+                    date_str = name[:-len(".jsonl")]
+                else:
+                    continue
+                try:
+                    file_epoch = time.mktime(time.strptime(date_str, "%Y-%m-%d"))
+                except ValueError:
+                    continue
+                if now - file_epoch > RETENTION_SECONDS:
+                    try:
+                        os.remove(entry.path)
+                    except OSError:
+                        pass
+    except OSError:
+        pass
 
 
 def main(argv, stdin, env, now_fn=time.time, events_root=None):
     try:
-        raw = _read_stdin(stdin)
+        raw = _read_stdin(stdin, deadline_fn=now_fn)
         if not raw:
             return 0
         payload = json.loads(raw)
@@ -72,21 +213,22 @@ def main(argv, stdin, env, now_fn=time.time, events_root=None):
         if not event or not session_id:
             return 0
 
-        role = env.get("RC_ROLE", "full")
-        salt = env.get("RC_HASH_SALT", "")
+        rc_home = _rc_home(env)
+        role, salt = _resolve_role_and_salt(env, rc_home)
 
+        # Unknown events (not in the allowlist above) are still recorded,
+        # with an empty extra — no code change needed to add a new event.
         extra = {}
         for field in _EXTRA_ALLOWLIST.get(event, ()):
             if field in payload:
                 extra[field] = payload[field]
-        if event == "UserPromptSubmit" and isinstance(payload.get("prompt"), str):
-            extra["prompt_len"] = len(payload["prompt"])
 
         row = {"ts": now_fn(), "event": event, "session_id": session_id, "extra": extra}
         cwd = payload.get("cwd")
         if cwd and role != "metadata":
             row["cwd"] = cwd
-        if role == "metadata" and salt:
+        if role == "metadata":
+            # Never fall back to the raw id, even with no salt configured.
             row["session_id"] = _hash(session_id, salt)
 
         root = _events_root(env, events_root)
@@ -101,9 +243,12 @@ def main(argv, stdin, env, now_fn=time.time, events_root=None):
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
         try:
             os.chmod(path, 0o600)
-            os.write(fd, line)
+            _write_all(fd, line)
         finally:
             os.close(fd)
+
+        _rotate_if_large(path)
+        _prune_old(root, now_fn)
     except Exception:
         pass
     return 0

@@ -263,18 +263,68 @@ curl -fsSL https://raw.githubusercontent.com/barjakuzu/claude-rc-launcher/main/u
 
 ## Hook events (fleet visibility)
 
-RC Launcher can show a session's lifecycle (started, prompted, stopped,
-needs attention...) across every device, not just the ones it launched.
-This works by having Claude Code call a tiny spooler script on every hook
-event. It is entirely optional and safe on a device without the launcher
-installed: every hook command is guarded.
+RC Launcher can show what a session is doing across every device, not
+just the ones it launched, by having Claude Code call a tiny spooler
+script (`rc-hook`) on a handful of hook events. It is entirely optional
+and safe on a device without the launcher installed: every hook command
+is guarded, so it's a no-op there, and events only ever arrive from
+devices that actually have `rc-hook` installed.
 
-To enable it, merge the block from `docs/hooks/settings.snippet.json`
-into your (usually shared) `~/.claude/settings.json` under its `hooks`
-key. `install.sh` already places the spooler at
+### What's hooked, and why only five events
+
+The block in `docs/hooks/settings.snippet.json` hooks exactly five
+events: `StopFailure`, `Notification`, `SubagentStop`, `PreCompact`, and
+`SessionEnd`. It deliberately does **not** hook `SessionStart`,
+`UserPromptSubmit`, or `Stop`. Session existence and busy/idle state
+already come from `claude agents --json`, which the hub polls every 30s
+and treats as the source of truth; hooks exist only to capture what
+polling can't see — the quiet four plus `SessionEnd`'s `reason` (a poll
+only ever sees a session vanish, never why). Adding `rc-hook` to
+`SessionStart` or `Stop` would tax every session on every device for
+signal we already have from polling, and hooking `UserPromptSubmit`
+would spawn a process on every single prompt for a `prompt_len` nobody
+needs.
+
+### Installing the block
+
+The file is a standalone, ready-to-paste `hooks` object: merge it as-is
+into your (usually shared) `~/.claude/settings.json` under its own
+`hooks` key. `install.sh` already places the spooler at
 `~/.claude-rc/bin/rc-hook`; nothing else is required.
 
+If `~/.claude/settings.json` already has entries under one of these five
+events (today it doesn't), **append** our entry to that event's existing
+array — never replace it — so a hook you add there later isn't clobbered
+by re-applying this fragment.
+
+Plugin-provided hooks are a separate thing entirely: they live in each
+plugin's own `hooks/hooks.json` and are merged in by Claude Code at
+runtime, not through `settings.json`. Several plugins already hook
+`SessionStart`, `UserPromptSubmit`, `Stop`, and `SessionEnd` this way;
+that's independent of this block and needs no action here — Claude Code
+runs both sources.
+
+### Timeout
+
+Every hook entry in the snippet carries an explicit `"timeout": 2`
+(seconds). Other installed plugins declare hook timeouts of 900s (codex,
+on `Stop`), 180s (security-guidance, on `SessionStart`), and 30s
+(impeccable, on `Stop`), so a wedged hook can already hold a session for
+minutes; `rc-hook`'s 2s cap bounds our contribution to that worst case,
+and is why the hook does no network I/O and writes a single line.
+
+### Retention
+
 The spooler never sends anything over the network, never stores prompt
-text (only its length), and exits successfully even when it can't do
-anything: a hook must never block or fail a Claude Code session because
-of it.
+text, and exits successfully even when it can't do anything: a hook must
+never block or fail a Claude Code session because of it.
+
+Retention doesn't depend on the launcher running. After every append,
+`rc-hook` checks the spool file it just wrote: past 8 MB it's rotated
+aside to `<date>.jsonl.1` (clobbering any previous one), and spool files
+older than 7 days are deleted. Worst case on disk per device: today's
+file (up to 8 MB) + yesterday's rotated `.1` file (up to 8 MB) + up to 7
+more same-day files that haven't hit the rotation cap yet. The launcher
+itself also prunes old spool files (via `events.prune`, at most once an
+hour) as a second, redundant path — the self-limiting behavior above is
+what keeps disk bounded even when the launcher process is stopped.
