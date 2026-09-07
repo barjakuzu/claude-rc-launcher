@@ -64,13 +64,19 @@ export interface FleetDevice {
 // session_usage table (CONTRACT.md sections 1/3). `null` means no
 // transcript data exists for the session (distinct from all-zero usage),
 // so it must render as a dash, never as 0.
+//
+// Only `effective` is required: CONTRACT.md section 1's role gating says a
+// `role == "metadata"` device's per-session usage "keeps only
+// {"effective": int}, everything else dropped", so every other field is
+// genuinely absent on the wire for such a device, not just optional in a
+// defensive-typing sense.
 export interface SessionUsage {
-  input: number;
-  cache_read: number;
-  cache_write: number;
-  output: number;
+  input?: number;
+  cache_read?: number;
+  cache_write?: number;
+  output?: number;
   effective: number;
-  last_ts: number;
+  last_ts?: number;
 }
 
 export interface FleetSession {
@@ -121,13 +127,19 @@ export interface FleetView {
 // non-2xx response so callers can degrade honestly instead of showing a
 // spinner that never resolves or a fake zero.
 
+// Same role-gating rule as SessionUsage above applies here: section 1 says
+// a `role == "metadata"` device's `usage_daily` "keeps only {"day",
+// "effective"} per entry", so the breakdown fields are genuinely absent for
+// such a device, not just defensively optional. (Extending this beyond the
+// literal `SessionUsage` fix the review asked for, since it's the same
+// contract clause applied to the sibling type; flagged in the report.)
 export interface CostDailyBucket {
   day: string;
   effective: number;
-  input: number;
-  cache_read: number;
-  cache_write: number;
-  output: number;
+  input?: number;
+  cache_read?: number;
+  cache_write?: number;
+  output?: number;
 }
 
 export interface CostDevice {
@@ -192,23 +204,59 @@ export interface AlertsReport {
   config_error: string | null;
 }
 
+const REQUEST_TIMEOUT_MS = 10_000;
+
+function isCostReport(v: unknown): v is CostReport {
+  if (!v || typeof v !== 'object') return false;
+  const r = v as Record<string, unknown>;
+  return typeof r.generated_at === 'number'
+    && typeof r.days === 'number'
+    && Array.isArray(r.devices)
+    && Array.isArray(r.projects)
+    && !!r.totals && typeof r.totals === 'object';
+}
+
+function isAlertsReport(v: unknown): v is AlertsReport {
+  if (!v || typeof v !== 'object') return false;
+  const r = v as Record<string, unknown>;
+  if (typeof r.generated_at !== 'number') return false;
+  if (!r.summary || typeof r.summary !== 'object') return false;
+  const s = r.summary as Record<string, unknown>;
+  if (typeof s.alert !== 'number' || typeof s.warn !== 'number') return false;
+  if (!Array.isArray(r.alerts)) return false;
+  return 'config_error' in r;
+}
+
 // Deliberately bypasses req()'s "always call r.json()" behavior: these two
 // routes don't exist yet, and a 404 that returns an HTML error page (rather
 // than JSON) would otherwise surface as a confusing JSON-parse error instead
-// of a clean "not available" state.
-async function reqStrict<T>(path: string): Promise<T> {
-  const r = await fetch('/rc' + path);
+// of a clean "not available" state. Two more things a route that isn't
+// built yet (or is briefly broken) can do that req() doesn't guard against:
+//   - hang: a request with no timeout leaves the caller "loading" forever,
+//     and an unbounded setInterval poll stacks more in-flight requests on
+//     top of it every cycle until the connection pool starves other
+//     traffic (notably the SSE fleet stream), so every call here carries
+//     an AbortSignal.timeout.
+//   - return a 200 with the wrong shape: a status code alone doesn't prove
+//     the body matches CostReport/AlertsReport, and reading a field off a
+//     malformed object throws with no ErrorBoundary in main.tsx to catch
+//     it, blanking the whole app. So the caller supplies a type guard and
+//     a non-conforming payload is treated as a failure, same as a 404.
+async function reqStrict<T>(path: string, isValid: (v: unknown) => v is T): Promise<T> {
+  const r = await fetch('/rc' + path, { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
   if (r.status === 401) { window.location.href = '/login'; throw new Error('auth'); }
   if (!r.ok) throw new Error(`request failed: ${r.status}`);
-  return r.json() as Promise<T>;
+  const data: unknown = await r.json();
+  if (!isValid(data)) throw new Error('malformed response shape');
+  return data;
 }
 
 export async function fetchCost(days = 30): Promise<CostReport> {
-  return reqStrict<CostReport>(`/api/cost?days=${days}`);
+  return reqStrict<CostReport>(`/api/cost?days=${days}`, isCostReport);
 }
 
 export async function fetchAlerts(): Promise<AlertsReport> {
-  return reqStrict<AlertsReport>('/api/alerts');
+  return reqStrict<AlertsReport>('/api/alerts', isAlertsReport);
 }
 
 export interface SessionEvent {
