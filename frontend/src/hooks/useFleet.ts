@@ -19,6 +19,21 @@ export interface UseFleetResult {
   /** True when the stream is nominally open but hasn't produced a frame
    * in a while — the fleet view may be out of date. */
   stale: boolean;
+  /** True once at least one real payload (an SSE frame or a poll
+   * response) has actually been received. Round 6: consumers were
+   * treating `connected || usingFallback || devices.length > 0 ||
+   * sessions.length > 0` as "the fleet has loaded", but usingFallback
+   * flips true the instant SSE errors, synchronously, before the
+   * fallback poll it starts has had any chance to resolve: a fast SSE
+   * failure (the route doesn't exist, a refused connection) made that
+   * formula true while `view` was still the empty initial state, so
+   * "0 total sessions across 0 devices" and "No active sessions" rendered
+   * as confirmed facts before a single byte of real data had arrived.
+   * This is the one signal that only ever means "the server has actually
+   * told us something at least once"; it never resets back to false once
+   * true, matching the rest of this app's "a working view never blanks
+   * out from a single bad poll" convention. */
+  hasLoaded: boolean;
 }
 
 const POLL_INTERVAL_MS = 5000;
@@ -36,6 +51,7 @@ export function useFleet(): UseFleetResult {
   const [connected, setConnected] = useState(false);
   const [usingFallback, setUsingFallback] = useState(false);
   const [stale, setStale] = useState(false);
+  const [hasLoaded, setHasLoaded] = useState(false);
   const pollTimer = useRef<ReturnType<typeof setInterval> | null>(null);
   const staleWatchTimer = useRef<ReturnType<typeof setInterval> | null>(null);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -57,7 +73,7 @@ export function useFleet(): UseFleetResult {
     const poll = async () => {
       try {
         const data = await fetchFleet();
-        if (!cancelled) setView(data);
+        if (!cancelled) { setView(data); setHasLoaded(true); }
       } catch {
         // Keep the last known view; the next tick tries again.
       }
@@ -132,6 +148,7 @@ export function useFleet(): UseFleetResult {
           // carries no fleet data, so it must not overwrite the view.
           if (!('type' in parsed && parsed.type === 'heartbeat')) {
             setView(parsed as FleetView);
+            setHasLoaded(true);
           }
         } catch {
           // Malformed frame — ignore, wait for the next one.
@@ -166,5 +183,5 @@ export function useFleet(): UseFleetResult {
     };
   }, []);
 
-  return { devices: view.devices, sessions: view.sessions, connected, usingFallback, stale };
+  return { devices: view.devices, sessions: view.sessions, connected, usingFallback, stale, hasLoaded };
 }

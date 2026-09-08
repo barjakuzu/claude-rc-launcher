@@ -27,7 +27,7 @@ interface AllSessionsProps {
 interface PreviewState { deviceId: string; name: string; sessionId?: string; mode?: string; }
 
 export function AllSessions({ onOpenDevice }: AllSessionsProps) {
-  const { devices, sessions, usingFallback, stale } = useFleet();
+  const { devices, sessions, usingFallback, stale, hasLoaded: fleetLoaded } = useFleet();
   const [pending, setPending] = useState<Record<string, boolean>>({});
   const [preview, setPreview] = useState<PreviewState | null>(null);
   const [rcUrls, setRcUrls] = useState<Record<string, string>>({});
@@ -105,13 +105,28 @@ export function AllSessions({ onOpenDevice }: AllSessionsProps) {
   const deviceCount = new Set(sessions.map((s) => s.device_id)).size;
   const connectionNote = stale ? ' · stream stale, polling' : usingFallback ? ' · polling' : '';
 
+  // Round 5: same fabricated-zero pattern as the strip (App.tsx, Strip.tsx),
+  // swept here too rather than left as a smaller, less prominent instance.
+  // A zero must mean the same thing everywhere in this app: "confirmed
+  // none," never "we have not heard yet." Round 6: this was originally
+  // connected || usingFallback || devices.length > 0 || sessions.length > 0
+  // (mirroring CostView.tsx), which is the same bug returning through a
+  // different door: usingFallback flips true the instant SSE errors,
+  // before the fallback poll it starts has resolved, so a fast SSE
+  // failure rendered "0 total sessions across 0 devices" and "No active
+  // sessions across devices" as confirmed facts before any real data had
+  // arrived. useFleet's own hasLoaded (aliased to fleetLoaded above) is
+  // the one signal that only means the server has answered at least once.
+
   return (
     <div style={{ flex: 1, overflow: 'auto', display: 'flex', flexDirection: 'column' }}>
       <MobileHeader
-        subtitle={`${sessions.length} total session${sessions.length !== 1 ? 's' : ''} · across ${deviceCount} device${deviceCount !== 1 ? 's' : ''}${connectionNote}`}
+        subtitle={fleetLoaded
+          ? `${sessions.length} total session${sessions.length !== 1 ? 's' : ''} · across ${deviceCount} device${deviceCount !== 1 ? 's' : ''}${connectionNote}`
+          : 'Loading sessions…'}
         title="Sessions"
         right={
-          <button style={{ background: RT.panel, border: `1px solid ${RT.border}`, borderRadius: 7, width: 34, height: 34, display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }}>
+          <button style={{ background: RT.panel, border: `1px solid ${RT.border}`, borderRadius: 7, width: 44, height: 44, display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }}>
             <Icons.filter size={14} stroke={RT.textDim} />
           </button>
         }
@@ -119,7 +134,7 @@ export function AllSessions({ onOpenDevice }: AllSessionsProps) {
       <div style={{ padding: '12px 12px 32px', display: 'flex', flexDirection: 'column', gap: 8 }}>
         {sortedSessions.length === 0 && (
           <div style={{ padding: 32, textAlign: 'center', color: RT.textLow, fontFamily: FONT_MONO, fontSize: 13, border: `1px dashed ${RT.border}`, borderRadius: 10 }}>
-            No active sessions across devices.
+            {fleetLoaded ? 'No active sessions across devices.' : 'Loading sessions…'}
           </div>
         )}
         {sortedSessions.map((s: FleetSession) => {
@@ -219,9 +234,13 @@ export function AllSessions({ onOpenDevice }: AllSessionsProps) {
                   </>
                 )}
               </div>
-              {/* Actions: Preview | Restart | Stop | RC — gated on field
-                  presence (pid/tmux/rc_url), not on isExternal alone. */}
-              <div onClick={(e) => e.stopPropagation()} style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+              {/* Actions: Preview | Restart | Stop | RC, gated on field
+                  presence (pid/tmux/rc_url), not on isExternal alone.
+                  flexWrap: at 44px touch targets, the longest combination
+                  (Preview + "Open on claude.ai" + More + Stop) can exceed
+                  a 390px card's width, so it wraps to a second line instead
+                  of overflowing the card horizontally. */}
+              <div onClick={(e) => e.stopPropagation()} style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
                 {!isExternal && (
                   <>
                     <button
@@ -284,7 +303,7 @@ export function AllSessions({ onOpenDevice }: AllSessionsProps) {
                 )}
                 {(!isExternal || canStopExternal) && (
                   <button
-                    style={{ background: RT.panel, border: `1px solid ${RT.border}`, borderRadius: 7, width: 36, height: 36, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', marginLeft: 'auto' }}
+                    style={{ background: RT.panel, border: `1px solid ${RT.border}`, borderRadius: 7, width: 44, height: 44, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', marginLeft: 'auto' }}
                     disabled={!!pending[`stop-${key}`] || offline}
                     onClick={() => guard(`stop-${key}`, () => api.stop(s.device_id, name, isExternal ? { external: true, pid: s.pid ?? undefined } : undefined))}
                     title="Stop this session"
@@ -366,7 +385,7 @@ function MoreMenu({ sessionId, rcUrl, isExternal, pending, onUnstick }: MoreMenu
         title="More options"
         style={{
           background: RT.panel, border: `1px solid ${RT.border}`, borderRadius: 7,
-          width: 36, height: 36, display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+          width: 44, height: 44, display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
           cursor: pending ? 'default' : 'pointer', opacity: pending ? 0.5 : 1,
         }}
       >

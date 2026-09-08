@@ -14,12 +14,19 @@ import type { DeviceCard, Schedule } from '../types';
 
 interface AllScheduledProps {
   cards: DeviceCard[];
+  /** False until /rc/overview has answered at least once (App.tsx). Round
+   * 5: paired with useAllSchedules's own hasLoaded so "0 tasks" only
+   * renders once both the device list and the per-device schedule fan-out
+   * for that list have genuinely resolved, not merely because cards was
+   * still empty when the fan-out last ran. */
+  hasLoadedCards: boolean;
 }
 
 type PickerEntry = { deviceId: string; schedule: Schedule; mode: 'copy' | 'move' };
 
-export function AllScheduled({ cards }: AllScheduledProps) {
-  const items = useAllSchedules(cards, true);
+export function AllScheduled({ cards, hasLoadedCards }: AllScheduledProps) {
+  const { items, hasLoaded: schedulesLoaded } = useAllSchedules(cards, true);
+  const loaded = hasLoadedCards && schedulesLoaded;
   const [editEntry, setEditEntry] = useState<{ deviceId: string; schedule: Schedule } | null>(null);
   const [newDeviceId, setNewDeviceId] = useState<string | null>(null);
   const [pickerEntry, setPickerEntry] = useState<PickerEntry | null>(null);
@@ -88,11 +95,11 @@ export function AllScheduled({ cards }: AllScheduledProps) {
   return (
     <div style={{ flex: 1, overflow: 'auto', display: 'flex', flexDirection: 'column' }}>
       <MobileHeader
-        subtitle={`${items.length} task${items.length !== 1 ? 's' : ''} across devices`}
+        subtitle={loaded ? `${items.length} task${items.length !== 1 ? 's' : ''} across devices` : 'Loading tasks…'}
         title="Tasks"
         right={
           <button
-            style={{ background: RT.panel, border: `1px solid ${RT.border}`, borderRadius: 7, width: 34, height: 34, display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', opacity: cards.length === 0 ? 0.4 : 1 }}
+            style={{ background: RT.panel, border: `1px solid ${RT.border}`, borderRadius: 7, width: 44, height: 44, display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', opacity: cards.length === 0 ? 0.4 : 1 }}
             disabled={cards.length === 0}
             onClick={handleNew}
           >
@@ -103,7 +110,7 @@ export function AllScheduled({ cards }: AllScheduledProps) {
       <div style={{ padding: '12px 12px 32px', display: 'flex', flexDirection: 'column', gap: 8 }}>
         {items.length === 0 && (
           <div style={{ padding: 32, textAlign: 'center', color: RT.textLow, fontFamily: FONT_MONO, fontSize: 13, border: `1px dashed ${RT.border}`, borderRadius: 10 }}>
-            No scheduled tasks across devices.
+            {loaded ? 'No scheduled tasks across devices.' : 'Loading tasks…'}
           </div>
         )}
         {items.map(({ device: d, schedule: s }) => {

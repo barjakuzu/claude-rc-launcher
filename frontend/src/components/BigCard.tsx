@@ -1,19 +1,38 @@
-// BigCard.tsx — V5 large rich device card for the overview grid.
+// BigCard.tsx: V5 device card for the overview grid.
+//
+// Round 3: dropped the sparkline and the redundant "Open" button/row.
+// Two things drove this, not one: the sparkline's source (card.spark, the
+// same old TUI-scrape vintage as the card.tokens field Round 2 replaced)
+// produced a broken-looking solid box for at least one real device
+// (degenerate data, desktop rendered it unconditionally, with no hasSpark
+// guard the mobile branch already had), and a decorative trend line
+// standing in for content is a flagged default regardless. The "Open"
+// button was always redundant with the card's own onClick (the whole card
+// has been a click target since V5Stat existed), so a trailing chevron is
+// enough of an affordance, matching the icon-only pattern used elsewhere
+// in this app (Header.tsx's MachineSelector rows, for one). Together this
+// roughly halves the card's height: two content rows (header, stats)
+// instead of four, so meaningfully more devices are visible per screen
+// without scrolling. That is the actual complaint, not a decoration problem.
 import { useState } from 'react';
 import { RT, FONT_MONO, tintFor, tintSoft, tintEdge, hueForId, fmtK, kindForOs } from '../tokens';
-import { Dot, Sparkline, CapBar, Icons } from './primitives';
-import type { DeviceCard } from '../types';
+import { Dot, CapBar, Icons } from './primitives';
+import type { DeviceCard, DeviceUsage } from '../types';
 
 interface BigCardProps {
   card: DeviceCard;
   cards: DeviceCard[];
   onClick: () => void;
   mobile?: boolean;
+  /** Live effective-token reading for this device (App.tsx, from
+   * /api/fleet's per-session usage), replaces the old TUI-scrape
+   * card.tokens field, which is null for every session now. */
+  usage: DeviceUsage;
 }
 
-function V5Stat({ label, value, bar, barColor, sub }: {
+function V5Stat({ label, value, bar, barColor, sub, subColor }: {
   label: string; value: string | number;
-  bar?: number; barColor?: string; sub?: string;
+  bar?: number; barColor?: string; sub?: string; subColor?: string;
 }) {
   return (
     <div>
@@ -32,21 +51,27 @@ function V5Stat({ label, value, bar, barColor, sub }: {
         </div>
       )}
       {sub && (
-        <div style={{ fontSize: 10, color: RT.textLow, marginTop: 4, fontFamily: FONT_MONO }}>{sub}</div>
+        <div style={{ fontSize: 10, color: subColor || RT.textLow, marginTop: 4, fontFamily: FONT_MONO }}>{sub}</div>
       )}
     </div>
   );
 }
 
-export function BigCard({ card, cards, onClick, mobile = false }: BigCardProps) {
+export function BigCard({ card, cards, onClick, mobile = false, usage }: BigCardProps) {
   const hue = hueForId(card.id);
   const KindIcon = Icons[kindForOs(card.os)] || Icons.server;
   const hueColor = tintFor(hue, 0.70, 0.10);
   const [hover, setHover] = useState(false);
 
+  // '—' is the established no-data placeholder (see tokens.ts's fmtUsage):
+  // unknown is never drawn as 0. usage.effective is only ever null when the
+  // fleet hasn't reported enough for this device to vouch for a number.
+  const tokensValue = usage.effective != null ? fmtK(usage.effective) : '—';
+  const tokensSub = usage.partial === true ? 'effective · partial' : 'effective';
+  const tokensSubColor = usage.partial === true ? RT.amber : undefined;
+
   // lastActivity mapping
   const lastActivity = card.loadPct > 0 ? 'just now' : card.sessions > 0 ? 'active' : 'idle';
-  const hasSpark = (card.spark?.length ?? 0) > 1;
 
   return (
     <div
@@ -119,7 +144,7 @@ export function BigCard({ card, cards, onClick, mobile = false }: BigCardProps) 
             );
           })()}
         </div>
-        {!mobile && <Icons.chevRight size={16} stroke={RT.textLow} />}
+        <Icons.chevRight size={mobile ? 15 : 16} stroke={RT.textLow} />
       </div>
 
       {/* Stats: Tokens | Sessions | CPU */}
@@ -128,11 +153,17 @@ export function BigCard({ card, cards, onClick, mobile = false }: BigCardProps) 
         gridTemplateColumns: mobile ? '1fr 1fr 1fr' : '1.4fr 1fr 1fr',
         gap: mobile ? 10 : 16,
       }}>
+        {/* Round 4: this bar used to be card.loadPct (CPU), drawn directly
+            under a token figure with no other meaning attached. Read as
+            token capacity, which nobody intended and a viewer would
+            reasonably believe. CPU already has its own stat two columns
+            over; this one carries no bar at all now rather than a
+            borrowed one. */}
         <V5Stat
           label="Tokens"
-          value={fmtK(card.tokens)}
-          bar={card.loadPct}
-          barColor={hueColor}
+          value={tokensValue}
+          sub={tokensSub}
+          subColor={tokensSubColor}
         />
         <V5Stat
           label="Sessions"
@@ -145,50 +176,6 @@ export function BigCard({ card, cards, onClick, mobile = false }: BigCardProps) 
           sub={lastActivity}
         />
       </div>
-
-      {/* Sparkline (only when data exists) + Open button.
-          On mobile: stack vertically so the Open button gets a full row and never clips. */}
-      {mobile ? (
-        <>
-          {hasSpark && (
-            <div style={{ color: hueColor, width: '100%' }}>
-              <Sparkline data={card.spark} w={300} h={28} color={hueColor} fillOpacity={0.10} dotEnd responsive />
-            </div>
-          )}
-          <button
-            onClick={(e) => { e.stopPropagation(); onClick(); }}
-            style={{
-              background: RT.panel, color: RT.text,
-              border: `1px solid ${RT.border}`,
-              borderRadius: 8, padding: '10px 14px', cursor: 'pointer',
-              fontFamily: 'inherit', fontSize: 13, fontWeight: 500,
-              display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 6,
-              width: '100%',
-            }}
-          >
-            Open <Icons.chevRight size={12} stroke={RT.text} />
-          </button>
-        </>
-      ) : (
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
-          <div style={{ flex: 1, color: hueColor, minWidth: 0 }}>
-            <Sparkline data={card.spark} w={300} h={32} color={hueColor} fillOpacity={0.10} dotEnd responsive />
-          </div>
-          <button
-            onClick={(e) => { e.stopPropagation(); onClick(); }}
-            style={{
-              background: RT.panel, color: RT.text,
-              border: `1px solid ${RT.border}`,
-              borderRadius: 7, padding: '8px 12px', cursor: 'pointer',
-              fontFamily: 'inherit', fontSize: 11.5, fontWeight: 500,
-              display: 'inline-flex', alignItems: 'center', gap: 6,
-              flex: 'none',
-            }}
-          >
-            Open <Icons.chevRight size={11} stroke={RT.text} />
-          </button>
-        </div>
-      )}
     </div>
   );
 }

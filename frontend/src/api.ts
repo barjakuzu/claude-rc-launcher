@@ -355,6 +355,194 @@ export async function fetchAlerts(): Promise<AlertsReport> {
   return reqStrict<AlertsReport>('/api/alerts', isAlertsReport);
 }
 
+// ─── Account limits (Phase L2 wiring, CONTRACT.md sections 3/5/6) ────────────
+// GET /api/limits does not exist on the backend yet (a parallel lane is
+// building it), so fetchLimits below throws on a 404 / non-2xx / malformed
+// body just like fetchCost/fetchAlerts, so useLimits.ts can degrade honestly
+// instead of showing a spinner forever or a fabricated 0%.
+
+// A single reset window (five_hour / seven_day). Amendment 1 to
+// CONTRACT.md (Round 2) added `severity` here, sourced from the matching
+// raw `limits[]` row by kind (session -> five_hour, weekly_all ->
+// seven_day), null when no matching row exists. Round 1 had these two
+// windows carrying only {percent, resets_at}, which forced the frontend to
+// fall back to percent-banded colour for the two most important numbers on
+// the screen. limitsFormat.ts's limitColor still carries that fallback as
+// a safety net for a null severity, but now prefers the real value when
+// present, per CONTRACT.md section 6. resets_at is nullable: an
+// unavailable device's payload may omit or null it.
+export interface LimitsWindow {
+  percent: number;
+  resets_at: string | null;
+  /** Optional for a backend a step behind Amendment 1: treat absence the
+   * same as null (limitColor falls back to percent-band colour either
+   * way). Always present going forward per the amended contract. */
+  severity?: string | null;
+}
+
+// One scoped (per-model) weekly limit. `label` is `scope.model.display_name`
+// or null per CONTRACT.md section 3, never fall back to `kind`, which is a
+// codename, not a display string.
+export interface LimitsScoped {
+  kind: string;
+  group: string;
+  percent: number;
+  severity: string;
+  resets_at: string | null;
+  label: string | null;
+  is_active: boolean;
+}
+
+export interface LimitsSpend {
+  used_minor: number;
+  currency: string;
+  exponent: number;
+  limit_minor: number | null;
+  percent: number;
+  severity: string;
+}
+
+// Gates whether the Spend section renders at all: "spend when the account
+// has it enabled" (task-l2-brief.md). `enabled: false` (the account this
+// contract was drafted against) or a missing extra_usage both mean: skip
+// the section entirely, never render a misleading "$0.00 · 0%" for a
+// feature the account doesn't use.
+export interface LimitsExtraUsage {
+  enabled: boolean;
+  utilization: number | null;
+  spend_limit_reached: boolean;
+}
+
+// fleet.build_fleet()'s top-level `limits` key, CONTRACT.md section 3. Every
+// field below `available` is permissively optional: an unavailable device's
+// payload may carry only `{available: false, fetched_at, error}`, and the
+// type guard below only requires what this frontend actually reads.
+export interface LimitsPayload {
+  available: boolean;
+  fetched_at: number | null;
+  five_hour: LimitsWindow | null;
+  seven_day: LimitsWindow | null;
+  scoped: LimitsScoped[];
+  spend: LimitsSpend | null;
+  extra_usage: LimitsExtraUsage | null;
+  error: string | null;
+}
+
+export interface LimitsPrimary extends LimitsPayload {
+  device_id: string;
+}
+
+// One row of GET /api/limits's `devices` array (CONTRACT.md section 5),
+// distinct from FleetDevice above: this is limits-fetch status only.
+export interface LimitsDeviceRow {
+  device_id: string;
+  name: string | null;
+  available: boolean;
+  fetched_at: number | null;
+  age_seconds: number | null;
+}
+
+export interface LimitsReport {
+  generated_at: number;
+  /** null when no device has data yet ("never invent zeros", CONTRACT.md
+   * section 5): this must render as an unavailable state, not a 0%. */
+  primary: LimitsPrimary | null;
+  devices: LimitsDeviceRow[];
+  /** True when two devices disagree by more than 5 points on
+   * five_hour.percent: the UI says so rather than silently picking one. */
+  divergent: boolean;
+}
+
+function isLimitsWindow(v: unknown): v is LimitsWindow {
+  if (!v || typeof v !== 'object') return false;
+  const w = v as Record<string, unknown>;
+  return typeof w.percent === 'number'
+    && (typeof w.resets_at === 'string' || w.resets_at === null)
+    // severity is nullable (Amendment 1: null when no matching limits[]
+    // row exists) but permissively accepted when merely absent too, same
+    // as elsewhere in this file: a backend a step behind this amendment
+    // should degrade to limitColor's percent-band fallback, not reject
+    // the whole window.
+    && (w.severity === undefined || typeof w.severity === 'string' || w.severity === null);
+}
+
+function isLimitsScoped(v: unknown): v is LimitsScoped {
+  if (!v || typeof v !== 'object') return false;
+  const s = v as Record<string, unknown>;
+  return typeof s.percent === 'number'
+    && typeof s.severity === 'string'
+    && (typeof s.resets_at === 'string' || s.resets_at === null)
+    && (typeof s.label === 'string' || s.label === null);
+}
+
+function isLimitsSpend(v: unknown): v is LimitsSpend {
+  if (!v || typeof v !== 'object') return false;
+  const s = v as Record<string, unknown>;
+  // currency and a sane exponent range are both required, not merely
+  // typeof number/string: LimitsSummary.tsx's fmtMoney divides by
+  // 10**exponent and hands currency straight to Intl.NumberFormat, so an
+  // out-of-range exponent (or a currency that was silently accepted as
+  // any string) can throw past render into the root error boundary
+  // rather than degrading to a placeholder.
+  return typeof s.used_minor === 'number'
+    && typeof s.exponent === 'number' && Number.isInteger(s.exponent) && s.exponent >= 0 && s.exponent <= 20
+    && typeof s.currency === 'string' && s.currency.length > 0
+    && (typeof s.limit_minor === 'number' || s.limit_minor === null)
+    && typeof s.percent === 'number'
+    && typeof s.severity === 'string';
+}
+
+function isLimitsExtraUsage(v: unknown): v is LimitsExtraUsage {
+  if (!v || typeof v !== 'object') return false;
+  const e = v as Record<string, unknown>;
+  return typeof e.enabled === 'boolean';
+}
+
+// Element-level guard for `primary`, same discipline as isCostDevice/
+// isAlertFinding above: reject only what this app actually reads, so a
+// still-partial backend (a field genuinely absent while a device isn't
+// logged in) doesn't blank the whole widget.
+function isLimitsPrimary(v: unknown): v is LimitsPrimary {
+  if (!v || typeof v !== 'object') return false;
+  const p = v as Record<string, unknown>;
+  if (typeof p.device_id !== 'string') return false;
+  if (typeof p.available !== 'boolean') return false;
+  if (p.five_hour != null && !isLimitsWindow(p.five_hour)) return false;
+  if (p.seven_day != null && !isLimitsWindow(p.seven_day)) return false;
+  if (p.scoped !== undefined && !(Array.isArray(p.scoped) && p.scoped.every(isLimitsScoped))) return false;
+  if (p.spend != null && !isLimitsSpend(p.spend)) return false;
+  if (p.extra_usage != null && !isLimitsExtraUsage(p.extra_usage)) return false;
+  return true;
+}
+
+function isLimitsDeviceRow(v: unknown): v is LimitsDeviceRow {
+  if (!v || typeof v !== 'object') return false;
+  const d = v as Record<string, unknown>;
+  // age_seconds is required to be present (nullable) rather than merely
+  // optional: LimitsSummary.tsx's staleness math reads it directly off
+  // the row matching primary.device_id, and a row that silently lacked
+  // the field would leave that math reading undefined as "not stale"
+  // instead of "unknown", the same zero-as-unknown failure this whole
+  // lane exists to remove.
+  return typeof d.device_id === 'string'
+    && typeof d.available === 'boolean'
+    && (typeof d.age_seconds === 'number' || d.age_seconds === null);
+}
+
+function isLimitsReport(v: unknown): v is LimitsReport {
+  if (!v || typeof v !== 'object') return false;
+  const r = v as Record<string, unknown>;
+  if (typeof r.generated_at !== 'number') return false;
+  if (r.primary !== null && !isLimitsPrimary(r.primary)) return false;
+  if (!Array.isArray(r.devices) || !r.devices.every(isLimitsDeviceRow)) return false;
+  if (typeof r.divergent !== 'boolean') return false;
+  return true;
+}
+
+export async function fetchLimits(): Promise<LimitsReport> {
+  return reqStrict<LimitsReport>('/api/limits', isLimitsReport);
+}
+
 export interface SessionEvent {
   id: number;
   device_id: string;

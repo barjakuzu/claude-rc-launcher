@@ -79,7 +79,7 @@ function PartialMark({ status }: { status: boolean | undefined }) {
 
 export function CostView({ onOpenDevice }: CostViewProps) {
   const { report, status } = useCost();
-  const { devices: fleetDevices, sessions: fleetSessions, connected, usingFallback } = useFleet();
+  const { devices: fleetDevices, sessions: fleetSessions, hasLoaded: fleetLoaded } = useFleet();
 
   if (status === 'unavailable') {
     return (
@@ -100,12 +100,15 @@ export function CostView({ onOpenDevice }: CostViewProps) {
   const nameByDevice = new Map(fleetDevices.map((d) => [d.id, d.name]));
 
   // /api/fleet has been observed at least once (via SSE or the polling
-  // fallback) once it's connected, has fallen back to polling, or has
-  // already handed back any data. Before that, an empty topSessions table
-  // means "we haven't heard from the fleet yet," not "no sessions have
-  // usage," so those two cases need different empty-state copy (mirrors
-  // AllSessions.tsx's use of these same useFleet flags for its connection note).
-  const fleetLoaded = connected || usingFallback || fleetDevices.length > 0 || fleetSessions.length > 0;
+  // fallback). Before that, an empty topSessions table means "we haven't
+  // heard from the fleet yet," not "no sessions have usage," so those two
+  // cases need different empty-state copy. Round 6: this used to be
+  // connected || usingFallback || fleetDevices.length > 0 ||
+  // fleetSessions.length > 0, which reads true the instant SSE errors
+  // (usingFallback flips synchronously, before the fallback poll it
+  // starts has resolved), not once real data has arrived. useFleet's own
+  // hasLoaded (aliased to fleetLoaded above) is the one signal that only
+  // means the server has actually answered at least once.
 
   const topSessions = fleetSessions
     .filter(hasUsage)
@@ -171,7 +174,12 @@ export function CostView({ onOpenDevice }: CostViewProps) {
         {report.projects.length === 0 ? (
           <EmptyNote text="No project usage recorded yet." />
         ) : (
-          <table style={{ borderCollapse: 'collapse', width: '100%', fontFamily: FONT_SANS }}>
+          // Wide content scrolls inside its own container, never the page:
+          // at 390px this table is wider than the viewport, and without
+          // this wrapper the overflow would otherwise leak onto the whole
+          // scroll view instead of staying scoped to the table.
+          <div style={{ overflowX: 'auto' }}>
+          <table style={{ borderCollapse: 'collapse', width: '100%', minWidth: 420, fontFamily: FONT_SANS }}>
             <thead>
               <tr style={{ borderBottom: `1px solid ${RT.border}` }}>
                 <th style={thStyle}>Device</th>
@@ -192,6 +200,7 @@ export function CostView({ onOpenDevice }: CostViewProps) {
               ))}
             </tbody>
           </table>
+          </div>
         )}
       </Section>
 
@@ -202,7 +211,8 @@ export function CostView({ onOpenDevice }: CostViewProps) {
         {topSessions.length === 0 ? (
           <EmptyNote text={fleetLoaded ? 'No session usage recorded yet.' : 'Loading session data…'} />
         ) : (
-          <table style={{ borderCollapse: 'collapse', width: '100%', fontFamily: FONT_SANS }}>
+          <div style={{ overflowX: 'auto' }}>
+          <table style={{ borderCollapse: 'collapse', width: '100%', minWidth: 480, fontFamily: FONT_SANS }}>
             <thead>
               <tr style={{ borderBottom: `1px solid ${RT.border}` }}>
                 <th style={thStyle}>Device</th>
@@ -225,6 +235,7 @@ export function CostView({ onOpenDevice }: CostViewProps) {
               ))}
             </tbody>
           </table>
+          </div>
         )}
       </Section>
     </div>

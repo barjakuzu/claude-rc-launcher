@@ -7,7 +7,7 @@ interface Props {
   accent?: string;
   disabled?: boolean;
   pending?: boolean;
-  /** Larger hit target (40×40) for touch screens. */
+  /** Larger hit target (44×44, the touch-target floor) for touch screens. */
   mobile?: boolean;
   onClick?: (e: React.MouseEvent) => void;
   children: ReactElement;
@@ -16,7 +16,7 @@ interface Props {
 export function V5IconButton({ label, accent, disabled, pending, mobile, onClick, children }: Props) {
   const [hover, setHover] = useState(false);
   const color = accent || RT.textDim;
-  const size = mobile ? 40 : 34;
+  const size = mobile ? 44 : 34;
   return (
     <button
       title={label}

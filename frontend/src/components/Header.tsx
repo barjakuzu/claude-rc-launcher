@@ -15,8 +15,6 @@ interface HeaderProps {
   cards: DeviceCard[];
   openId: string | null;
   setOpenId: (id: string | null) => void;
-  onlineCount: number;
-  totalTokens: number;
   layout: Layout;
   onRefresh: () => void;
 }
@@ -454,12 +452,12 @@ export function Header({ cards, openId, setOpenId, layout, onRefresh }: HeaderPr
     <>
       <div style={{
         flex: 'none',
-        height: layout.mobile ? 52 : 48,
+        height: `calc(${layout.mobile ? 52 : 48}px + env(safe-area-inset-top))`,
         borderBottom: `1px solid ${RT.border}`,
         background: RT.bgRaised,
         display: 'flex',
         alignItems: 'center',
-        padding: layout.mobile ? '0 14px' : '0 18px',
+        padding: `env(safe-area-inset-top) ${layout.mobile ? '14px' : '18px'} 0`,
         gap: layout.mobile ? 10 : 14,
       }}>
         {/* Mark */}
@@ -514,12 +512,16 @@ export function Header({ cards, openId, setOpenId, layout, onRefresh }: HeaderPr
           </div>
         )}
 
+        {/* Account limits now live in the top strip (Strip.tsx / the mobile
+            top strip), always visible rather than behind a small icon.
+            See LimitsSummary.tsx. */}
+
         {/* Alerts indicator: hidden entirely when clean */}
-        <AlertsIndicator />
+        <AlertsIndicator mobile={layout.mobile} />
 
         {/* Share tunnel button */}
         <button
-          style={btn('icon')}
+          style={{ ...btn('icon'), width: layout.mobile ? 40 : 32, height: layout.mobile ? 40 : 32 }}
           title="Share tunnel"
           onClick={() => setShareOpen(true)}
         >

@@ -100,7 +100,12 @@ export function ResumeList({ deviceId, onClose, onResumed }: ResumeListProps) {
         style={{
           width: '100%',
           maxWidth: 480,
-          maxHeight: 'calc(100vh - 40px)',
+          // Round 4: 100vh can exceed the pinned document's real visible
+          // height (index.html pins body to the viewport and #root to
+          // 100dvh), which would size this modal taller than the screen
+          // and leave the bottom of it unreachable, since the page itself
+          // no longer scrolls to reveal it.
+          maxHeight: 'calc(100dvh - 40px)',
           background: RT.panel,
           border: `1px solid ${RT.borderHi}`,
           borderRadius: 12,

@@ -1,3 +1,17 @@
+// Per-device live effective-token reading, derived from /api/fleet's
+// per-session usage rather than the old TUI-scrape `DeviceCard.tokens`
+// field (Round 2 of the limits/mobile lane: that field is null for every
+// session now, so summing it across cards produced a stale number on one
+// device and a lying flat 0 on every other). `effective: null` means
+// "cannot vouch for this yet" and must render as a placeholder, never a
+// 0, see deviceEffectiveTokens in tokens.ts. `partial` mirrors
+// CostView.tsx's usagePartialFor marker (same underlying device-level
+// convergence signal, reused here for the same reason).
+export interface DeviceUsage {
+  effective: number | null;
+  partial: boolean | undefined;
+}
+
 export interface DeviceCard {
   id: string; name: string; online: boolean; hostname: string;
   sessions: number; tokens: number; loadPct: number; os: string; spark: number[];
