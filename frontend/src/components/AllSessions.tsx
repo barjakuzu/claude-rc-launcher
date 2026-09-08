@@ -219,12 +219,12 @@ export function AllSessions({ onOpenDevice }: AllSessionsProps) {
                   </>
                 )}
               </div>
-              {/* Actions: Preview | Restart | Stop | RC — gated on field
+              {/* Actions: Preview | Restart | Stop | RC, gated on field
                   presence (pid/tmux/rc_url), not on isExternal alone.
                   flexWrap: at 44px touch targets, the longest combination
                   (Preview + "Open on claude.ai" + More + Stop) can exceed
-                  a 390px card's width — wraps to a second line instead of
-                  overflowing the card horizontally. */}
+                  a 390px card's width, so it wraps to a second line instead
+                  of overflowing the card horizontally. */}
               <div onClick={(e) => e.stopPropagation()} style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
                 {!isExternal && (
                   <>

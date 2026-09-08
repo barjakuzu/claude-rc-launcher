@@ -513,8 +513,8 @@ export function Header({ cards, openId, setOpenId, layout, onRefresh }: HeaderPr
         )}
 
         {/* Account limits now live in the top strip (Strip.tsx / the mobile
-            top strip), always visible rather than behind a small icon —
-            see LimitsSummary.tsx. */}
+            top strip), always visible rather than behind a small icon.
+            See LimitsSummary.tsx. */}
 
         {/* Alerts indicator: hidden entirely when clean */}
         <AlertsIndicator mobile={layout.mobile} />

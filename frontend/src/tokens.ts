@@ -89,15 +89,15 @@ export function usagePartialFor(
 // Live per-device effective-token total, summed from /api/fleet's
 // per-session `usage.effective` (Round 2: BigCard.tsx/DeviceHero.tsx used
 // to render the old TUI-scrape `card.tokens` field, which is now null for
-// every session — a stale scrape on one device, a flat lying 0 on every
+// every session: a stale scrape on one device, a flat lying 0 on every
 // other). Returns null (render a placeholder, never 0) only when this
 // device has live sessions but none of them have reported a `usage` field
-// yet — i.e. we cannot vouch for any number. Zero live sessions is a
+// yet, i.e. we cannot vouch for any number. Zero live sessions is a
 // legitimate, vouched-for 0, not an unknown: there is nothing running to
 // have accrued usage. A session with usage === null (backend confirmed no
 // transcript data) contributes 0, same distinction fmtUsage above makes.
 // Callers must additionally gate this on their own "has /api/fleet loaded
-// at all yet" check (see useFleet's connected/usingFallback) — an empty
+// at all yet" check (see useFleet's connected/usingFallback): an empty
 // sessions array before the first fleet frame arrives must not be read as
 // "confirmed zero devices with sessions".
 export function deviceEffectiveTokens(

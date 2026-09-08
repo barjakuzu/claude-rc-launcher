@@ -144,7 +144,7 @@ export function MobileMoreSheet({
           // The sheet stays mounted (not conditionally rendered) so the
           // slide-up transition has something to animate from. Without
           // this, its rows stay hit-testable at their translated-off-
-          // screen position while "closed" — a real click can land there
+          // screen position while "closed": a real click can land there
           // instead of on whatever is now showing underneath.
           pointerEvents: open ? 'auto' : 'none',
           // drag handle

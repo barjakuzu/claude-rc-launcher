@@ -4,7 +4,7 @@
 // session now, so summing it across cards produced a stale number on one
 // device and a lying flat 0 on every other). `effective: null` means
 // "cannot vouch for this yet" and must render as a placeholder, never a
-// 0 — see deviceEffectiveTokens in tokens.ts. `partial` mirrors
+// 0, see deviceEffectiveTokens in tokens.ts. `partial` mirrors
 // CostView.tsx's usagePartialFor marker (same underlying device-level
 // convergence signal, reused here for the same reason).
 export interface DeviceUsage {
