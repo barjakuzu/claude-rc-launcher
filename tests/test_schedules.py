@@ -166,5 +166,230 @@ class ConcurrencyFieldTest(unittest.TestCase):
         self.assertEqual(updated["concurrency"], "kill")
 
 
+class ValidateTriggerTest(unittest.TestCase):
+    def test_none_is_valid(self):
+        self.assertIsNone(schedules.validate_trigger(None))
+
+    def test_valid_minimal_trigger(self):
+        self.assertIsNone(schedules.validate_trigger(
+            {"kind": "limit_reset", "window": "five_hour"}))
+
+    def test_valid_full_trigger(self):
+        self.assertIsNone(schedules.validate_trigger(
+            {"kind": "limit_reset", "window": "seven_day",
+             "delay_minutes": 30, "catch_up": "none"}))
+
+    def test_non_dict_is_rejected(self):
+        self.assertIsNotNone(schedules.validate_trigger("limit_reset"))
+
+    def test_unknown_kind_is_rejected(self):
+        self.assertIsNotNone(schedules.validate_trigger(
+            {"kind": "something_else", "window": "five_hour"}))
+
+    def test_unknown_window_is_rejected(self):
+        self.assertIsNotNone(schedules.validate_trigger(
+            {"kind": "limit_reset", "window": "three_hour"}))
+
+    def test_delay_minutes_over_cap_is_rejected(self):
+        self.assertIsNotNone(schedules.validate_trigger(
+            {"kind": "limit_reset", "window": "five_hour", "delay_minutes": 241}))
+
+    def test_delay_minutes_at_cap_is_accepted(self):
+        self.assertIsNone(schedules.validate_trigger(
+            {"kind": "limit_reset", "window": "five_hour", "delay_minutes": 240}))
+
+    def test_negative_delay_minutes_is_rejected(self):
+        self.assertIsNotNone(schedules.validate_trigger(
+            {"kind": "limit_reset", "window": "five_hour", "delay_minutes": -1}))
+
+    def test_non_numeric_delay_minutes_is_rejected(self):
+        self.assertIsNotNone(schedules.validate_trigger(
+            {"kind": "limit_reset", "window": "five_hour", "delay_minutes": "soon"}))
+
+    def test_unknown_catch_up_is_rejected(self):
+        self.assertIsNotNone(schedules.validate_trigger(
+            {"kind": "limit_reset", "window": "five_hour", "catch_up": "everything"}))
+
+
+class IsoToEpochTest(unittest.TestCase):
+    def test_z_suffix_parses(self):
+        self.assertIsNotNone(schedules.iso_to_epoch("2026-01-01T00:00:00Z"))
+
+    def test_naive_treated_as_utc(self):
+        a = schedules.iso_to_epoch("2026-01-01T00:00:00Z")
+        b = schedules.iso_to_epoch("2026-01-01T00:00:00")
+        self.assertEqual(a, b)
+
+    def test_none_returns_none(self):
+        self.assertIsNone(schedules.iso_to_epoch(None))
+
+    def test_garbage_returns_none(self):
+        self.assertIsNone(schedules.iso_to_epoch("not a timestamp"))
+
+    def test_empty_string_returns_none(self):
+        self.assertIsNone(schedules.iso_to_epoch(""))
+
+
+class TriggerCrudTest(unittest.TestCase):
+    """create_schedule / update_schedule's handling of `trigger`: storage
+    shape, cron/trigger mutual exclusivity, and how the last_seen_resets_at
+    marker is kept or reset across an update."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self._orig = schedules.SCHEDULES_FILE
+        schedules.SCHEDULES_FILE = os.path.join(self.tmpdir, "schedules.json")
+
+    def tearDown(self):
+        schedules.SCHEDULES_FILE = self._orig
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_create_without_trigger_is_unaffected(self):
+        s = schedules.create_schedule({"name": "cron task", "cron": "0 9 * * *"})
+        self.assertIsNone(s["trigger"])
+        self.assertEqual(s["cron"], "0 9 * * *")
+
+    def test_create_with_trigger_forces_cron_null(self):
+        s = schedules.create_schedule({
+            "name": "reset task", "cron": "0 9 * * *",
+            "trigger": {"kind": "limit_reset", "window": "five_hour"},
+        })
+        self.assertIsNone(s["cron"])
+        self.assertEqual(s["trigger"]["kind"], "limit_reset")
+        self.assertEqual(s["trigger"]["window"], "five_hour")
+
+    def test_create_defaults_delay_and_catch_up(self):
+        s = schedules.create_schedule({
+            "name": "reset task",
+            "trigger": {"kind": "limit_reset", "window": "seven_day"},
+        })
+        self.assertEqual(s["trigger"]["delay_minutes"], 0)
+        self.assertEqual(s["trigger"]["catch_up"], "latest")
+
+    def test_create_never_trusts_a_client_supplied_marker(self):
+        s = schedules.create_schedule({
+            "name": "reset task",
+            "trigger": {"kind": "limit_reset", "window": "five_hour",
+                        "last_seen_resets_at": "2020-01-01T00:00:00Z"},
+        })
+        self.assertIsNone(s["trigger"]["last_seen_resets_at"])
+
+    def test_update_editing_delay_keeps_marker(self):
+        s = schedules.create_schedule({
+            "name": "reset task",
+            "trigger": {"kind": "limit_reset", "window": "five_hour"},
+        })
+        # Simulate the scheduler having already seeded a marker.
+        schedules.update_schedule(s["id"], {
+            "trigger": {"kind": "limit_reset", "window": "five_hour",
+                        "last_seen_resets_at": "2026-01-01T00:00:00Z"},
+        })
+        # A user-facing edit (no last_seen_resets_at key in the payload,
+        # matching what the API layer actually sends) changes delay only.
+        updated = schedules.update_schedule(s["id"], {
+            "trigger": {"kind": "limit_reset", "window": "five_hour", "delay_minutes": 15},
+        })
+        self.assertEqual(updated["trigger"]["delay_minutes"], 15)
+        self.assertEqual(updated["trigger"]["last_seen_resets_at"], "2026-01-01T00:00:00Z")
+
+    def test_update_changing_window_resets_marker(self):
+        s = schedules.create_schedule({
+            "name": "reset task",
+            "trigger": {"kind": "limit_reset", "window": "five_hour"},
+        })
+        schedules.update_schedule(s["id"], {
+            "trigger": {"kind": "limit_reset", "window": "five_hour",
+                        "last_seen_resets_at": "2026-01-01T00:00:00Z"},
+        })
+        updated = schedules.update_schedule(s["id"], {
+            "trigger": {"kind": "limit_reset", "window": "seven_day"},
+        })
+        self.assertIsNone(updated["trigger"]["last_seen_resets_at"])
+
+    def test_update_scheduler_marker_write_is_trusted_verbatim(self):
+        s = schedules.create_schedule({
+            "name": "reset task",
+            "trigger": {"kind": "limit_reset", "window": "five_hour"},
+        })
+        updated = schedules.update_schedule(s["id"], {
+            "trigger": {"kind": "limit_reset", "window": "five_hour",
+                        "last_seen_resets_at": "2026-03-01T00:00:00Z"},
+        })
+        self.assertEqual(updated["trigger"]["last_seen_resets_at"], "2026-03-01T00:00:00Z")
+
+    def test_update_setting_trigger_forces_cron_null_even_if_cron_also_sent(self):
+        s = schedules.create_schedule({"name": "cron task", "cron": "0 9 * * *"})
+        updated = schedules.update_schedule(s["id"], {
+            "cron": "0 12 * * *",
+            "trigger": {"kind": "limit_reset", "window": "five_hour"},
+        })
+        self.assertIsNone(updated["cron"])
+
+    def test_update_clearing_trigger_restores_cron_control(self):
+        s = schedules.create_schedule({
+            "name": "reset task",
+            "trigger": {"kind": "limit_reset", "window": "five_hour"},
+        })
+        updated = schedules.update_schedule(s["id"], {"trigger": None, "cron": "0 9 * * *"})
+        self.assertIsNone(updated["trigger"])
+        self.assertEqual(updated["cron"], "0 9 * * *")
+
+
+class TriggerLoadValidationTest(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.sched_file = os.path.join(self.tmpdir, "schedules.json")
+        self._orig = schedules.SCHEDULES_FILE
+        schedules.SCHEDULES_FILE = self.sched_file
+
+    def tearDown(self):
+        schedules.SCHEDULES_FILE = self._orig
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _write_raw(self, text):
+        with open(self.sched_file, "w") as f:
+            f.write(text)
+
+    def test_null_trigger_round_trips(self):
+        self._write_raw('[{"id": "a", "name": "A", "cron": null, "trigger": null}]')
+        result = schedules.load_schedules()
+        self.assertEqual(result[0]["trigger"], None)
+
+    def test_valid_trigger_round_trips(self):
+        self._write_raw(
+            '[{"id": "a", "name": "A", "cron": null, "trigger": '
+            '{"kind": "limit_reset", "window": "five_hour", "delay_minutes": 10, '
+            '"catch_up": "latest", "last_seen_resets_at": null}}]'
+        )
+        result = schedules.load_schedules()
+        self.assertEqual(result[0]["trigger"]["window"], "five_hour")
+
+    def test_entry_missing_trigger_key_survives_unaffected(self):
+        # A pre-existing task from before this feature never had a
+        # `trigger` key at all - loading it must not require or invent one.
+        self._write_raw('[{"id": "a", "name": "A", "cron": "0 9 * * *"}]')
+        result = schedules.load_schedules()
+        self.assertEqual(result, [{"id": "a", "name": "A", "cron": "0 9 * * *"}])
+        self.assertNotIn("trigger", result[0])
+
+    def test_non_object_trigger_is_dropped(self):
+        self._write_raw('[{"id": "a", "name": "A", "trigger": "not an object"}]')
+        result = schedules.load_schedules()
+        self.assertEqual(result, [])
+        self.assertIsNotNone(schedules.LAST_LOAD_ERROR)
+
+    def test_semantically_bad_trigger_still_loads(self):
+        # Deep validation (unknown kind/window) is deliberately NOT done
+        # at load time - the task must stay visible so the scheduler's
+        # runtime check can disable it with an explanatory history entry
+        # rather than it silently vanishing from the list.
+        self._write_raw(
+            '[{"id": "a", "name": "A", "trigger": {"kind": "limit_reset", "window": "bogus"}}]'
+        )
+        result = schedules.load_schedules()
+        self.assertEqual(len(result), 1)
+        self.assertIsNone(schedules.LAST_LOAD_ERROR)
+
+
 if __name__ == "__main__":
     unittest.main()

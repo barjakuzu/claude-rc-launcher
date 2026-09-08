@@ -13,7 +13,7 @@ from config import (SESSION_PREFIX, RC_FLAGS,
                     resolve_claude_mode, RC_MAX_SESSIONS)
 from sessions import (session_exists, setup_session, get_url, list_rc_sessions,
                       get_session_env, build_tmux_command, count_launcher_sessions)
-from schedules import load_schedules, save_schedules, add_history_entry
+from schedules import load_schedules, save_schedules, add_history_entry, update_schedule
 import schedules as schedules_module
 
 _last_logged_schedule_error = None
@@ -168,6 +168,231 @@ def _due_to_fire(schedule, now):
         except (ValueError, TypeError):
             pass
     return True
+
+
+# --- limit_reset trigger (task-l3) ------------------------------------------
+#
+# Fires a task once when a Claude usage window (five_hour / seven_day)
+# rolls over, instead of on a cron schedule. The reset is OBSERVED, not
+# predicted: limits.py polls the account's usage windows and
+# store.limits_view() exposes the freshest reading as `primary` - this
+# module never calls the API itself. A reset is inferred purely from
+# `resets_at` moving forward between two observations of the same window.
+#
+# Firing rule (task-l3 brief): fire once per reset, never twice, never a
+# burst of catch-up runs. Store the last `resets_at` this task fired for
+# (or, for a brand new task, merely observed). Fire when the current
+# `resets_at` differs from the stored one AND the stored one is already in
+# the past. Then record the new value - before firing, not after, so a
+# crash between "record" and "fire" costs at most one missed fire rather
+# than risking a duplicate on the next tick (worse per the brief: a task
+# firing twice is worse than not having the feature at all).
+#
+# Because the marker lives in schedules.json (survives a hub restart) and
+# the comparison only ever looks at "current vs. last stored", a hub that
+# was down across one or several resets naturally fires exactly once, for
+# the latest reset, the next time it gets to check - no special "was the
+# hub down" detection needed for that part. `catch_up: "none"` opts OUT of
+# that specific behavior (see _apply_limit_reset_trigger below).
+
+# In-memory only, deliberately never persisted: which schedule ids have
+# already had at least one limit_reset check performed THIS PROCESS
+# lifetime. Reset to empty on every restart. Used solely so catch_up:
+# "none" can tell "a reset this process already watched happen live" apart
+# from "a reset that could have happened at any point while this process
+# was not running" - see _apply_limit_reset_trigger.
+_limit_reset_seen_this_process = set()
+
+
+def _limit_reset_decision(trigger, current_resets_at, now_epoch):
+    """Pure firing-rule decision for one limit_reset trigger check, given
+    the window's current resets_at (or None/empty when limits data isn't
+    available right now) and the current wall clock (epoch seconds).
+
+    Returns (action, new_marker):
+      ("skip", None) - do nothing; any existing marker is left untouched.
+      ("seed", ts)   - persist ts as last_seen_resets_at; do not fire.
+                       Covers both "brand new task" (brief: never fire
+                       just because the marker is empty - seed and fire
+                       on the NEXT reset) and "reset observed but still
+                       inside its delay_minutes window" (marker is
+                       deliberately NOT advanced there either - see
+                       below - so this same case is folded into "skip").
+      ("fire", ts)   - persist ts as last_seen_resets_at, then fire.
+
+    One test per brief case lives in tests/test_scheduler.py under
+    LimitResetDecisionTest."""
+    if not current_resets_at:
+        # limits unavailable (no credentials, network down, or simply no
+        # device has ever reported a reading) - brief: fire nothing, and
+        # do not lose the stored marker.
+        return ("skip", None)
+
+    stored = trigger.get("last_seen_resets_at")
+    if not stored:
+        # Brand new task (or a marker some prior version never set).
+        return ("seed", current_resets_at)
+
+    if current_resets_at == stored:
+        # The normal case: the API is still reporting the same window
+        # boundary it reported last poll. Nothing happened.
+        return ("skip", None)
+
+    stored_epoch = schedules_module.iso_to_epoch(stored)
+    current_epoch = schedules_module.iso_to_epoch(current_resets_at)
+    if stored_epoch is None or current_epoch is None:
+        # Unparseable timestamp somewhere - stay conservative rather than
+        # act on a value this function can't actually reason about.
+        return ("skip", None)
+
+    if current_epoch <= stored_epoch:
+        # Clock skew, or resets_at moving backwards - brief: ignore it,
+        # do not fire. The marker is left alone (not advanced to this
+        # backwards value) so a later, forward-moving reading is still
+        # compared against the last value actually trusted.
+        return ("skip", None)
+
+    if stored_epoch >= now_epoch:
+        # The previously-stored boundary has not actually passed yet by
+        # wall clock even though the API already reports a new value for
+        # it - brief requires "the stored one is in the past" before
+        # firing. Wait rather than fire early.
+        return ("skip", None)
+
+    delay_seconds = (trigger.get("delay_minutes") or 0) * 60
+    fire_at = stored_epoch + delay_seconds
+    if now_epoch < fire_at:
+        # Reset observed, but delay_minutes (brief: "fires a little after
+        # the reset, so a user can avoid every device stampeding the
+        # same instant") hasn't elapsed yet. The marker is deliberately
+        # NOT advanced here: if it were, the next tick would see
+        # current_resets_at == stored and silently skip the fire this
+        # delay window still owes. Re-evaluated every tick until the
+        # delay elapses, then falls through to "fire" below.
+        return ("skip", None)
+
+    return ("fire", current_resets_at)
+
+
+def _apply_limit_reset_trigger(trigger, current_resets_at, now_epoch, first_check_this_process):
+    """_limit_reset_decision, adjusted for trigger.catch_up.
+
+    catch_up: "latest" (default) is the behavior described above: a hub
+    that was down across one or more resets fires once, for the latest,
+    the first time it checks after restart. catch_up: "none" opts a task
+    out of exactly that: on THIS process's first-ever check of this
+    schedule, a decision that would have fired is downgraded to a silent
+    reseed instead (brief: "not at all if the task's catch_up is none").
+    Every later check within the same process lifetime behaves normally -
+    only the first, potentially-stale-spanning-downtime check is
+    softened."""
+    action, new_marker = _limit_reset_decision(trigger, current_resets_at, now_epoch)
+    catch_up = trigger.get("catch_up", "latest")
+    if action == "fire" and first_check_this_process and catch_up == "none":
+        return ("seed", new_marker)
+    return (action, new_marker)
+
+
+def _get_limits_view():
+    """store.limits_view() via the hub's shared Store (server.HUB_STORE),
+    for the limit_reset trigger check. Imported lazily, at call time, not
+    at this module's top level: server.py does `from scheduler import
+    validate_cron, next_cron_run, _fire_schedule` at ITS OWN module load
+    time, so a top-level `import server` here would try to import
+    server.py back while it is still mid-load, before those names exist
+    on this module yet, and crash. Never raises: a store hiccup here is
+    treated exactly like limits.py's own available=False - the caller
+    (_check_limit_reset_schedules) already treats None the same as "no
+    data this tick"."""
+    try:
+        import server as server_module
+        hub_store = getattr(server_module, "HUB_STORE", None)
+        if hub_store is None:
+            return None
+        return hub_store.limits_view()
+    except Exception:
+        return None
+
+
+def _check_limit_reset_schedules(schedules_list, now_epoch, get_limits_view=_get_limits_view):
+    """Runs once per scheduler tick (see _scheduler_loop). For every
+    enabled schedule carrying a `trigger`, reads the hub's current limits
+    view ONCE for the whole tick (not once per schedule), decides
+    whether to fire via _apply_limit_reset_trigger, and persists the
+    outcome. Never raises: the whole per-schedule body is guarded, and a
+    malformed trigger (unknown kind/window, bad delay - whether from a
+    hand-edited schedules.json or an unexpected runtime failure) disables
+    that one task with a history entry instead of ever propagating out
+    of this function and killing the scheduler thread (brief: "The
+    scheduler loop must never raise. A malformed trigger must disable
+    that one task, loudly in its history, not stop the loop")."""
+    limit_schedules = [s for s in schedules_list
+                        if s.get("enabled", False) and s.get("trigger") is not None]
+    if not limit_schedules:
+        return
+
+    try:
+        view = get_limits_view()
+    except Exception:
+        view = None
+    primary = view.get("primary") if isinstance(view, dict) else None
+
+    for schedule in limit_schedules:
+        schedule_id = schedule.get("id")
+        try:
+            raw_trigger = schedule.get("trigger")
+            if not isinstance(raw_trigger, dict):
+                raise ValueError(f"trigger must be an object, got {type(raw_trigger).__name__}")
+            if raw_trigger.get("kind") != "limit_reset":
+                raise ValueError(f"unsupported trigger kind: {raw_trigger.get('kind')!r}")
+            window = raw_trigger.get("window")
+            if window not in schedules_module.TRIGGER_WINDOWS:
+                raise ValueError(f"unknown trigger window: {window!r}")
+            delay = raw_trigger.get("delay_minutes", 0)
+            if delay is None:
+                delay = 0
+            if (isinstance(delay, bool) or not isinstance(delay, (int, float))
+                    or not (0 <= delay <= schedules_module.TRIGGER_MAX_DELAY_MINUTES)):
+                raise ValueError(f"invalid delay_minutes: {delay!r}")
+            catch_up = raw_trigger.get("catch_up", "latest")
+            if catch_up not in schedules_module.TRIGGER_CATCH_UP_MODES:
+                raise ValueError(f"invalid catch_up: {catch_up!r}")
+
+            current_resets_at = None
+            if isinstance(primary, dict):
+                bucket = primary.get(window)
+                if isinstance(bucket, dict):
+                    ra = bucket.get("resets_at")
+                    if isinstance(ra, str) and ra:
+                        current_resets_at = ra
+
+            first_check = schedule_id not in _limit_reset_seen_this_process
+            _limit_reset_seen_this_process.add(schedule_id)
+
+            action, new_marker = _apply_limit_reset_trigger(
+                raw_trigger, current_resets_at, now_epoch, first_check)
+
+            if action == "skip":
+                continue
+
+            new_trigger = dict(raw_trigger)
+            new_trigger["last_seen_resets_at"] = new_marker
+            update_schedule(schedule_id, {"trigger": new_trigger})
+
+            if action == "fire":
+                print(f"  Scheduler: limit reset for '{schedule.get('name')}' ({window})")
+                _fire_schedule(schedule)
+        except Exception as e:
+            print(f"  Scheduler: disabling '{schedule.get('name')}', "
+                  f"limit_reset trigger check failed: {type(e).__name__}: {e}")
+            try:
+                add_history_entry(schedule_id, "error",
+                                   f"Disabled: limit_reset trigger check failed ({e})")
+                update_schedule(schedule_id, {"enabled": False})
+            except Exception:
+                # A second failure here (disk full, etc.) must still not
+                # escape this loop - see the module docstring above.
+                pass
 
 
 # --- Session lifecycle tracking ---
@@ -417,6 +642,15 @@ def _scheduler_loop():
                 continue
             print(f"  Scheduler: cron match for '{schedule.get('name')}'")
             _fire_schedule(schedule)
+
+        # limit_reset trigger check - see _check_limit_reset_schedules for
+        # the firing rule. Belt-and-suspenders try/except on top of that
+        # function's own internal per-schedule guard: this loop must never
+        # die, no matter what.
+        try:
+            _check_limit_reset_schedules(schedules, time.time())
+        except Exception:
+            print("  Scheduler: limit_reset trigger check failed unexpectedly")
 
         # Check if any tracked scheduled sessions have ended
         _monitor_scheduled_sessions()

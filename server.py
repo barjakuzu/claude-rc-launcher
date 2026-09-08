@@ -78,8 +78,38 @@ def _parse_projects():
 
 def _enrich_next_run(schedule):
     """Return a copy of `schedule` with next_run computed. Disabled and
-    manual (cron: null) schedules always get next_run: None."""
+    manual (cron: null) schedules always get next_run: None.
+
+    A limit_reset trigger task (task-l3) has no cron to compute from -
+    its next_run is the window's current resets_at (read from the hub's
+    shared limits view, store.limits_view()'s `primary`) plus the
+    trigger's delay_minutes. `limits_unavailable` is set alongside it so
+    the UI can say plainly that limits data isn't available right now
+    rather than showing nothing or inventing a guess (task-l3 brief:
+    "says plainly when limits are unavailable rather than showing a
+    guess")."""
     s = dict(schedule)
+    trigger = s.get("trigger")
+    if isinstance(trigger, dict) and trigger.get("kind") == "limit_reset":
+        s["next_run"] = None
+        s["limits_unavailable"] = True
+        if s.get("enabled") and HUB_STORE is not None:
+            window = trigger.get("window")
+            try:
+                view = HUB_STORE.limits_view()
+            except Exception:
+                view = None
+            primary = view.get("primary") if isinstance(view, dict) else None
+            bucket = primary.get(window) if isinstance(primary, dict) else None
+            resets_at = bucket.get("resets_at") if isinstance(bucket, dict) else None
+            epoch = schedules.iso_to_epoch(resets_at) if isinstance(resets_at, str) else None
+            if epoch is not None:
+                delay_seconds = (trigger.get("delay_minutes") or 0) * 60
+                fire_epoch = epoch + delay_seconds
+                s["next_run"] = time.strftime(
+                    "%Y-%m-%dT%H:%M:%S", time.gmtime(fire_epoch)) + "Z"
+                s["limits_unavailable"] = False
+        return s
     if s.get("enabled") and s.get("cron"):
         s["next_run"] = next_cron_run(s["cron"])
     else:
@@ -2166,12 +2196,24 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         elif path == "/schedules":
             body = self._read_body()
-            # Validate cron
-            cron = body.get("cron", "")
-            err = validate_cron(cron)
+            # Validate trigger (task-l3) first: reject an unknown kind or
+            # window rather than silently ignoring it. A valid, non-null
+            # trigger always wins over cron (create_schedule forces
+            # cron: null for it), so cron is not required/validated in
+            # that case - a caller building a trigger-only payload isn't
+            # forced to also invent a cron string that will just be
+            # discarded.
+            trigger = body.get("trigger")
+            err = schedules.validate_trigger(trigger)
             if err:
-                self._json({"ok": False, "message": f"Invalid cron: {err}"}, 400)
+                self._json({"ok": False, "message": f"Invalid trigger: {err}"}, 400)
                 return
+            if trigger is None:
+                cron = body.get("cron", "")
+                err = validate_cron(cron)
+                if err:
+                    self._json({"ok": False, "message": f"Invalid cron: {err}"}, 400)
+                    return
             schedule = create_schedule(body)
             _audit(self, action="schedules", target=str(schedule.get("id", "")))
             self._json({"ok": True, "schedule": schedule})
@@ -2182,8 +2224,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not sid:
                 self._json({"ok": False, "message": "Missing schedule id"}, 400)
                 return
-            # Validate cron if provided
-            if "cron" in body:
+            # Validate trigger if provided (task-l3) - same rejection
+            # rule as create above. A valid, non-null trigger skips cron
+            # validation for this request, matching create_schedule.
+            trigger_given = "trigger" in body
+            trigger = body.get("trigger")
+            if trigger_given:
+                err = schedules.validate_trigger(trigger)
+                if err:
+                    self._json({"ok": False, "message": f"Invalid trigger: {err}"}, 400)
+                    return
+            # Validate cron if provided, unless this request is setting a
+            # valid non-null trigger (which will override cron anyway).
+            if "cron" in body and not (trigger_given and trigger is not None):
                 err = validate_cron(body["cron"])
                 if err:
                     self._json({"ok": False, "message": f"Invalid cron: {err}"}, 400)

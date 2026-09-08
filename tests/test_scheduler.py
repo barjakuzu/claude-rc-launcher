@@ -12,6 +12,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import compat
 import scheduler
+import schedules as schedules_module
 
 # scheduler.py logs progress via print() (session adoption, firing,
 # skip/kill decisions) — real signal for an operator watching the
@@ -548,6 +549,292 @@ class AdoptLiveSessionsTest(unittest.TestCase):
 
         self.assertEqual(self.fake.new_session_names(), [])
         self.assertIn(("s1", "skipped"), [(h[0], h[1]) for h in self.history])
+
+
+class LimitResetDecisionTest(unittest.TestCase):
+    """_limit_reset_decision is the pure core of the task-l3 firing rule:
+    given a trigger's stored marker, the window's current resets_at, and
+    the wall clock, decide skip / seed / fire. One test per case the
+    brief calls out explicitly, plus the mechanics (delay window, unknown
+    timestamps) those cases rest on."""
+
+    T1 = "2026-01-01T00:00:00Z"   # an earlier reset boundary
+    T2 = "2026-01-02T00:00:00Z"   # a later one
+    T3 = "2026-01-03T00:00:00Z"   # later still
+
+    def _epoch(self, iso):
+        return schedules_module.iso_to_epoch(iso)
+
+    def test_hub_down_across_one_reset_fires_once(self):
+        # Marker still points at T1 (last thing the hub ever recorded).
+        # The API now reports T2, and T1 is safely in the past - exactly
+        # what "the hub was down across a reset" looks like on restart.
+        trigger = {"last_seen_resets_at": self.T1, "delay_minutes": 0}
+        now = self._epoch(self.T2) + 3600  # well after the API's own update
+        action, marker = scheduler._limit_reset_decision(trigger, self.T2, now)
+        self.assertEqual(action, "fire")
+        self.assertEqual(marker, self.T2)
+
+    def test_hub_down_across_two_resets_fires_once_for_latest(self):
+        # The hub never observed T2 at all - only T1 (stored) and T3
+        # (the API's current answer) exist as far as this function knows.
+        # It must still fire exactly once, for T3.
+        trigger = {"last_seen_resets_at": self.T1, "delay_minutes": 0}
+        now = self._epoch(self.T3) + 3600
+        action, marker = scheduler._limit_reset_decision(trigger, self.T3, now)
+        self.assertEqual(action, "fire")
+        self.assertEqual(marker, self.T3)
+
+    def test_limits_unavailable_fires_nothing_and_preserves_marker(self):
+        trigger = {"last_seen_resets_at": self.T1, "delay_minutes": 0}
+        action, marker = scheduler._limit_reset_decision(trigger, None, self._epoch(self.T2))
+        self.assertEqual(action, "skip")
+        self.assertIsNone(marker)
+
+    def test_same_resets_at_for_hours_fires_nothing(self):
+        trigger = {"last_seen_resets_at": self.T1, "delay_minutes": 0}
+        action, marker = scheduler._limit_reset_decision(
+            trigger, self.T1, self._epoch(self.T1) + 3600 * 4)
+        self.assertEqual(action, "skip")
+
+    def test_brand_new_task_seeds_without_firing(self):
+        trigger = {"last_seen_resets_at": None, "delay_minutes": 0}
+        action, marker = scheduler._limit_reset_decision(
+            trigger, self.T1, self._epoch(self.T1))
+        self.assertEqual(action, "seed")
+        self.assertEqual(marker, self.T1)
+
+    def test_clock_skew_backwards_is_ignored(self):
+        # Stored marker is T2 (later); the API now reports the earlier T1.
+        trigger = {"last_seen_resets_at": self.T2, "delay_minutes": 0}
+        action, marker = scheduler._limit_reset_decision(
+            trigger, self.T1, self._epoch(self.T2) + 3600)
+        self.assertEqual(action, "skip")
+        self.assertIsNone(marker)
+
+    def test_stored_marker_not_yet_in_the_past_does_not_fire(self):
+        # current differs from stored, but wall clock hasn't even reached
+        # the stored boundary yet - brief requires "the stored one is in
+        # the past" as part of the firing condition.
+        trigger = {"last_seen_resets_at": self.T2, "delay_minutes": 0}
+        action, marker = scheduler._limit_reset_decision(
+            trigger, self.T3, self._epoch(self.T2) - 3600)
+        self.assertEqual(action, "skip")
+
+    def test_delay_minutes_not_yet_elapsed_does_not_fire(self):
+        trigger = {"last_seen_resets_at": self.T1, "delay_minutes": 30}
+        # Only 10 minutes past the reset boundary; delay wants 30.
+        now = self._epoch(self.T1) + 600
+        action, marker = scheduler._limit_reset_decision(trigger, self.T2, now)
+        self.assertEqual(action, "skip")
+        self.assertIsNone(marker)
+
+    def test_delay_minutes_elapsed_fires(self):
+        trigger = {"last_seen_resets_at": self.T1, "delay_minutes": 30}
+        now = self._epoch(self.T1) + 30 * 60 + 1
+        action, marker = scheduler._limit_reset_decision(trigger, self.T2, now)
+        self.assertEqual(action, "fire")
+        self.assertEqual(marker, self.T2)
+
+    def test_unparseable_current_resets_at_does_not_fire(self):
+        trigger = {"last_seen_resets_at": self.T1, "delay_minutes": 0}
+        action, marker = scheduler._limit_reset_decision(
+            trigger, "not-a-timestamp", self._epoch(self.T1) + 3600)
+        self.assertEqual(action, "skip")
+
+
+class ApplyLimitResetTriggerCatchUpTest(unittest.TestCase):
+    """_apply_limit_reset_trigger layers trigger.catch_up on top of
+    _limit_reset_decision - "none" suppresses exactly the first,
+    potentially-downtime-spanning fire each process ever sees for a
+    schedule, per the brief's "not at all if the task's catch_up is
+    none" case."""
+
+    T1 = "2026-01-01T00:00:00Z"
+    T2 = "2026-01-02T00:00:00Z"
+
+    def _epoch(self, iso):
+        return schedules_module.iso_to_epoch(iso)
+
+    def test_catch_up_none_suppresses_the_first_process_fire(self):
+        trigger = {"last_seen_resets_at": self.T1, "delay_minutes": 0, "catch_up": "none"}
+        now = self._epoch(self.T2) + 3600
+        action, marker = scheduler._apply_limit_reset_trigger(
+            trigger, self.T2, now, first_check_this_process=True)
+        self.assertEqual(action, "seed")
+        self.assertEqual(marker, self.T2)
+
+    def test_catch_up_none_fires_normally_once_already_seen(self):
+        trigger = {"last_seen_resets_at": self.T1, "delay_minutes": 0, "catch_up": "none"}
+        now = self._epoch(self.T2) + 3600
+        action, marker = scheduler._apply_limit_reset_trigger(
+            trigger, self.T2, now, first_check_this_process=False)
+        self.assertEqual(action, "fire")
+
+    def test_catch_up_latest_is_the_default_and_fires_on_first_check(self):
+        trigger = {"last_seen_resets_at": self.T1, "delay_minutes": 0}
+        now = self._epoch(self.T2) + 3600
+        action, marker = scheduler._apply_limit_reset_trigger(
+            trigger, self.T2, now, first_check_this_process=True)
+        self.assertEqual(action, "fire")
+
+    def test_catch_up_none_does_not_affect_a_non_firing_decision(self):
+        # catch_up only ever downgrades a "fire" - it must never turn a
+        # "skip" (e.g. limits unavailable) into anything else.
+        trigger = {"last_seen_resets_at": self.T1, "delay_minutes": 0, "catch_up": "none"}
+        action, marker = scheduler._apply_limit_reset_trigger(
+            trigger, None, self._epoch(self.T1) + 3600, first_check_this_process=True)
+        self.assertEqual(action, "skip")
+
+
+class CheckLimitResetSchedulesTest(unittest.TestCase):
+    """_check_limit_reset_schedules: the per-tick wiring around the pure
+    decision functions above - fetches limits once per tick, persists via
+    update_schedule, fires via _fire_schedule, and never lets a bad
+    trigger escape as an exception."""
+
+    def setUp(self):
+        self.updates = []
+        self.fired = []
+        self.history = []
+        self._saved_update = scheduler.update_schedule
+        self._saved_fire = scheduler._fire_schedule
+        self._saved_history = scheduler.add_history_entry
+        scheduler.update_schedule = lambda sid, upd: self.updates.append((sid, dict(upd)))
+        scheduler._fire_schedule = lambda sched: self.fired.append(sched["id"])
+        scheduler.add_history_entry = (
+            lambda sid, status, msg, **kw: self.history.append((sid, status, msg)))
+        scheduler._limit_reset_seen_this_process.clear()
+
+    def tearDown(self):
+        scheduler.update_schedule = self._saved_update
+        scheduler._fire_schedule = self._saved_fire
+        scheduler.add_history_entry = self._saved_history
+        scheduler._limit_reset_seen_this_process.clear()
+
+    def _schedule(self, **overrides):
+        s = {
+            "id": "s1", "name": "task", "enabled": True,
+            "trigger": {"kind": "limit_reset", "window": "five_hour",
+                        "delay_minutes": 0, "catch_up": "latest",
+                        "last_seen_resets_at": None},
+        }
+        s.update(overrides)
+        return s
+
+    def _view(self, resets_at, window="five_hour"):
+        return lambda: {"primary": {window: {"resets_at": resets_at}}}
+
+    def test_fires_and_persists_marker(self):
+        sched = self._schedule(trigger={
+            "kind": "limit_reset", "window": "five_hour", "delay_minutes": 0,
+            "catch_up": "latest", "last_seen_resets_at": "2026-01-01T00:00:00Z",
+        })
+        now = schedules_module.iso_to_epoch("2026-01-02T00:00:00Z") + 3600
+        scheduler._check_limit_reset_schedules(
+            [sched], now, self._view("2026-01-02T00:00:00Z"))
+        self.assertEqual(self.fired, ["s1"])
+        self.assertEqual(len(self.updates), 1)
+        self.assertEqual(self.updates[0][1]["trigger"]["last_seen_resets_at"],
+                          "2026-01-02T00:00:00Z")
+
+    def test_marker_is_persisted_before_firing(self):
+        order = []
+        scheduler.update_schedule = lambda sid, upd: order.append("update")
+        scheduler._fire_schedule = lambda sched: order.append("fire")
+        sched = self._schedule(trigger={
+            "kind": "limit_reset", "window": "five_hour", "delay_minutes": 0,
+            "catch_up": "latest", "last_seen_resets_at": "2026-01-01T00:00:00Z",
+        })
+        now = schedules_module.iso_to_epoch("2026-01-02T00:00:00Z") + 3600
+        scheduler._check_limit_reset_schedules(
+            [sched], now, self._view("2026-01-02T00:00:00Z"))
+        self.assertEqual(order, ["update", "fire"])
+
+    def test_brand_new_task_seeds_and_does_not_fire(self):
+        sched = self._schedule()
+        now = schedules_module.iso_to_epoch("2026-01-01T00:00:00Z")
+        scheduler._check_limit_reset_schedules(
+            [sched], now, self._view("2026-01-01T00:00:00Z"))
+        self.assertEqual(self.fired, [])
+        self.assertEqual(self.updates[0][1]["trigger"]["last_seen_resets_at"],
+                          "2026-01-01T00:00:00Z")
+
+    def test_disabled_schedule_is_never_checked(self):
+        sched = self._schedule(enabled=False)
+        calls = []
+
+        def view():
+            calls.append(1)
+            return {"primary": {"five_hour": {"resets_at": "2026-01-02T00:00:00Z"}}}
+
+        scheduler._check_limit_reset_schedules([sched], time.time(), view)
+        self.assertEqual(calls, [])
+        self.assertEqual(self.fired, [])
+        self.assertEqual(self.updates, [])
+
+    def test_limits_view_raising_skips_without_disabling(self):
+        sched = self._schedule(trigger={
+            "kind": "limit_reset", "window": "five_hour", "delay_minutes": 0,
+            "catch_up": "latest", "last_seen_resets_at": "2026-01-01T00:00:00Z",
+        })
+
+        def boom():
+            raise RuntimeError("store unavailable")
+
+        scheduler._check_limit_reset_schedules([sched], time.time(), boom)
+        self.assertEqual(self.fired, [])
+        self.assertEqual(self.updates, [])
+        self.assertEqual(self.history, [])
+        self.assertTrue(sched["enabled"])
+
+    def test_unknown_kind_disables_task_with_history_entry(self):
+        sched = self._schedule(trigger={"kind": "something_else", "window": "five_hour"})
+        scheduler._check_limit_reset_schedules(
+            [sched], time.time(), self._view("2026-01-02T00:00:00Z"))
+        self.assertEqual(self.fired, [])
+        self.assertIn(("s1", "error"), [(h[0], h[1]) for h in self.history])
+        self.assertEqual(self.updates[-1], ("s1", {"enabled": False}))
+
+    def test_unknown_window_disables_task_with_history_entry(self):
+        sched = self._schedule(trigger={"kind": "limit_reset", "window": "bogus"})
+        scheduler._check_limit_reset_schedules(
+            [sched], time.time(), self._view("2026-01-02T00:00:00Z"))
+        self.assertEqual(self.fired, [])
+        self.assertIn(("s1", "error"), [(h[0], h[1]) for h in self.history])
+        self.assertEqual(self.updates[-1], ("s1", {"enabled": False}))
+
+    def test_delay_minutes_out_of_range_disables_task(self):
+        sched = self._schedule(trigger={
+            "kind": "limit_reset", "window": "five_hour", "delay_minutes": 9999,
+        })
+        scheduler._check_limit_reset_schedules(
+            [sched], time.time(), self._view("2026-01-02T00:00:00Z"))
+        self.assertEqual(self.fired, [])
+        self.assertEqual(self.updates[-1], ("s1", {"enabled": False}))
+
+    def test_non_dict_trigger_disables_task(self):
+        sched = self._schedule(trigger="limit_reset")
+        scheduler._check_limit_reset_schedules(
+            [sched], time.time(), self._view("2026-01-02T00:00:00Z"))
+        self.assertEqual(self.fired, [])
+        self.assertEqual(self.updates[-1], ("s1", {"enabled": False}))
+
+    def test_cron_only_schedule_is_ignored(self):
+        sched = {"id": "s2", "name": "cron task", "enabled": True,
+                  "cron": "0 9 * * *", "trigger": None}
+        scheduler._check_limit_reset_schedules(
+            [sched], time.time(), self._view("2026-01-02T00:00:00Z"))
+        self.assertEqual(self.fired, [])
+        self.assertEqual(self.updates, [])
+
+    def test_no_limit_reset_schedules_never_calls_get_limits_view(self):
+        calls = []
+        sched = {"id": "s2", "name": "cron task", "enabled": True,
+                  "cron": "0 9 * * *", "trigger": None}
+        scheduler._check_limit_reset_schedules(
+            [sched], time.time(), lambda: calls.append(1))
+        self.assertEqual(calls, [])
 
 
 if __name__ == "__main__":

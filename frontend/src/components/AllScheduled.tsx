@@ -12,6 +12,46 @@ import { api } from '../api';
 import { fixedMenuPos } from './menuPos';
 import type { DeviceCard, Schedule } from '../types';
 
+// task-l3: `trigger`/`limits_unavailable` aren't on the shared Schedule
+// type (types.ts is owned by a parallel lane for this task) - declared
+// locally and intersected in, same pattern ScheduleModal.tsx uses.
+interface LimitResetTrigger {
+  kind: 'limit_reset';
+  window: 'five_hour' | 'seven_day';
+  delay_minutes?: number;
+}
+type ScheduleWithTrigger = Schedule & {
+  trigger?: LimitResetTrigger | null;
+  limits_unavailable?: boolean;
+};
+
+/** Timing description for a row: the shared describeSchedule() for a
+ * plain cron/manual task, or a locally-built label for a limit_reset
+ * trigger task (whose cron is always null, so describeSchedule() alone
+ * would just say "manual" and lose the "why"). */
+function describeTiming(s: ScheduleWithTrigger): string {
+  if (s.trigger && s.trigger.kind === 'limit_reset') {
+    const windowLabel = s.trigger.window === 'seven_day' ? 'weekly limit resets' : '5-hour limit resets';
+    const delay = s.trigger.delay_minutes;
+    return delay ? `When ${windowLabel} (+${delay}m)` : `When ${windowLabel}`;
+  }
+  return describeSchedule(s);
+}
+
+/** Next-fire label for a row, or null when there is nothing worth
+ * showing (disabled, or a plain cron task with no next_run computed).
+ * A limit_reset task that is enabled but has no usable next_run says so
+ * plainly ("limits unavailable") instead of silently showing nothing,
+ * which would look identical to "no reset ever coming" - task-l3 brief. */
+function nextFireLabel(s: ScheduleWithTrigger): string | null {
+  if (!s.enabled) return null;
+  const isLimitReset = s.trigger && s.trigger.kind === 'limit_reset';
+  if (isLimitReset && (s.limits_unavailable || !s.next_run)) return 'limits unavailable';
+  if (!s.next_run) return null;
+  const time = new Date(s.next_run).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+  return `next ${time}`;
+}
+
 interface AllScheduledProps {
   cards: DeviceCard[];
   /** False until /rc/overview has answered at least once (App.tsx). Round
@@ -62,6 +102,13 @@ export function AllScheduled({ cards, hasLoadedCards }: AllScheduledProps) {
         }
       }
     }
+    // task-l3: a limit_reset trigger carries over on copy/move like any
+    // other schedule field - the account's usage windows are shared
+    // across the whole fleet, so "when my limit resets" means the same
+    // thing on the target device. The target's own scheduler seeds its
+    // own last_seen_resets_at marker on first observation, same as any
+    // other brand-new trigger (schedules.create_schedule never trusts a
+    // client-supplied marker).
     const body = {
       name: s.name,
       cron: s.cron,
@@ -72,6 +119,7 @@ export function AllScheduled({ cards, hasLoadedCards }: AllScheduledProps) {
       model: s.model ?? undefined,
       enabled: s.enabled ?? false,
       concurrency: s.concurrency,
+      trigger: (s as ScheduleWithTrigger).trigger ?? null,
     };
     try {
       const res = await api.schedCreate(targetDeviceId, body);
@@ -135,11 +183,12 @@ export function AllScheduled({ cards, hasLoadedCards }: AllScheduledProps) {
               <div style={{ display: 'inline-flex', alignItems: 'center', gap: 5, color: chipColor, fontFamily: FONT_MONO, fontSize: 10, letterSpacing: '.04em', textTransform: 'uppercase', alignSelf: 'flex-start' }}>
                 <Dot color={chipColor} size={5} pulse={d.online} /> {d.name}
               </div>
-              {/* Cron + label */}
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontFamily: FONT_MONO, fontSize: 11, color: RT.textLow }}>
+              {/* Cron/trigger + label + next fire */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontFamily: FONT_MONO, fontSize: 11, color: RT.textLow, flexWrap: 'wrap' }}>
                 <Icons.clock size={10} stroke={RT.textLow} />
-                <span>{describeSchedule(s)}</span>
+                <span>{describeTiming(s)}</span>
                 {s.schedule_label && <span style={{ color: RT.borderHi }}>({s.schedule_label})</span>}
+                {nextFireLabel(s) && <span style={{ color: RT.borderHi }}>&middot; {nextFireLabel(s)}</span>}
               </div>
               {/* Actions */}
               <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>

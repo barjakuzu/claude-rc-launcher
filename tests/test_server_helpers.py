@@ -4,6 +4,7 @@ functions and tested directly here instead."""
 import contextlib
 import http.server
 import io
+import json
 import os
 import sys
 import threading
@@ -14,6 +15,7 @@ import unittest.mock as mock
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import config
+import schedules
 import server
 import store
 
@@ -40,6 +42,75 @@ class EnrichNextRunTest(unittest.TestCase):
         original = {"enabled": True, "cron": None}
         server._enrich_next_run(original)
         self.assertNotIn("next_run", original)
+
+
+class EnrichNextRunLimitResetTest(unittest.TestCase):
+    """task-l3: a limit_reset trigger task's next_run comes from the hub's
+    shared limits view (store.limits_view()'s `primary`) plus
+    delay_minutes, not from cron - and says limits_unavailable rather
+    than guessing when that data isn't there."""
+
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.TemporaryDirectory()
+        server.HUB_STORE = store.Store(os.path.join(self.tmp.name, "hub.db"))
+
+    def tearDown(self):
+        server.HUB_STORE.close()
+        server.HUB_STORE = None
+        self.tmp.cleanup()
+
+    def _schedule(self, **overrides):
+        s = {"id": "s1", "name": "task", "enabled": True, "cron": None,
+             "trigger": {"kind": "limit_reset", "window": "five_hour", "delay_minutes": 0}}
+        s.update(overrides)
+        return s
+
+    def test_no_store_data_yet_reports_limits_unavailable(self):
+        s = server._enrich_next_run(self._schedule())
+        self.assertIsNone(s["next_run"])
+        self.assertTrue(s["limits_unavailable"])
+
+    def test_disabled_trigger_task_has_no_next_run_and_no_lookup_needed(self):
+        s = server._enrich_next_run(self._schedule(enabled=False))
+        self.assertIsNone(s["next_run"])
+
+    def test_available_data_produces_next_run_from_resets_at(self):
+        server.HUB_STORE.upsert_device({"id": "local", "name": "hub", "role": "full",
+                                         "version": "1", "claude_version": "1"})
+        server.HUB_STORE.upsert_account_limits("local", {
+            "available": True, "fetched_at": time.time(),
+            "five_hour": {"percent": 10.0, "resets_at": "2026-01-01T00:00:00Z", "severity": None},
+            "seven_day": None, "scoped": [], "spend": None, "extra_usage": None, "error": None,
+        })
+        s = server._enrich_next_run(self._schedule())
+        self.assertFalse(s["limits_unavailable"])
+        self.assertEqual(s["next_run"], "2026-01-01T00:00:00Z")
+
+    def test_delay_minutes_is_added_to_resets_at(self):
+        server.HUB_STORE.upsert_device({"id": "local", "name": "hub", "role": "full",
+                                         "version": "1", "claude_version": "1"})
+        server.HUB_STORE.upsert_account_limits("local", {
+            "available": True, "fetched_at": time.time(),
+            "five_hour": {"percent": 10.0, "resets_at": "2026-01-01T00:00:00Z", "severity": None},
+            "seven_day": None, "scoped": [], "spend": None, "extra_usage": None, "error": None,
+        })
+        s = server._enrich_next_run(self._schedule(
+            trigger={"kind": "limit_reset", "window": "five_hour", "delay_minutes": 30}))
+        self.assertEqual(s["next_run"], "2026-01-01T00:30:00Z")
+
+    def test_seven_day_window_reads_the_matching_bucket(self):
+        server.HUB_STORE.upsert_device({"id": "local", "name": "hub", "role": "full",
+                                         "version": "1", "claude_version": "1"})
+        server.HUB_STORE.upsert_account_limits("local", {
+            "available": True, "fetched_at": time.time(),
+            "five_hour": {"percent": 10.0, "resets_at": "2026-01-01T00:00:00Z", "severity": None},
+            "seven_day": {"percent": 5.0, "resets_at": "2026-01-08T00:00:00Z", "severity": None},
+            "scoped": [], "spend": None, "extra_usage": None, "error": None,
+        })
+        s = server._enrich_next_run(self._schedule(
+            trigger={"kind": "limit_reset", "window": "seven_day", "delay_minutes": 0}))
+        self.assertEqual(s["next_run"], "2026-01-08T00:00:00Z")
 
 
 class ValidSessionNameTest(unittest.TestCase):
@@ -2050,6 +2121,103 @@ class ProxyRedirectNeverForwardsBasicAuthTest(unittest.TestCase):
         h.send_response = lambda status, *a, **kw: captured.__setitem__("status", status)
         h._proxy_to_device(device)
         self.assertEqual(captured.get("status"), 302)
+
+
+class SchedulesTriggerRouteTest(unittest.TestCase):
+    """task-l3: POST /schedules and /schedules/update validate `trigger`
+    and reject an unknown kind/window rather than silently ignoring it.
+    Drives do_POST for real (auth mocked out, no device targeted so the
+    request is handled locally rather than proxied) against a real
+    schedules.json on a temp path, matching how NullSafeCronTest already
+    covers validate_cron at the function level plus schedules.py's own
+    TriggerCrudTest covering create_schedule/update_schedule directly -
+    this closes the remaining gap: server.py's routes actually calling
+    validate_trigger and turning a bad one into a 400."""
+
+    def setUp(self):
+        import tempfile
+        self.tmpdir = tempfile.mkdtemp()
+        self._orig_sched_file = schedules.SCHEDULES_FILE
+        schedules.SCHEDULES_FILE = os.path.join(self.tmpdir, "schedules.json")
+        self._orig_role = server.config.RC_ROLE
+        server.config.RC_ROLE = "full"
+        self._auth_patch = mock.patch.object(server, "_check_auth", return_value=True)
+        self._auth_patch.start()
+
+    def tearDown(self):
+        self._auth_patch.stop()
+        schedules.SCHEDULES_FILE = self._orig_sched_file
+        server.config.RC_ROLE = self._orig_role
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _post(self, path, body_dict):
+        body = json.dumps(body_dict).encode()
+        h = server.Handler.__new__(server.Handler)
+        h.path = path
+        h.headers = {"Content-Length": str(len(body))}
+        h.client_address = ("127.0.0.1", 12345)
+        h.rfile = io.BytesIO(body)
+        h.wfile = io.BytesIO()
+        captured = {}
+
+        def fake_json(data, code=200, _captured=captured):
+            _captured["data"] = data
+            _captured["code"] = code
+
+        h._json = fake_json
+        h.do_POST()
+        self.assertIn("data", captured, f"{path} did not reach a _json() response")
+        return captured["data"], captured.get("code", 200)
+
+    def test_create_rejects_unknown_trigger_kind(self):
+        data, code = self._post("/schedules", {
+            "name": "t", "trigger": {"kind": "bogus", "window": "five_hour"},
+        })
+        self.assertEqual(code, 400)
+        self.assertIn("trigger", data["message"].lower())
+
+    def test_create_rejects_unknown_window(self):
+        data, code = self._post("/schedules", {
+            "name": "t", "trigger": {"kind": "limit_reset", "window": "monthly"},
+        })
+        self.assertEqual(code, 400)
+
+    def test_create_with_valid_trigger_and_no_cron_succeeds(self):
+        data, code = self._post("/schedules", {
+            "name": "t", "trigger": {"kind": "limit_reset", "window": "five_hour"},
+        })
+        self.assertEqual(code, 200)
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["schedule"]["trigger"]["kind"], "limit_reset")
+        self.assertIsNone(data["schedule"]["cron"])
+
+    def test_create_without_trigger_still_validates_cron(self):
+        data, code = self._post("/schedules", {"name": "t", "cron": "garbage"})
+        self.assertEqual(code, 400)
+        self.assertIn("cron", data["message"].lower())
+
+    def test_update_rejects_unknown_trigger_kind(self):
+        created, _ = self._post("/schedules", {"name": "t", "cron": "0 9 * * *"})
+        sid = created["schedule"]["id"]
+        data, code = self._post("/schedules/update", {
+            "id": sid, "trigger": {"kind": "bogus", "window": "five_hour"},
+        })
+        self.assertEqual(code, 400)
+
+    def test_update_with_valid_trigger_skips_cron_validation(self):
+        created, _ = self._post("/schedules", {"name": "t", "cron": "0 9 * * *"})
+        sid = created["schedule"]["id"]
+        # `cron` left stale/invalid in the same payload - the trigger, once
+        # valid, wins server-side regardless (schedules.update_schedule
+        # forces cron: null), so this must not 400 on the stale cron.
+        data, code = self._post("/schedules/update", {
+            "id": sid, "cron": "not a cron",
+            "trigger": {"kind": "limit_reset", "window": "seven_day"},
+        })
+        self.assertEqual(code, 200)
+        self.assertIsNone(data["schedule"]["cron"])
+        self.assertEqual(data["schedule"]["trigger"]["window"], "seven_day")
 
 
 if __name__ == "__main__":

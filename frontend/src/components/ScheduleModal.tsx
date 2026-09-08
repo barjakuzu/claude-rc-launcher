@@ -8,6 +8,11 @@ import type { Schedule } from '../types';
 
 // ── Cron presets ──────────────────────────────────────────────────────────────
 const MANUAL_PRESET = '__manual__';
+// task-l3: fires once when a Claude usage window resets, instead of on a
+// cron schedule. Slotted into the same preset dropdown as Manual, since
+// it is a third mutually-exclusive way to decide "when does this run"
+// (matching the existing modal idiom rather than adding a parallel control).
+const LIMIT_RESET_PRESET = '__limit_reset__';
 
 // A schedule must send a 5-field cron or an explicit Manual (cron: null) —
 // an empty/blank cron string 400s server-side. Cheap client-side check
@@ -19,6 +24,7 @@ export function isValidCronString(value: string): boolean {
 const CRON_PRESETS: { label: string; value: string }[] = [
   { label: 'Choose a preset…', value: '' },
   { label: 'Manual (run on demand)', value: MANUAL_PRESET },
+  { label: 'When my limit resets', value: LIMIT_RESET_PRESET },
   { label: 'Every hour',          value: '0 * * * *' },
   { label: 'Every 2 hours',       value: '0 */2 * * *' },
   { label: 'Every 6 hours',       value: '0 */6 * * *' },
@@ -60,10 +66,27 @@ const labelStyle: React.CSSProperties = {
   display: 'block',
 };
 
+// ── limit_reset trigger (task-l3) ───────────────────────────────────────────
+// `trigger` isn't on the shared Schedule type (types.ts is owned by a
+// parallel lane for this task), so it is declared locally and intersected
+// in, same pattern as any other optional field a single component needs.
+interface LimitResetTrigger {
+  kind: 'limit_reset';
+  window: 'five_hour' | 'seven_day';
+  delay_minutes?: number;
+  catch_up?: 'latest' | 'none';
+}
+type ScheduleWithTrigger = Schedule & { trigger?: LimitResetTrigger | null };
+
+const RESET_WINDOW_LABEL: Record<'five_hour' | 'seven_day', string> = {
+  five_hour: '5-hour window',
+  seven_day: 'Weekly window',
+};
+
 // ── Component ─────────────────────────────────────────────────────────────────
 export interface ScheduleModalProps {
   deviceId: string;
-  initial?: Schedule | null;
+  initial?: ScheduleWithTrigger | null;
   onClose: () => void;
   onSaved: () => void;
 }
@@ -89,19 +112,31 @@ export function ScheduleModal({ deviceId, initial, onClose, onSaved }: ScheduleM
     initial?.concurrency === 'kill' ? 'kill' : 'skip',
   );
 
-  const [preset,       setPreset]       = useState(initial && !initial.cron ? MANUAL_PRESET : '');
+  const [preset,       setPreset]       = useState(() => {
+    if (initial?.trigger?.kind === 'limit_reset') return LIMIT_RESET_PRESET;
+    if (initial && !initial.cron) return MANUAL_PRESET;
+    return '';
+  });
+  const [resetWindow,  setResetWindow]  = useState<'five_hour' | 'seven_day'>(
+    initial?.trigger?.window === 'seven_day' ? 'seven_day' : 'five_hour',
+  );
+  const [delayMinutes, setDelayMinutes] = useState<number>(
+    typeof initial?.trigger?.delay_minutes === 'number' ? initial.trigger.delay_minutes : 0,
+  );
   const [pending,      setPending]      = useState(false);
   const [error,        setError]        = useState<string | null>(null);
   const [showBrowser,  setShowBrowser]  = useState(false);
 
-  // Manual always sends cron: null (valid). Otherwise a preset or a typed
-  // cron must resolve to a real 5-field expression before Save is allowed.
-  const cronOk = preset === MANUAL_PRESET || isValidCronString(cron);
+  // Manual and "when my limit resets" both always send cron: null (valid).
+  // Otherwise a preset or a typed cron must resolve to a real 5-field
+  // expression before Save is allowed.
+  const cronOk =
+    preset === MANUAL_PRESET || preset === LIMIT_RESET_PRESET || isValidCronString(cron);
 
   // Preset → fill cron input
   function handlePreset(value: string) {
     setPreset(value);
-    if (value === MANUAL_PRESET) {
+    if (value === MANUAL_PRESET || value === LIMIT_RESET_PRESET) {
       setCron('');
     } else if (value) {
       setCron(value);
@@ -141,9 +176,10 @@ export function ScheduleModal({ deviceId, initial, onClose, onSaved }: ScheduleM
     setError(null);
     setPending(true);
     try {
+      const isLimitReset = preset === LIMIT_RESET_PRESET;
       const body = {
         name,
-        cron: preset === MANUAL_PRESET ? null : cron,
+        cron: (preset === MANUAL_PRESET || isLimitReset) ? null : cron,
         prompt,
         instructions_file: instructionsFile || undefined,
         workdir,
@@ -151,6 +187,9 @@ export function ScheduleModal({ deviceId, initial, onClose, onSaved }: ScheduleM
         model:   MODEL_TO_API[model],
         concurrency,
         enabled,
+        trigger: isLimitReset
+          ? { kind: 'limit_reset', window: resetWindow, delay_minutes: delayMinutes }
+          : null,
       };
 
       let result: { ok?: boolean; message?: string };
@@ -248,7 +287,7 @@ export function ScheduleModal({ deviceId, initial, onClose, onSaved }: ScheduleM
           <div>
             <label style={labelStyle}>Cron expression</label>
             <div style={{ display: 'flex', gap: 6 }}>
-              {preset !== MANUAL_PRESET && (
+              {preset !== MANUAL_PRESET && preset !== LIMIT_RESET_PRESET && (
                 <input
                   value={cron}
                   onChange={(e) => { setCron(e.target.value); setPreset(''); }}
@@ -261,8 +300,8 @@ export function ScheduleModal({ deviceId, initial, onClose, onSaved }: ScheduleM
                 onChange={(e) => handlePreset(e.target.value)}
                 style={{
                   ...fieldStyle,
-                  width: preset === MANUAL_PRESET ? '100%' : 'auto',
-                  flex: preset === MANUAL_PRESET ? 1 : 'none',
+                  width: (preset === MANUAL_PRESET || preset === LIMIT_RESET_PRESET) ? '100%' : 'auto',
+                  flex: (preset === MANUAL_PRESET || preset === LIMIT_RESET_PRESET) ? 1 : 'none',
                   cursor: 'pointer',
                   fontSize: 12,
                   paddingRight: 6,
@@ -276,6 +315,42 @@ export function ScheduleModal({ deviceId, initial, onClose, onSaved }: ScheduleM
             {preset === MANUAL_PRESET && (
               <div style={{ fontSize: 11, color: RT.textLow, marginTop: 5, fontFamily: FONT_MONO }}>
                 Manual task - runs only when triggered with "Run now".
+              </div>
+            )}
+            {preset === LIMIT_RESET_PRESET && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 8 }}>
+                <div style={{ display: 'flex', gap: 10 }}>
+                  <div style={{ flex: 1 }}>
+                    <label style={labelStyle}>Limit window</label>
+                    <select
+                      value={resetWindow}
+                      onChange={(e) => setResetWindow(e.target.value as 'five_hour' | 'seven_day')}
+                      style={{ ...fieldStyle, cursor: 'pointer' }}
+                    >
+                      <option value="five_hour">{RESET_WINDOW_LABEL.five_hour}</option>
+                      <option value="seven_day">{RESET_WINDOW_LABEL.seven_day}</option>
+                    </select>
+                  </div>
+                  <div style={{ flex: 1 }}>
+                    <label style={labelStyle}>Delay after reset (min)</label>
+                    <input
+                      type="number"
+                      min={0}
+                      max={240}
+                      value={delayMinutes}
+                      onChange={(e) => {
+                        const n = Math.round(Number(e.target.value));
+                        setDelayMinutes(Number.isFinite(n) ? Math.max(0, Math.min(240, n)) : 0);
+                      }}
+                      style={fieldStyle}
+                    />
+                  </div>
+                </div>
+                <div style={{ fontSize: 11, color: RT.textLow, fontFamily: FONT_MONO }}>
+                  Fires once the account's {resetWindow === 'seven_day' ? 'weekly' : '5-hour'} usage
+                  limit resets{delayMinutes > 0 ? `, delayed ${delayMinutes} minute${delayMinutes === 1 ? '' : 's'}` : ''},
+                  useful for queuing work that should start the moment the window rolls over.
+                </div>
               </div>
             )}
             {!cronOk && (
