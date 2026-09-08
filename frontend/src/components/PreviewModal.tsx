@@ -571,7 +571,11 @@ export function PreviewModal({ deviceId, name, mode, sessionId, onClose }: Previ
           border: fullscreen ? 'none' : `1px solid ${RT.borderHi}`,
           borderRadius: fullscreen ? 0 : 12,
           width: '100%', maxWidth: fullscreen ? '100%' : 1000,
-          height: fullscreen ? (vvH ? `${vvH}px` : '100dvh') : '85vh',
+          // Round 4/7: 100vh can exceed the pinned document's real visible
+          // height (index.html pins body to the viewport and #root to
+          // 100dvh), same fix as ScheduleModal.tsx/ResumeList.tsx/
+          // ErrorBoundary.tsx.
+          height: fullscreen ? (vvH ? `${vvH}px` : '100dvh') : '85dvh',
           display: 'flex', flexDirection: 'column', overflow: 'hidden',
           boxShadow: '0 24px 64px rgba(0,0,0,.5)',
         }}

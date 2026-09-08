@@ -114,6 +114,24 @@ export function deviceEffectiveTokens(
   return sum;
 }
 
+// Fleet-wide session count, summed only across devices that could vouch
+// for their own count. overview.py's card_from_parts reports sessions:
+// null (never 0) for a device it cannot reach, since it genuinely does
+// not know how many sessions are running there. Naively summing with `+`
+// would silently coerce each null to 0 (JS numeric coercion) and just
+// under-count without ever flagging it: the same "undercounted but
+// confident-looking total" failure deviceEffectiveTokens/App.tsx's
+// totalTokens already avoid for the token figure. null devices are left
+// out of the sum; the whole total is null (render a placeholder), never
+// a 0 that looks like a confirmed empty fleet, only when there is at
+// least one card and not a single one has a known count.
+export function totalKnownSessions(cards: { sessions: number | null }[]): number | null {
+  if (cards.length === 0) return 0;
+  const known = cards.map((c) => c.sessions).filter((v): v is number => v != null);
+  if (known.length === 0) return null;
+  return known.reduce((s, v) => s + v, 0);
+}
+
 // Adds an alpha channel to an existing RT/FN oklch(...) token string, for a
 // tinted background or border derived from a palette color. Keeps the
 // derived color tied to its source token instead of duplicating the

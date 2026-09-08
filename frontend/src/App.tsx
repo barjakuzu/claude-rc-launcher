@@ -1,6 +1,6 @@
 // App.tsx — V5 root shell: left rail + main-area detail, or big-card overview grid.
 import { useState, useEffect, useCallback, useMemo } from 'react';
-import { RT, FONT_SANS, FONT_MONO, fmtK, deviceEffectiveTokens, usagePartialFor } from './tokens';
+import { RT, FONT_SANS, FONT_MONO, fmtK, deviceEffectiveTokens, usagePartialFor, totalKnownSessions } from './tokens';
 import { useLayout } from './useLayout';
 import { useFleet } from './hooks/useFleet';
 import { api } from './api';
@@ -117,7 +117,7 @@ export function App() {
     : cards.length === 0 ? 0
     : knownUsages.length === 0 ? null
     : knownUsages.reduce((s, v) => s + v, 0);
-  const totalSessions = cards.reduce((s, c) => s + c.sessions, 0);
+  const totalSessions = totalKnownSessions(cards);
 
   // Handler for cross-device views that want to open a specific device.
   const handleOpenDevice = (id: string) => {
@@ -260,7 +260,12 @@ export function App() {
             onChange={pickMTab}
             onMore={() => setMoreOpen(true)}
             moreOpen={moreOpen}
-            counts={{ devices: cards.length, sessions: totalSessions, scheduled: 0 }}
+            /* MobileNav's count only drives a small presence dot (>0), never
+               rendered as text, so an unknown total (null, some device
+               unreachable) collapsing to 0 here just means no dot: a safe
+               default, not the false "confirmed no sessions" text claim
+               the Sessions tab/strip cells guard against with '—'. */
+            counts={{ devices: cards.length, sessions: totalSessions ?? 0, scheduled: 0 }}
           />
         </>
       ) : null}
@@ -298,17 +303,22 @@ function MobileTopStrip({ cards, totalTokens, hasLoadedCards }: {
   cards: DeviceCard[]; totalTokens: number | null; hasLoadedCards: boolean;
 }) {
   const onlineCount = cards.filter((c) => c.online).length;
-  const totalSessions = cards.reduce((s, c) => s + c.sessions, 0);
+  const totalSessions = totalKnownSessions(cards);
 
   // Round 4: same fabricated-zero gate as Strip.tsx. cards.length is 0
   // both when the fleet is confirmed empty and when /rc/overview simply
   // has not answered yet; only hasLoadedCards tells those apart, and
   // reading the latter as the former showed a confident "Online 0/0" /
-  // "Sessions 0" during the brief pre-load window after mount.
+  // "Sessions 0" during the brief pre-load window after mount. Round 7:
+  // totalSessions is itself null (not 0) when cards has loaded but every
+  // device on it is unreachable, since overview.py now reports sessions:
+  // null rather than 0 for a device it cannot reach (see tokens.ts's
+  // totalKnownSessions) -- that must render the same placeholder as the
+  // pre-load window, not a confident "0".
   type MCell = { label: string; value: string; dot?: string };
   const cells: MCell[] = [
     { label: 'Online',    value: hasLoadedCards ? `${onlineCount}/${cards.length}` : '—/—', dot: hasLoadedCards ? RT.green : undefined },
-    { label: 'Sessions',  value: hasLoadedCards ? String(totalSessions) : '—' },
+    { label: 'Sessions',  value: hasLoadedCards && totalSessions != null ? String(totalSessions) : '—' },
     { label: 'Effective', value: totalTokens != null ? fmtK(totalTokens) : '—' },
   ];
 

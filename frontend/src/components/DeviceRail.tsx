@@ -1,7 +1,7 @@
 // DeviceRail.tsx — V5 left rail: compact device switcher (240px).
 import { useState } from 'react';
 import { RT, FONT_MONO, tintFor, tintSoft, tintEdge, hueForId, kindForOs } from '../tokens';
-import { Dot, Icons, CapBar } from './primitives';
+import { Dot, Icons } from './primitives';
 import type { DeviceCard } from '../types';
 
 interface DeviceRailProps {
@@ -65,13 +65,16 @@ function V5RailItem({ card, active, onClick }: RailItemProps) {
         <Dot color={card.online ? RT.green : RT.textLow} size={6} pulse={card.online} />
       </div>
 
-      {/* Bottom row: cap bar + sessions count */}
+      {/* Bottom row: sessions count. Used to also draw a CapBar off
+          card.loadPct (CPU) right beside this count, where it read as
+          session capacity, the same mistake the token bar already
+          removed from BigCard.tsx/DeviceHero.tsx (Round 4) made. CPU has
+          no bar anywhere in this rail; dropped rather than left borrowed. */}
       <div style={{
         display: 'flex', alignItems: 'center', gap: 7,
         fontFamily: FONT_MONO, fontSize: 10, color: RT.textLow,
       }}>
-        <CapBar pct={card.loadPct} height={2} bg="rgba(255,255,255,.04)" color={hueColor} />
-        <span style={{ whiteSpace: 'nowrap' }}>{card.sessions} sess</span>
+        <span style={{ whiteSpace: 'nowrap' }}>{card.sessions ?? '—'} sess</span>
       </div>
     </button>
   );
