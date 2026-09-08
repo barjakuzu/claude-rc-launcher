@@ -27,7 +27,7 @@ interface AllSessionsProps {
 interface PreviewState { deviceId: string; name: string; sessionId?: string; mode?: string; }
 
 export function AllSessions({ onOpenDevice }: AllSessionsProps) {
-  const { devices, sessions, connected, usingFallback, stale } = useFleet();
+  const { devices, sessions, usingFallback, stale, hasLoaded: fleetLoaded } = useFleet();
   const [pending, setPending] = useState<Record<string, boolean>>({});
   const [preview, setPreview] = useState<PreviewState | null>(null);
   const [rcUrls, setRcUrls] = useState<Record<string, string>>({});
@@ -108,9 +108,15 @@ export function AllSessions({ onOpenDevice }: AllSessionsProps) {
   // Round 5: same fabricated-zero pattern as the strip (App.tsx, Strip.tsx),
   // swept here too rather than left as a smaller, less prominent instance.
   // A zero must mean the same thing everywhere in this app: "confirmed
-  // none," never "we have not heard yet." Mirrors CostView.tsx's own
-  // fleetLoaded computation (the same useFleet, the same three signals).
-  const fleetLoaded = connected || usingFallback || devices.length > 0 || sessions.length > 0;
+  // none," never "we have not heard yet." Round 6: this was originally
+  // connected || usingFallback || devices.length > 0 || sessions.length > 0
+  // (mirroring CostView.tsx), which is the same bug returning through a
+  // different door: usingFallback flips true the instant SSE errors,
+  // before the fallback poll it starts has resolved, so a fast SSE
+  // failure rendered "0 total sessions across 0 devices" and "No active
+  // sessions across devices" as confirmed facts before any real data had
+  // arrived. useFleet's own hasLoaded (aliased to fleetLoaded above) is
+  // the one signal that only means the server has answered at least once.
 
   return (
     <div style={{ flex: 1, overflow: 'auto', display: 'flex', flexDirection: 'column' }}>

@@ -86,13 +86,14 @@ export function App() {
   // both need live per-session usage, and calling useFleet() once here
   // (rather than once per rendered card) avoids opening a redundant SSE
   // connection per device tile.
-  const { devices: fleetDevices, sessions: fleetSessions, connected, usingFallback } = useFleet();
-  // Mirrors CostView.tsx's own fleetLoaded computation: before the fleet
-  // has reported at all (no SSE frame yet, no fallback poll response yet),
-  // an empty sessions array means "we haven't heard," not "confirmed zero
-  // sessions" (reading it as the latter would render a lying 0 during the
-  // loading window, the exact failure mode this round is about removing).
-  const fleetLoaded = connected || usingFallback || fleetDevices.length > 0 || fleetSessions.length > 0;
+  const { devices: fleetDevices, sessions: fleetSessions, hasLoaded: fleetLoaded } = useFleet();
+  // Round 6: this used to be connected || usingFallback ||
+  // fleetDevices.length > 0 || fleetSessions.length > 0, which reads as
+  // "loaded" the instant SSE errors (usingFallback flips true
+  // synchronously, before the fallback poll it starts has resolved), not
+  // once real data has actually arrived. useFleet's own hasLoaded is the
+  // one signal that only ever means the server has told us something at
+  // least once; see useFleet.ts for the full account.
   const usageByDevice = useMemo<Map<string, DeviceUsage>>(() => {
     const m = new Map<string, DeviceUsage>();
     for (const c of cards) {
@@ -200,6 +201,7 @@ export function App() {
               layout={layout}
               onOpen={handleOpen}
               usageByDevice={usageByDevice}
+              hasLoadedCards={hasLoadedCards}
             />
           ) : (
             // Desktop "All devices" overview: Devices / Tasks / Sessions / Config.
@@ -224,7 +226,7 @@ export function App() {
               </div>
               <div style={{ flex: 1, overflow: 'hidden', display: 'flex', minHeight: 0 }}>
                 {desktopView === 'devices' && (
-                  <OverviewGrid cards={cards} layout={layout} onOpen={handleOpen} usageByDevice={usageByDevice} />
+                  <OverviewGrid cards={cards} layout={layout} onOpen={handleOpen} usageByDevice={usageByDevice} hasLoadedCards={hasLoadedCards} />
                 )}
                 {desktopView === 'tasks' && <AllScheduled cards={cards} hasLoadedCards={hasLoadedCards} />}
                 {desktopView === 'sessions' && (
@@ -276,6 +278,13 @@ interface OverviewGridProps {
   layout: Layout;
   onOpen: (id: string) => void;
   usageByDevice: Map<string, DeviceUsage>;
+  /** False until /rc/overview has answered at least once. Round 6: this
+   * view read cards.length === 0 as "still loading" unconditionally, so
+   * its own header sat directly above that assumption showing "Devices ·
+   * 0" (a confirmed count) in the same breath as a body saying "loading...",
+   * two adjacent lines asserting opposite things about the same number.
+   * Both now key off this instead of guessing from the count. */
+  hasLoadedCards: boolean;
 }
 
 import type { Layout } from './useLayout';
@@ -325,7 +334,7 @@ function MobileTopStrip({ cards, totalTokens, hasLoadedCards }: {
   );
 }
 
-function OverviewGrid({ cards, layout, onOpen, usageByDevice }: OverviewGridProps) {
+function OverviewGrid({ cards, layout, onOpen, usageByDevice, hasLoadedCards }: OverviewGridProps) {
   const n = cards.length;
   const cols = layout.mobile ? 1 : layout.tablet ? Math.min(2, n) : Math.min(3, n);
 
@@ -336,7 +345,7 @@ function OverviewGrid({ cards, layout, onOpen, usageByDevice }: OverviewGridProp
           fontSize: 11, color: RT.textDim, letterSpacing: '.14em',
           textTransform: 'uppercase', fontFamily: FONT_MONO,
         }}>
-          Devices · {n}
+          Devices · {hasLoadedCards ? n : '—'}
         </div>
         {!layout.mobile && (
           <div style={{ fontSize: 11, color: RT.textLow, fontFamily: FONT_MONO }}>
@@ -346,9 +355,13 @@ function OverviewGrid({ cards, layout, onOpen, usageByDevice }: OverviewGridProp
         <div style={{ flex: 1 }} />
       </div>
 
-      {n === 0 ? (
+      {!hasLoadedCards ? (
         <div style={{ padding: 40, textAlign: 'center', color: RT.textLow, fontFamily: FONT_MONO, fontSize: 13 }}>
           loading…
+        </div>
+      ) : n === 0 ? (
+        <div style={{ padding: 40, textAlign: 'center', color: RT.textLow, fontFamily: FONT_MONO, fontSize: 13 }}>
+          No devices connected.
         </div>
       ) : (
         <div style={{

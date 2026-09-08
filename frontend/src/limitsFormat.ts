@@ -63,16 +63,26 @@ export function isWindowStale(resetsAt: string | null | undefined, nowMs: number
 // last successful fetch, the one clock that keeps advancing regardless of
 // what the server last said, so adding how much client time has passed
 // since then to the server's own snapshot age gives the true current age.
-// Both inputs are required: either being unknown means the age itself is
-// unknown, which callers must treat as "cannot vouch for this", not as
-// fresh.
+//
+// Round 6: the original version required BOTH inputs, returning null (and
+// therefore "not stale") whenever baseAgeSeconds alone was null or the
+// devices[] row it comes from was simply missing from a response, which
+// is Critical 1 again through a different input: a two-hour-dead endpoint
+// whose devices[] row happened to drop out still showed 56/80 percent
+// with no marker. lastOkMs is sufficient on its own to prove a floor: we
+// know for certain at least (now - lastOkMs) has passed since data last
+// arrived, whether or not the server told us anything about its own
+// snapshot's age. Only a lastOkMs of null (we have never once heard back)
+// is genuinely unknown; everything else derives at least that floor.
 export function deriveAgeSeconds(
   baseAgeSeconds: number | null | undefined,
   lastOkMs: number | null,
   nowMs: number,
 ): number | null {
-  if (baseAgeSeconds == null || lastOkMs == null) return null;
-  return baseAgeSeconds + Math.max(0, (nowMs - lastOkMs) / 1000);
+  if (lastOkMs == null) return null;
+  const elapsedSinceLastOk = Math.max(0, (nowMs - lastOkMs) / 1000);
+  if (baseAgeSeconds == null) return elapsedSinceLastOk;
+  return baseAgeSeconds + elapsedSinceLastOk;
 }
 
 export const STALE_READING_AGE_SECONDS = 120;
