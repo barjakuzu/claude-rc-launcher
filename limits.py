@@ -33,11 +33,11 @@ anything below:
     (fetch_fn/read_token_fn/path/runner) with the real thing as the
     default -- so a test can exercise every code path here without ever
     touching ~/.claude/.credentials.json or a real Keychain.
-  - The fetch is made through _NO_REDIRECT_OPENER, never bare
+  - The fetch is made through noredirect.NO_REDIRECT_OPENER, never bare
     urllib.request.urlopen: urlopen's default opener follows redirects
     and RE-SENDS the Authorization header to wherever the redirect
     points, which would hand the bearer token to a foreign origin. See
-    _NoRedirectHandler and _fetch_from_api.
+    noredirect.py and _fetch_from_api.
 
 Fix round 1 (security review) changed: redirects are now refused outright
 (Critical); the 60s cache/fetch is now single-flight under a lock
@@ -47,6 +47,16 @@ response with none of the recognised keys is no longer reported as
 available (Important 3); a socket-level timeout's error string is
 normalised across Python versions (Minor); five_hour/seven_day now carry
 `severity`, sourced from the matching `limits[]` row (contract amendment).
+
+Fix round 2 changed: _spend/_extra_usage now return None (not a
+zero/false-filled dict) when every field they'd extract is None, closing
+the same "invented reading becomes primary" gap Important 3 closed for
+the top-level object (Low); the no-redirect opener moved into its own
+noredirect.py module so fleetpoll.py, overview.py and server.py -- which
+had the exact same bare-urlopen bug sending the hub's device Basic auth
+password -- can share it instead of each duplicating it (see noredirect.py
+docstring); _read_token_linux's docstring now states its timeout residual
+explicitly rather than growing timeout machinery for a plain file read.
 """
 import json
 import os
@@ -56,6 +66,8 @@ import sys
 import threading
 import time
 import urllib.request
+
+import noredirect
 
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 CREDENTIALS_PATH_LINUX = "~/.claude/.credentials.json"
@@ -70,25 +82,14 @@ FETCH_TIMEOUT_SECONDS = 5
 # handful of small numbers, never a bulk payload.
 MAX_RESPONSE_BYTES = 1 * 1024 * 1024
 
-
-class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
-    """Critical (fix round 1): urlopen()'s default HTTPRedirectHandler
-    follows a 3xx and re-sends every request header, Authorization
-    included, to the new (possibly foreign, possibly plaintext-http)
-    origin. The reference curl implementation this module mirrors has no
-    -L, so following redirects here was a divergence from it in the
-    unsafe direction. redirect_request() returning None tells urllib to
-    NOT build a follow-up request at all -- the original response
-    surfaces as a plain urllib.error.HTTPError carrying the 3xx status,
-    and no second request is ever made."""
-
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        return None
-
-
-# Built once at import time (handler instances are stateless) and reused
-# for every call -- see _fetch_from_api.
-_NO_REDIRECT_OPENER = urllib.request.build_opener(_NoRedirectHandler)
+# Fix round 2: was this module's own _NoRedirectHandler/_NO_REDIRECT_OPENER,
+# now shared via noredirect.py (fleetpoll.py, overview.py and server.py all
+# had the same bare-urlopen redirect bug against a DIFFERENT credential --
+# the hub's own Basic auth password to a device -- so one shared opener
+# replaces four separate copies). Kept under this name so every existing
+# call site and test in this module (limits._NO_REDIRECT_OPENER) still
+# resolves without change.
+_NO_REDIRECT_OPENER = noredirect.NO_REDIRECT_OPENER
 
 # Important 1 (fix round 1): guards the whole cache-check-and-maybe-fetch
 # body in get_limits(), single-flight style -- same idea agents.py's
@@ -249,28 +250,63 @@ def _scoped_rows(raw_limits):
 
 
 def _spend(raw_spend):
+    """{"used": {...}, "limit": ..., "percent": ..., "severity": ...} ->
+    the CONTRACT.md `spend` shape, or None. Low (fix round 2): every field
+    here already degrades to None on its own for a missing/malformed
+    source value (_int_or_none/_str_or_none/_num_or_none never invent a
+    number or string) -- the ONE exception used to be `percent`, which
+    defaulted to 0.0 whenever it couldn't be read. That meant a body like
+    {"spend": {}} produced {"used_minor": None, ..., "percent": 0.0,
+    ...}: a dict that LOOKS like real data (a real, if zero, spend
+    reading) even though nothing was actually present, exactly the
+    "invented reading becomes primary and displaces a good one" failure
+    Important 3 (fix round 1) already closed for the top-level object.
+    Dropping the 0.0 default makes every field here uniformly None when
+    the source is empty, so the "return None when every field is None"
+    check below now actually fires instead of being permanently
+    defeated by one field that could never be null."""
     if not isinstance(raw_spend, dict):
         return None
     used = raw_spend.get("used")
     used = used if isinstance(used, dict) else {}
-    percent = _num_or_none(raw_spend.get("percent"))
-    return {
+    result = {
         "used_minor": _int_or_none(used.get("amount_minor")),
         "currency": _str_or_none(used.get("currency")),
         "exponent": _int_or_none(used.get("exponent")),
         "limit_minor": _int_or_none(raw_spend.get("limit")),
-        "percent": percent if percent is not None else 0.0,
+        "percent": _num_or_none(raw_spend.get("percent")),
         "severity": _str_or_none(raw_spend.get("severity")),
     }
+    if all(v is None for v in result.values()):
+        return None
+    return result
 
 
 def _extra_usage(raw_extra):
+    """{"is_enabled": ..., "utilization": ..., "spend_limit_reached": ...}
+    -> the CONTRACT.md `extra_usage` shape, or None. Low (fix round 2):
+    `enabled`/`spend_limit_reached` are real, non-nullable booleans in
+    the CONTRACT shape once data is present (an explicit "is_enabled":
+    false IS a real reading, not a missing one), so they cannot simply be
+    left as None the way `_spend`'s fields are above -- bool(None) is
+    False, not None, which would defeat an all-None check run against
+    the COERCED output the same way the removed 0.0 default defeated
+    `_spend`'s. The "is every field actually absent" check below runs
+    against the RAW values instead (an absent key's .get() default IS
+    None; an explicitly-present `false` is NOT None), so {"extra_usage":
+    {}} correctly returns None while {"extra_usage": {"is_enabled":
+    false}} still returns a real dict with enabled=False."""
     if not isinstance(raw_extra, dict):
         return None
+    raw_enabled = raw_extra.get("is_enabled")
+    raw_utilization = raw_extra.get("utilization")
+    raw_spend_limit_reached = raw_extra.get("spend_limit_reached")
+    if raw_enabled is None and raw_utilization is None and raw_spend_limit_reached is None:
+        return None
     return {
-        "enabled": bool(raw_extra.get("is_enabled")),
-        "utilization": _num_or_none(raw_extra.get("utilization")),
-        "spend_limit_reached": bool(raw_extra.get("spend_limit_reached")),
+        "enabled": bool(raw_enabled),
+        "utilization": _num_or_none(raw_utilization),
+        "spend_limit_reached": bool(raw_spend_limit_reached),
     }
 
 
@@ -332,10 +368,27 @@ def _read_token_linux(path=None):
     """Reads ~/.claude/.credentials.json. `path` is an injection seam for
     tests ONLY -- CONTRACT.md: "No test may read a real credentials
     file"; a test that wants to exercise this function passes its own
-    temp-file fixture here rather than relying on the real default. A
-    plain file read has no meaningful timeout of its own (unlike the
-    macOS Keychain subprocess below), so this takes no `timeout`
-    argument."""
+    temp-file fixture here rather than relying on the real default.
+
+    Timeout residual (Low, fix round 2): this takes no `timeout` argument
+    on purpose. `open()`/`json.load()` are plain stdlib file I/O with no
+    built-in deadline, and there is no portable, dependency-free way to
+    bound an arbitrary blocking syscall from pure Python without real
+    machinery (a watchdog thread killing the read out from under itself,
+    a signal-based alarm that does not exist on Windows and is unsafe to
+    mix with threads, or a subprocess wrapper) -- meaningfully heavier
+    than the 25-30 lines the rest of this module spends on the actual
+    feature. A stalled local read (a wedged NFS/network home directory
+    mount, say) can therefore overrun the 5 second budget Important 2
+    (fix round 1) otherwise holds `_fetch_from_api` to on Linux, where
+    this is the only credential source. This is accepted as a known,
+    stated residual rather than solved: it is the same class of risk any
+    other synchronous file read in this codebase already carries (see
+    usage.py's transcript reads, sessions.py's session-state reads),
+    none of which are timeout-bounded either, and unlike the macOS
+    Keychain path (a subprocess, which DOES have a real, cheap timeout
+    parameter -- see _read_token_macos) there is no equally cheap fix
+    available here."""
     resolved = path if path is not None else os.path.expanduser(CREDENTIALS_PATH_LINUX)
     try:
         with open(resolved, "r") as f:
@@ -412,7 +465,8 @@ def _fetch_from_api(timeout, read_token_fn=None):
     `read_token_fn`, if given, must accept a `timeout` keyword argument
     -- every test double in tests/test_limits.py does; defaults to
     _read_token, which forwards it to the macOS branch only (a Linux
-    file read has no use for it)."""
+    file read has no use for it -- see _read_token_linux's own docstring
+    for the timeout residual that leaves on Linux specifically)."""
     read_token = read_token_fn or _read_token
     start = time.monotonic()
     token = read_token(timeout=timeout)

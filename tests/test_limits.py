@@ -236,6 +236,44 @@ class ParseUsageResponseTest(unittest.TestCase):
         self.assertNotIn("used_credits", out["extra_usage"])
         self.assertNotIn("user_disabled", out["extra_usage"])
 
+    def test_empty_spend_dict_returns_none_not_an_invented_zero(self):
+        # Low, fix round 2: {"spend": {}} used to produce {"used_minor":
+        # None, ..., "percent": 0.0, ...} -- a dict that looks like a
+        # real, if zero, reading even though nothing was present.
+        self.assertIsNone(limits._spend({}))
+
+    def test_spend_with_only_limit_present_still_returns_a_real_dict(self):
+        # One recognised field present is enough to keep this a real
+        # reading -- percent stays None rather than being invented as
+        # 0.0, but the dict itself is not thrown away.
+        out = limits._spend({"limit": 5000})
+        self.assertIsNotNone(out)
+        self.assertEqual(out["limit_minor"], 5000)
+        self.assertIsNone(out["percent"])
+
+    def test_empty_extra_usage_dict_returns_none_not_invented_false(self):
+        # Low, fix round 2: {"extra_usage": {}} used to produce
+        # {"enabled": False, "utilization": None, "spend_limit_reached":
+        # False} -- bool(None) collapsing to False defeated an all-None
+        # check run against the coerced output.
+        self.assertIsNone(limits._extra_usage({}))
+
+    def test_extra_usage_explicit_false_is_not_treated_as_absent(self):
+        # An explicit is_enabled: false is real data, not "nothing was
+        # present" -- must still return a dict, not None.
+        out = limits._extra_usage({"is_enabled": False})
+        self.assertIsNotNone(out)
+        self.assertIs(out["enabled"], False)
+
+    def test_response_with_only_empty_spend_and_extra_usage_raises(self):
+        # End-to-end proof: a body carrying nothing but {"spend": {},
+        # "extra_usage": {}} must trip the SAME Important 3 (fix round 1)
+        # gate as a response with no recognised keys at all -- it must
+        # never reach get_limits() as available=true and become primary.
+        raw = {"spend": {}, "extra_usage": {}}
+        with self.assertRaises(ValueError):
+            limits._parse_usage_response(raw, now=1000.0)
+
     def test_missing_five_hour_becomes_none_not_a_raise(self):
         raw = self._raw()
         del raw["five_hour"]
