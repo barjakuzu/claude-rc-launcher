@@ -15,6 +15,7 @@ import urllib.request
 import devices
 import fleet
 import guard
+import noredirect
 import store
 
 # Imported lazily inside _ingest (not at module load) to avoid a hard
@@ -57,7 +58,15 @@ def _default_http_get(base_url, path, auth_user="", auth_pass="", since=None, ti
         tok = base64.b64encode(f"{auth_user}:{auth_pass}".encode()).decode()
         req.add_header("Authorization", f"Basic {tok}")
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
+        # Fix round 2: noredirect.NO_REDIRECT_OPENER, never bare
+        # urllib.request.urlopen -- urlopen's default opener follows a
+        # redirect and RE-SENDS the Authorization header (this hub's own
+        # Basic auth password for this device, straight out of
+        # devices.json) to wherever the redirect points. A device
+        # answering with a 302 could otherwise have this password
+        # forwarded anywhere, over plaintext http included. See
+        # noredirect.py.
+        with noredirect.NO_REDIRECT_OPENER.open(req, timeout=timeout) as r:
             data = r.read(MAX_RESPONSE_BYTES + 1)
     except urllib.error.HTTPError as e:
         if e.code in (404, 501):

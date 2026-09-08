@@ -4,6 +4,8 @@ import base64, json, urllib.request, urllib.error
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlparse
 
+import noredirect
+
 
 def card_from_parts(device, sessions, stats, online=None):
     """Build one grid card. sessions/stats are None when the device is unreachable.
@@ -44,7 +46,12 @@ def _fetch(base_url, path, auth_user, auth_pass, timeout=3):
     if auth_user or auth_pass:
         tok = base64.b64encode(f"{auth_user}:{auth_pass}".encode()).decode()
         req.add_header("Authorization", f"Basic {tok}")
-    with urllib.request.urlopen(req, timeout=timeout) as r:
+    # Fix round 2: noredirect.NO_REDIRECT_OPENER, never bare
+    # urllib.request.urlopen -- see noredirect.py. The default opener
+    # would re-send this device's Basic auth password to wherever a 302
+    # points, and that password (from devices.json) is reused across
+    # every request to this device.
+    with noredirect.NO_REDIRECT_OPENER.open(req, timeout=timeout) as r:
         return json.loads(r.read())
 
 

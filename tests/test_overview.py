@@ -1,4 +1,5 @@
-import os, sys, unittest
+import http.server
+import os, sys, threading, unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import overview
 
@@ -207,6 +208,84 @@ class BuildConfigMatrixTest(unittest.TestCase):
         matrix = overview.build_config_matrix(
             hub, [{"id": "dev2", "base_url": "http://x"}], fetch=lambda d: other)
         self.assertEqual(matrix["skew"]["dev2"], [])
+
+
+class _RedirectHandler(http.server.BaseHTTPRequestHandler):
+    """Answers every request with a 302 to `redirect_target` (set by the
+    test before starting the server)."""
+    redirect_target = None
+
+    def log_message(self, *a, **k):
+        pass
+
+    def do_GET(self):
+        self.send_response(302)
+        self.send_header("Location", self.redirect_target)
+        self.end_headers()
+
+
+class _AttackerHandler(http.server.BaseHTTPRequestHandler):
+    """Records every request it receives (headers included)."""
+    hits = []
+
+    def log_message(self, *a, **k):
+        pass
+
+    def do_GET(self):
+        _AttackerHandler.hits.append(dict(self.headers))
+        body = b"{}"
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+class RedirectNeverForwardsBasicAuthTest(unittest.TestCase):
+    """Fix round 2, Important: overview._fetch sends this hub's own Basic
+    auth password for a device (from devices.json) on every call. Bare
+    urlopen would re-send that header to wherever a device's 302 points
+    -- proven here with two real loopback HTTP servers, same as
+    tests/test_limits.py proves it for the OAuth token."""
+
+    def setUp(self):
+        _AttackerHandler.hits = []
+        self.attacker = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _AttackerHandler)
+        self.attacker_thread = threading.Thread(target=self.attacker.serve_forever, daemon=True)
+        self.attacker_thread.start()
+        attacker_port = self.attacker.server_address[1]
+        _RedirectHandler.redirect_target = f"http://127.0.0.1:{attacker_port}/stolen"
+
+        self.origin = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _RedirectHandler)
+        self.origin_thread = threading.Thread(target=self.origin.serve_forever, daemon=True)
+        self.origin_thread.start()
+        self.origin_base_url = f"http://127.0.0.1:{self.origin.server_address[1]}"
+
+    def tearDown(self):
+        self.origin.shutdown()
+        self.origin_thread.join(timeout=5)
+        self.origin.server_close()
+        self.attacker.shutdown()
+        self.attacker_thread.join(timeout=5)
+        self.attacker.server_close()
+
+    def test_302_to_another_origin_never_forwards_the_device_password(self):
+        with self.assertRaises(Exception):
+            overview._fetch(
+                self.origin_base_url, "/rc/sessions",
+                "hub", "super-secret-device-password")
+        self.assertEqual(_AttackerHandler.hits, [],
+                          "the redirect target must never receive a request, "
+                          "and the device password must never reach it")
+
+    def test_fetch_remote_card_reports_offline_not_a_raise(self):
+        # fetch_remote_card is the real caller; it must degrade to
+        # online=False rather than letting the HTTPError escape.
+        device = {"id": "dev1", "name": "dev1", "base_url": self.origin_base_url,
+                  "auth_user": "hub", "auth_pass": "super-secret-device-password"}
+        card = overview.fetch_remote_card(device)
+        self.assertFalse(card["online"])
+        self.assertEqual(_AttackerHandler.hits, [])
 
 
 if __name__ == "__main__":

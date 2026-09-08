@@ -2,9 +2,11 @@
 live socket to construct, so logic worth covering gets extracted into small
 functions and tested directly here instead."""
 import contextlib
+import http.server
 import io
 import os
 import sys
+import threading
 import time
 import unittest
 import unittest.mock as mock
@@ -1874,7 +1876,7 @@ class ProxiedRequestAuditTest(unittest.TestCase):
     def test_proxied_mutating_post_writes_one_audit_row_with_device_and_proxied_marker(self):
         body = b'{"name": "rc-foo"}'
         h = self._make_handler("/rc/stop", body)
-        with mock.patch.object(server.urllib.request, "urlopen",
+        with mock.patch.object(server.noredirect.NO_REDIRECT_OPENER, "open",
                                 return_value=self._fake_response()):
             h.do_POST()
         rows = server.HUB_STORE.recent_audit()
@@ -1886,7 +1888,7 @@ class ProxiedRequestAuditTest(unittest.TestCase):
     def test_proxied_resume_start_records_session_id_as_target(self):
         body = b'{"session_id": "abc-123", "title": "My Session"}'
         h = self._make_handler("/rc/resume/start", body)
-        with mock.patch.object(server.urllib.request, "urlopen",
+        with mock.patch.object(server.noredirect.NO_REDIRECT_OPENER, "open",
                                 return_value=self._fake_response()):
             h.do_POST()
         rows = server.HUB_STORE.recent_audit()
@@ -1896,7 +1898,7 @@ class ProxiedRequestAuditTest(unittest.TestCase):
     def test_proxied_schedules_update_prefers_id_over_name(self):
         body = b'{"id": "42", "name": "should-not-win"}'
         h = self._make_handler("/rc/schedules/update", body)
-        with mock.patch.object(server.urllib.request, "urlopen",
+        with mock.patch.object(server.noredirect.NO_REDIRECT_OPENER, "open",
                                 return_value=self._fake_response()):
             h.do_POST()
         rows = server.HUB_STORE.recent_audit()
@@ -1906,7 +1908,7 @@ class ProxiedRequestAuditTest(unittest.TestCase):
     def test_proxied_get_writes_no_audit_row(self):
         h = self._make_handler("/rc/stop", b"")
         h.command = "GET"
-        with mock.patch.object(server.urllib.request, "urlopen",
+        with mock.patch.object(server.noredirect.NO_REDIRECT_OPENER, "open",
                                 return_value=self._fake_response()):
             h.do_GET()
         rows = server.HUB_STORE.recent_audit()
@@ -1924,7 +1926,7 @@ class ProxiedRequestAuditTest(unittest.TestCase):
         h._json = fake_json
         with mock.patch.object(server.HUB_STORE, "add_audit",
                                 side_effect=RuntimeError("boom")):
-            with mock.patch.object(server.urllib.request, "urlopen",
+            with mock.patch.object(server.noredirect.NO_REDIRECT_OPENER, "open",
                                     return_value=self._fake_response()):
                 h.do_POST()
         rows = server.HUB_STORE.recent_audit()
@@ -1953,6 +1955,101 @@ class ProxiedRequestAuditTest(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["device_id"], "local")
         self.assertNotIn("proxied", rows[0]["detail"])
+
+
+class _RedirectHandler(http.server.BaseHTTPRequestHandler):
+    """Answers every request with a 302 to `redirect_target` (set by the
+    test before starting the server)."""
+    redirect_target = None
+
+    def log_message(self, *a, **k):
+        pass
+
+    def do_GET(self):
+        self.send_response(302)
+        self.send_header("Location", self.redirect_target)
+        self.end_headers()
+
+
+class _AttackerHandler(http.server.BaseHTTPRequestHandler):
+    """Records every request it receives (headers included)."""
+    hits = []
+
+    def log_message(self, *a, **k):
+        pass
+
+    def do_GET(self):
+        _AttackerHandler.hits.append(dict(self.headers))
+        body = b"{}"
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+class ProxyRedirectNeverForwardsBasicAuthTest(unittest.TestCase):
+    """Fix round 2, Important: _proxy_to_device sends this hub's own
+    Basic auth password for a device (from devices.json) on every
+    forwarded request. Bare urlopen would re-send that header to
+    wherever a device's 302 points -- proven here with two real loopback
+    HTTP servers, same as tests/test_limits.py proves it for the OAuth
+    token."""
+
+    def setUp(self):
+        _AttackerHandler.hits = []
+        self.attacker = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _AttackerHandler)
+        self.attacker_thread = threading.Thread(target=self.attacker.serve_forever, daemon=True)
+        self.attacker_thread.start()
+        attacker_port = self.attacker.server_address[1]
+        _RedirectHandler.redirect_target = f"http://127.0.0.1:{attacker_port}/stolen"
+
+        self.origin = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _RedirectHandler)
+        self.origin_thread = threading.Thread(target=self.origin.serve_forever, daemon=True)
+        self.origin_thread.start()
+        self.origin_base_url = f"http://127.0.0.1:{self.origin.server_address[1]}"
+
+    def tearDown(self):
+        self.origin.shutdown()
+        self.origin_thread.join(timeout=5)
+        self.origin.server_close()
+        self.attacker.shutdown()
+        self.attacker_thread.join(timeout=5)
+        self.attacker.server_close()
+
+    def _make_handler(self):
+        h = server.Handler.__new__(server.Handler)
+        h.path = "/rc/fleet"
+        h.headers = {}
+        h.client_address = ("127.0.0.1", 12345)
+        h.rfile = io.BytesIO(b"")
+        h.wfile = io.BytesIO()
+        h.command = "GET"
+        h.send_response = lambda *a, **kw: None
+        h.send_header = lambda *a, **kw: None
+        h.end_headers = lambda *a, **kw: None
+        return h
+
+    def test_302_to_another_origin_never_forwards_the_device_password(self):
+        device = {"id": "dev1", "base_url": self.origin_base_url,
+                  "auth_user": "hub", "auth_pass": "super-secret-device-password"}
+        h = self._make_handler()
+        h._proxy_to_device(device)
+        self.assertEqual(_AttackerHandler.hits, [],
+                          "the redirect target must never receive a request, "
+                          "and the device password must never reach it")
+
+    def test_redirect_is_relayed_to_the_caller_not_silently_followed(self):
+        # The hub must not silently follow the redirect on the caller's
+        # behalf using its own stored device credential -- the original
+        # 302 is relayed to whoever called the hub instead.
+        device = {"id": "dev1", "base_url": self.origin_base_url,
+                  "auth_user": "hub", "auth_pass": "super-secret-device-password"}
+        h = self._make_handler()
+        captured = {}
+        h.send_response = lambda status, *a, **kw: captured.__setitem__("status", status)
+        h._proxy_to_device(device)
+        self.assertEqual(captured.get("status"), 302)
 
 
 if __name__ == "__main__":

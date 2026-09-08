@@ -52,6 +52,7 @@ from devices import (
     get_device, list_devices_public, load_devices, get_local_name, rename_device,
 )
 import configreport
+import noredirect
 import overview
 import store
 import ws as ws_terminal
@@ -1245,7 +1246,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
             token = base64.b64encode(f"{user}:{pw}".encode()).decode()
             req.add_header("Authorization", f"Basic {token}")
         try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
+            # Fix round 2: noredirect.NO_REDIRECT_OPENER, never bare
+            # urllib.request.urlopen -- urlopen's default opener follows
+            # a redirect and RE-SENDS the Authorization header (this
+            # device's Basic auth password, stored in plaintext in
+            # devices.json and reused across every request to it) to
+            # wherever the redirect points. A 302 now comes back as an
+            # HTTPError below and is relayed to the caller as-is, same as
+            # any other status this device answers with -- the hub must
+            # never silently follow a redirect on the caller's behalf
+            # using its own stored device credential.
+            with noredirect.NO_REDIRECT_OPENER.open(req, timeout=30) as resp:
                 data, status = resp.read(), resp.status
                 resp_ct = resp.headers.get("Content-Type", "application/json")
         except urllib.error.HTTPError as e:

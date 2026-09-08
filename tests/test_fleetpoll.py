@@ -1,5 +1,7 @@
+import http.server
 import os
 import tempfile
+import threading
 import time
 import unittest
 import urllib.error
@@ -11,6 +13,37 @@ import store
 
 def _fake_store(tmp_path):
     return store.Store(os.path.join(tmp_path, "hub.db"))
+
+
+class _RedirectHandler(http.server.BaseHTTPRequestHandler):
+    """Answers every request with a 302 to `redirect_target` (set by the
+    test before starting the server)."""
+    redirect_target = None
+
+    def log_message(self, *a, **k):
+        pass
+
+    def do_GET(self):
+        self.send_response(302)
+        self.send_header("Location", self.redirect_target)
+        self.end_headers()
+
+
+class _AttackerHandler(http.server.BaseHTTPRequestHandler):
+    """Records every request it receives (headers included)."""
+    hits = []
+
+    def log_message(self, *a, **k):
+        pass
+
+    def do_GET(self):
+        _AttackerHandler.hits.append(dict(self.headers))
+        body = b"{}"
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
 
 class PollOnceTest(unittest.TestCase):
@@ -289,7 +322,7 @@ class MaxResponseSizeTest(unittest.TestCase):
             def __exit__(self, *a):
                 return False
 
-        with patch("fleetpoll.urllib.request.urlopen", return_value=FakeResponse()):
+        with patch("fleetpoll.noredirect.NO_REDIRECT_OPENER.open", return_value=FakeResponse()):
             with self.assertRaises(ValueError):
                 fleetpoll._default_http_get("http://example.com", "/rc/fleet")
 
@@ -307,9 +340,48 @@ class MaxResponseSizeTest(unittest.TestCase):
             def __exit__(self, *a):
                 return False
 
-        with patch("fleetpoll.urllib.request.urlopen", return_value=FakeResponse()):
+        with patch("fleetpoll.noredirect.NO_REDIRECT_OPENER.open", return_value=FakeResponse()):
             result = fleetpoll._default_http_get("http://example.com", "/rc/fleet")
         self.assertEqual(result, {"ok": True})
+
+
+class RedirectNeverForwardsBasicAuthTest(unittest.TestCase):
+    """Fix round 2, Important: _default_http_get sends this hub's own
+    Basic auth password for a device (from devices.json) on every call.
+    Bare urlopen would re-send that header to wherever a device's 302
+    points -- proven here with two real loopback HTTP servers, the same
+    way tests/test_limits.py proves it for the OAuth token."""
+
+    def setUp(self):
+        _AttackerHandler.hits = []
+        self.attacker = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _AttackerHandler)
+        self.attacker_thread = threading.Thread(target=self.attacker.serve_forever, daemon=True)
+        self.attacker_thread.start()
+        attacker_port = self.attacker.server_address[1]
+        _RedirectHandler.redirect_target = f"http://127.0.0.1:{attacker_port}/stolen"
+
+        self.origin = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _RedirectHandler)
+        self.origin_thread = threading.Thread(target=self.origin.serve_forever, daemon=True)
+        self.origin_thread.start()
+        self.origin_base_url = f"http://127.0.0.1:{self.origin.server_address[1]}"
+
+    def tearDown(self):
+        self.origin.shutdown()
+        self.origin_thread.join(timeout=5)
+        self.origin.server_close()
+        self.attacker.shutdown()
+        self.attacker_thread.join(timeout=5)
+        self.attacker.server_close()
+
+    def test_302_to_another_origin_never_forwards_the_device_password(self):
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            fleetpoll._default_http_get(
+                self.origin_base_url, "/rc/fleet",
+                auth_user="hub", auth_pass="super-secret-device-password")
+        self.assertEqual(ctx.exception.code, 302)
+        self.assertEqual(_AttackerHandler.hits, [],
+                          "the redirect target must never receive a request, "
+                          "and the device password must never reach it")
 
 
 class LegacyFleetFallbackTest(unittest.TestCase):
