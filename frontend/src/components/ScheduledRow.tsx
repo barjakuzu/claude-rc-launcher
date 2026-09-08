@@ -205,13 +205,14 @@ export function ScheduledRow({ s, deviceId, mobile = false, cards, onChanged, on
 
       {/* Col 3: Actions — Run now (primary) + ⋯ for Edit / Delete */}
       <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
-        <V5IconButton label="Run now" accent={RT.green} pending={pending} onClick={handleFire}>
+        <V5IconButton label="Run now" accent={RT.green} mobile={mobile} pending={pending} onClick={handleFire}>
           <Icons.play size={12} />
         </V5IconButton>
 
         <div ref={menuRef} style={{ position: 'relative' }}>
           <V5IconButton
             label="More options"
+            mobile={mobile}
             pending={pending}
             onClick={() => {
               if (!menuOpen && menuRef.current) setMenuPos(fixedMenuPos(menuRef.current));

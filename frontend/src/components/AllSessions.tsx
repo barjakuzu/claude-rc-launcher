@@ -111,7 +111,7 @@ export function AllSessions({ onOpenDevice }: AllSessionsProps) {
         subtitle={`${sessions.length} total session${sessions.length !== 1 ? 's' : ''} · across ${deviceCount} device${deviceCount !== 1 ? 's' : ''}${connectionNote}`}
         title="Sessions"
         right={
-          <button style={{ background: RT.panel, border: `1px solid ${RT.border}`, borderRadius: 7, width: 34, height: 34, display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }}>
+          <button style={{ background: RT.panel, border: `1px solid ${RT.border}`, borderRadius: 7, width: 44, height: 44, display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }}>
             <Icons.filter size={14} stroke={RT.textDim} />
           </button>
         }
@@ -220,8 +220,12 @@ export function AllSessions({ onOpenDevice }: AllSessionsProps) {
                 )}
               </div>
               {/* Actions: Preview | Restart | Stop | RC — gated on field
-                  presence (pid/tmux/rc_url), not on isExternal alone. */}
-              <div onClick={(e) => e.stopPropagation()} style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                  presence (pid/tmux/rc_url), not on isExternal alone.
+                  flexWrap: at 44px touch targets, the longest combination
+                  (Preview + "Open on claude.ai" + More + Stop) can exceed
+                  a 390px card's width — wraps to a second line instead of
+                  overflowing the card horizontally. */}
+              <div onClick={(e) => e.stopPropagation()} style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
                 {!isExternal && (
                   <>
                     <button
@@ -284,7 +288,7 @@ export function AllSessions({ onOpenDevice }: AllSessionsProps) {
                 )}
                 {(!isExternal || canStopExternal) && (
                   <button
-                    style={{ background: RT.panel, border: `1px solid ${RT.border}`, borderRadius: 7, width: 36, height: 36, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', marginLeft: 'auto' }}
+                    style={{ background: RT.panel, border: `1px solid ${RT.border}`, borderRadius: 7, width: 44, height: 44, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', marginLeft: 'auto' }}
                     disabled={!!pending[`stop-${key}`] || offline}
                     onClick={() => guard(`stop-${key}`, () => api.stop(s.device_id, name, isExternal ? { external: true, pid: s.pid ?? undefined } : undefined))}
                     title="Stop this session"
@@ -366,7 +370,7 @@ function MoreMenu({ sessionId, rcUrl, isExternal, pending, onUnstick }: MoreMenu
         title="More options"
         style={{
           background: RT.panel, border: `1px solid ${RT.border}`, borderRadius: 7,
-          width: 36, height: 36, display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+          width: 44, height: 44, display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
           cursor: pending ? 'default' : 'pointer', opacity: pending ? 0.5 : 1,
         }}
       >
