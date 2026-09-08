@@ -125,7 +125,7 @@ export function V5Launcher({ deviceId, deviceName, mobile = false, onLaunched }:
       }
     } catch {
       if (!mounted.current) return;
-      setError('Network error — could not reach device.');
+      setError('Network error: could not reach device.');
     } finally {
       if (mounted.current) setPending(false);
     }

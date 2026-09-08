@@ -146,7 +146,7 @@ export function ShareTunnel({ onClose }: ShareTunnelProps) {
                       borderRadius: 6,
                       padding: '7px 10px',
                     }}>
-                      No auth configured — anyone with the URL has access.
+                      No auth configured. Anyone with the URL has access.
                     </div>
                   )}
 

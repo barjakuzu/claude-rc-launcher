@@ -129,7 +129,7 @@ export function ConfigMatrixView({ cards }: { cards: DeviceCard[] }) {
                   </td>
                   {unreachable ? (
                     <td colSpan={9} style={{ padding: '6px 10px', fontFamily: FONT_MONO, fontSize: 11.5, color: RT.textLow, fontStyle: 'italic' }}>
-                      unreachable{(entry as { error: string }).error ? ` — ${(entry as { error: string }).error}` : ''}
+                      unreachable{(entry as { error: string }).error ? `: ${(entry as { error: string }).error}` : ''}
                     </td>
                   ) : (
                     <>
