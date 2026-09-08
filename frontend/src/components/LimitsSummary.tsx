@@ -1,45 +1,74 @@
-// LimitsSummary.tsx — always-visible account-limits summary for the top
+// LimitsSummary.tsx: always-visible account-limits summary for the top
 // strip (Round 3 of the limits/mobile lane). Round 1/2 put this behind a
 // small header icon that opened a dropdown reading "Limits not available
-// yet" — invisible in a screenshot, and the opposite of "visible like the
+// yet", invisible in a screenshot and the opposite of "visible like the
 // status bar" (the user's own words). This replaces that badge: both
 // windows, their percentages, their reset countdowns and their severity
 // colour are drawn directly in the strip, no tap required. The dropdown
-// this opens on tap is for the things that genuinely need drill-down —
-// scoped per-model limits, spend, staleness, cross-device divergence —
+// this opens on tap is for the things that genuinely need drill-down:
+// scoped per-model limits, spend, staleness, cross-device divergence,
 // not for the headline numbers themselves.
 //
 // Unlike the badge it replaces, this component is a permanent part of the
 // strip's layout (Strip.tsx / the mobile top strip), not something that
-// can pop in and out — so unlike AlertsIndicator's "return null while
+// can pop in and out. So unlike AlertsIndicator's "return null while
 // loading" convention, this always renders its cells, showing '—'
 // placeholders until real data arrives rather than collapsing the row.
+//
+// Round 4: knowing the number is half of "in control"; knowing whether to
+// trust it is the other half. Staleness and divergence used to live only
+// in the dropdown, which defeats the point of moving the numbers into the
+// always-visible strip in the first place. Both now show directly on the
+// cells: a dimmed, dotted cell when the reading itself is old (derived
+// live age, not the frozen snapshot the hub last reported), and a small
+// marker on the whole summary when devices disagree.
 import { useEffect, useRef, useState } from 'react';
 import { RT, FONT_MONO, FONT_SANS, Z, withAlpha, fmtPct } from '../tokens';
 import { useLimits } from '../hooks/useLimits';
 import { useNow } from '../hooks/useNow';
-import { formatCountdown, formatAbsolute, isWindowStale, limitColor } from '../limitsFormat';
+import {
+  formatCountdown, formatAbsolute, isWindowStale, limitColor,
+  deriveAgeSeconds, isReadingStale,
+} from '../limitsFormat';
 import { formatRelativeTime } from '../relativeTime';
 import type { LimitsWindow, LimitsScoped, LimitsPrimary, LimitsReport } from '../api';
 
-const STALE_AGE_SECONDS = 120;
-
 // ─── Compact cell: the always-visible headline reading ──────────────────
 
-function WindowCell({ label, window, now, compact }: {
+function StaleDot({ ageSeconds }: { ageSeconds: number | null }) {
+  const label = ageSeconds != null
+    ? `Reading is from ${formatRelativeTime(Date.now() / 1000 - ageSeconds)}, not live`
+    : 'Reading age unknown';
+  return (
+    <span
+      title={label}
+      style={{
+        width: 5, height: 5, borderRadius: 5, background: RT.amber, flex: 'none',
+        display: 'inline-block',
+      }}
+    />
+  );
+}
+
+function WindowCell({ label, window, now, compact, loading, dataStale, ageSeconds }: {
   label: string; window: LimitsWindow | null; now: number; compact: boolean;
+  loading: boolean; dataStale: boolean; ageSeconds: number | null;
 }) {
   const has = window != null;
   const color = has ? limitColor(window.percent, window.severity) : RT.textLow;
-  const stale = has && isWindowStale(window.resets_at, now);
-  const countdown = !has ? 'no data' : stale ? 'resetting…' : formatCountdown(window.resets_at, now);
+  const countdownPassed = has && isWindowStale(window.resets_at, now);
+  const countdown = !has
+    ? (loading ? 'loading…' : 'no data')
+    : countdownPassed ? 'resetting…' : formatCountdown(window.resets_at, now);
   return (
-    <div style={{ minWidth: 0, flex: compact ? 1 : 'none' }}>
+    <div style={{ minWidth: 0, flex: compact ? 1 : 'none', opacity: dataStale ? 0.55 : 1 }}>
       <div style={{
-        fontSize: compact ? 8 : 10, color: RT.textLow, letterSpacing: '.14em',
+        display: 'flex', alignItems: 'center', gap: 5,
+        fontSize: compact ? 9 : 10, color: RT.textLow, letterSpacing: '.14em',
         textTransform: 'uppercase', fontFamily: FONT_MONO, marginBottom: compact ? 3 : 6,
       }}>
         {label}
+        {dataStale && <StaleDot ageSeconds={ageSeconds} />}
       </div>
       <div style={{
         fontSize: compact ? 16 : 20, fontWeight: 600, fontFamily: FONT_MONO,
@@ -57,7 +86,7 @@ function WindowCell({ label, window, now, compact }: {
       </div>
       <div style={{
         fontFamily: FONT_MONO, fontSize: compact ? 9 : 10.5,
-        color: stale ? RT.amber : RT.textLow, marginTop: compact ? 4 : 5,
+        color: countdownPassed ? RT.amber : RT.textLow, marginTop: compact ? 4 : 5,
         whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
       }}>
         {countdown}
@@ -122,12 +151,17 @@ function ScopedRow({ item, now }: { item: LimitsScoped; now: number }) {
   );
 }
 
+// Exponent is clamped defensively even though isLimitsSpend (api.ts) now
+// validates it is an integer in 0-20: a second guard here costs nothing
+// and this is the one place an out-of-range value would otherwise throw
+// past render into the root error boundary and take the whole app down.
 function fmtMoney(minor: number, currency: string, exponent: number): string {
-  const value = minor / Math.pow(10, exponent);
+  const safeExponent = Number.isInteger(exponent) ? Math.min(20, Math.max(0, exponent)) : 2;
+  const value = minor / Math.pow(10, safeExponent);
   try {
     return new Intl.NumberFormat(undefined, { style: 'currency', currency }).format(value);
   } catch {
-    return `${value.toFixed(exponent)} ${currency}`;
+    return `${value.toFixed(safeExponent)} ${currency}`;
   }
 }
 
@@ -159,7 +193,9 @@ function SpendRow({ primary }: { primary: LimitsPrimary }) {
   );
 }
 
-function LimitsDetail({ report, now }: { report: LimitsReport; now: number }) {
+function LimitsDetail({ report, now, ageSeconds, dataStale }: {
+  report: LimitsReport; now: number; ageSeconds: number | null; dataStale: boolean;
+}) {
   const primary = report.primary;
   if (!primary || !primary.available) {
     return (
@@ -171,10 +207,13 @@ function LimitsDetail({ report, now }: { report: LimitsReport; now: number }) {
     );
   }
 
-  const deviceRow = report.devices.find((d) => d.device_id === primary.device_id);
-  const stale = deviceRow?.age_seconds != null && deviceRow.age_seconds > STALE_AGE_SECONDS;
-  const staleSince = stale && deviceRow?.age_seconds != null
-    ? formatRelativeTime(report.generated_at - deviceRow.age_seconds)
+  // Same derived age the always-visible cells use (see LimitsSummary
+  // below): a fixed "as of" instant computed from the age at last success
+  // plus how much client time has passed since, not the frozen snapshot
+  // the hub last reported. formatRelativeTime re-derives "ago" live from
+  // Date.now() on every render, so this stays correct as time passes.
+  const staleSince = dataStale && ageSeconds != null
+    ? formatRelativeTime(Date.now() / 1000 - ageSeconds)
     : null;
 
   const scoped = primary.scoped ?? [];
@@ -232,7 +271,7 @@ function LimitsDetail({ report, now }: { report: LimitsReport; now: number }) {
 // ─── Main component ──────────────────────────────────────────────────────
 
 export function LimitsSummary({ mobile }: { mobile: boolean }) {
-  const { report, status } = useLimits();
+  const { report, status, lastOkMs } = useLimits();
   const now = useNow(30_000);
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -250,7 +289,24 @@ export function LimitsSummary({ mobile }: { mobile: boolean }) {
   const fh = primary?.available ? primary.five_hour : null;
   const sd = primary?.available ? primary.seven_day : null;
 
-  const title = unavailable ? 'Account limits unavailable — tap for detail' : 'Account limits — tap for detail';
+  // Round 4, Critical 1: the hub's own age_seconds is a snapshot from the
+  // last successful fetch and never grows once the poll starts failing
+  // (useLimits.ts keeps status 'ok' and the last report forever). Adding
+  // how much client time has passed since that last success
+  // (deriveAgeSeconds) is what makes the reading visibly age on screen
+  // instead of sitting there looking exactly as fresh as it was minutes
+  // or hours ago.
+  const deviceRow = report && primary
+    ? report.devices.find((d) => d.device_id === primary.device_id)
+    : undefined;
+  const ageSeconds = deriveAgeSeconds(deviceRow?.age_seconds, lastOkMs, now);
+  const dataStale = isReadingStale(ageSeconds);
+  const divergent = report?.divergent === true;
+
+  const title = unavailable
+    ? 'Account limits unavailable, tap for detail'
+    : dataStale ? 'Account limits, reading is not live, tap for detail'
+    : 'Account limits, tap for detail';
 
   return (
     <div ref={ref} style={{ position: 'relative', flex: mobile ? 'none' : 1, minWidth: 0, height: mobile ? 'auto' : '100%' }}>
@@ -261,20 +317,30 @@ export function LimitsSummary({ mobile }: { mobile: boolean }) {
           background: 'transparent', border: 'none', padding: 0, margin: 0,
           cursor: 'pointer', color: 'inherit', font: 'inherit', textAlign: 'left',
           display: 'flex', width: '100%', height: '100%',
-          gap: mobile ? 0 : 24, alignItems: 'flex-start',
+          gap: mobile ? 0 : 24, alignItems: 'flex-start', position: 'relative',
         }}
       >
         {mobile ? (
           <>
-            <WindowCell label="5H limit" window={fh} now={now} compact />
+            <WindowCell label="5H limit" window={fh} now={now} compact loading={status === 'loading'} dataStale={dataStale} ageSeconds={ageSeconds} />
             <div style={{ width: 1, background: RT.border, margin: '0 12px', alignSelf: 'stretch' }} />
-            <WindowCell label="7D limit" window={sd} now={now} compact />
+            <WindowCell label="7D limit" window={sd} now={now} compact loading={status === 'loading'} dataStale={dataStale} ageSeconds={ageSeconds} />
           </>
         ) : (
           <>
-            <WindowCell label="5 Hour" window={fh} now={now} compact={false} />
-            <WindowCell label="7 Day" window={sd} now={now} compact={false} />
+            <WindowCell label="5 Hour" window={fh} now={now} compact={false} loading={status === 'loading'} dataStale={dataStale} ageSeconds={ageSeconds} />
+            <WindowCell label="7 Day" window={sd} now={now} compact={false} loading={status === 'loading'} dataStale={dataStale} ageSeconds={ageSeconds} />
           </>
+        )}
+        {divergent && (
+          <span
+            title="Devices disagree on usage. Showing the freshest reading."
+            style={{
+              position: 'absolute', top: -2, right: -2,
+              width: 7, height: 7, borderRadius: 7, background: RT.amber,
+              border: `1.5px solid ${RT.bgRaised}`,
+            }}
+          />
         )}
       </button>
 
@@ -302,7 +368,7 @@ export function LimitsSummary({ mobile }: { mobile: boolean }) {
             </div>
           )}
 
-          {report && <LimitsDetail report={report} now={now} />}
+          {report && <LimitsDetail report={report} now={now} ageSeconds={ageSeconds} dataStale={dataStale} />}
         </div>
       )}
     </div>
