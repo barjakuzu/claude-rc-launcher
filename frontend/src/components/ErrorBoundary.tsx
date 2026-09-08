@@ -38,7 +38,11 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
     if (!error) return this.props.children;
     return (
       <div style={{
-        minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center',
+        // Round 4: matches the same 100vh -> 100dvh fix as the two modals
+        // (ScheduleModal.tsx, ResumeList.tsx). The pinned body (index.html)
+        // cannot scroll to reveal anything 100vh sizes beyond the real
+        // visible viewport.
+        minHeight: '100dvh', display: 'flex', alignItems: 'center', justifyContent: 'center',
         background: RT.bg, color: RT.text, fontFamily: FONT_SANS, padding: 24,
       }}>
         <div style={{ maxWidth: 480, textAlign: 'center' }}>
