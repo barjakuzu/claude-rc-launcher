@@ -29,7 +29,11 @@ export interface DeviceDetailProps {
 
 export function DeviceDetail({ device, cards, tab, setTab, onClose, layout, usage }: DeviceDetailProps) {
   const hue = hueForId(device.id);
-  const { sessions, scheduled, reloadSessions, reloadSchedules } = usePanelData(device.id, tab);
+  const {
+    sessions, scheduled,
+    hasLoadedSessions, hasLoadedScheduled,
+    reloadSessions, reloadSchedules,
+  } = usePanelData(device.id, tab);
 
   const [modalOpen, setModalOpen]   = useState(false);
   const [editing, setEditing]       = useState<Schedule | null>(null);
@@ -64,8 +68,8 @@ export function DeviceDetail({ device, cards, tab, setTab, onClose, layout, usag
       <PanelTabs
         tab={tab}
         setTab={setTab}
-        sessionCount={sessions.length}
-        scheduledCount={scheduled.length}
+        sessionCount={hasLoadedSessions ? sessions.length : null}
+        scheduledCount={hasLoadedScheduled ? scheduled.length : null}
         onResume={() => setResumeOpen(true)}
         mobile={mobile}
       />
@@ -84,7 +88,11 @@ export function DeviceDetail({ device, cards, tab, setTab, onClose, layout, usag
                 this device's here would mean scrolling past the same
                 rows twice on a phone screen. */}
             {sessions.length === 0 ? (
-              <V5Empty text={device.online ? `No active sessions on ${device.name}. Launch one above.` : 'Device offline.'} />
+              <V5Empty text={
+                !hasLoadedSessions ? 'Loading sessions…'
+                : device.online ? `No active sessions on ${device.name}. Launch one above.`
+                : 'Device offline.'
+              } />
             ) : (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                 {sessions.map((s) => (
@@ -127,7 +135,7 @@ export function DeviceDetail({ device, cards, tab, setTab, onClose, layout, usag
             </div>
 
             {scheduled.length === 0 ? (
-              <V5Empty text="No scheduled tasks on this device." />
+              <V5Empty text={hasLoadedScheduled ? 'No scheduled tasks on this device.' : 'Loading scheduled tasks…'} />
             ) : (
               scheduled.map((s) => (
                 <ScheduledRow

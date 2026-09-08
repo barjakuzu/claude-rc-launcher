@@ -177,7 +177,7 @@ export function App() {
                 <AllScheduled cards={cards} hasLoadedCards={hasLoadedCards} />
               )}
               {mTab === 'activity' && (
-                <Activity cards={cards} />
+                <Activity cards={cards} hasLoadedCards={hasLoadedCards} />
               )}
               {mTab === 'cost' && (
                 <CostView onOpenDevice={handleOpenDevice} />

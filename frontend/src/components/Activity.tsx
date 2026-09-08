@@ -7,6 +7,15 @@ import type { DeviceCard } from '../types';
 
 interface ActivityProps {
   cards: DeviceCard[];
+  /** False until /rc/overview has answered at least once (App.tsx). Same
+   * pairing as AllScheduled.tsx: "No recent activity." must only render
+   * once both the device list and the per-device schedule fan-out
+   * (useAllSchedules's own hasLoaded) have genuinely resolved, not merely
+   * because cards was still empty when the fan-out last ran. Previously
+   * this destructured only `items` and ignored useAllSchedules's
+   * hasLoaded entirely, so "No recent activity." rendered on mount before
+   * the first fan-out had a chance to resolve. */
+  hasLoadedCards: boolean;
 }
 
 interface ActivityEvent {
@@ -43,8 +52,9 @@ function statusColor(status: string): string {
   return RT.amber;
 }
 
-export function Activity({ cards }: ActivityProps) {
-  const { items: schedItems } = useAllSchedules(cards, true);
+export function Activity({ cards, hasLoadedCards }: ActivityProps) {
+  const { items: schedItems, hasLoaded: schedulesLoaded } = useAllSchedules(cards, true);
+  const loaded = hasLoadedCards && schedulesLoaded;
 
   // Derive events from schedule history entries.
   const events: ActivityEvent[] = [];
@@ -81,7 +91,7 @@ export function Activity({ cards }: ActivityProps) {
       <div style={{ padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 0 }}>
         {visible.length === 0 && (
           <div style={{ padding: 32, textAlign: 'center', color: RT.textLow, fontFamily: FONT_MONO, fontSize: 13, border: `1px dashed ${RT.border}`, borderRadius: 10 }}>
-            No recent activity.
+            {loaded ? 'No recent activity.' : 'Loading activity…'}
           </div>
         )}
         {visible.map((e, i) => {
