@@ -809,40 +809,78 @@ class Store:
             return {"skipped": skipped}
         return self._write(_do)
 
+    # CONTRACT.md section 3's `limits` object has exactly these top-level
+    # keys. A remote device's /rc/fleet response is attacker-reachable
+    # input (Minor 3, fix round 1 security review): a compromised or
+    # buggy remote device could otherwise stuff arbitrary extra keys, or
+    # an oversized payload, into a table this hub persists indefinitely.
+    # This is the same "only the documented keys" discipline limits.py
+    # itself already applies to the RAW Anthropic response, applied again
+    # here to what a remote device CLAIMS its own limits.py produced.
+    _LIMITS_PAYLOAD_ALLOWED_KEYS = frozenset((
+        "available", "fetched_at", "five_hour", "seven_day", "scoped",
+        "spend", "extra_usage", "error",
+    ))
+    # Generous relative to a real payload (a handful of floats/strings,
+    # normally well under 1 KB even with a few `scoped` rows) while still
+    # bounding what a misbehaving device can make this table hold per row.
+    MAX_LIMITS_PAYLOAD_BYTES = 8 * 1024
+
     def upsert_account_limits(self, device_id, limits_payload, now_fn=time.time):
         """Replace this device's stored account-limits reading (CONTRACT.md
         sections 2-4) with `limits_payload` -- fleet.build_fleet()'s own
-        `limits` key, taken and stored WHOLE as JSON, not reshaped into
-        columns: CONTRACT.md section 4 says "payload_json is the `limits`
-        object above" verbatim, and it is server.py's /api/limits route
-        (section 5), not this write path, that decides which of its
-        fields the hub API actually surfaces.
+        `limits` key. Stored as JSON built from ONLY the documented
+        top-level keys (_LIMITS_PAYLOAD_ALLOWED_KEYS) -- CONTRACT.md
+        section 4 says "payload_json is the `limits` object above"
+        verbatim, and every key that object ever legitimately carries is
+        in that allow-list, so this is not a reshaping, just a filter
+        against a shape this hub does not otherwise control (fix round 1,
+        Minor 3). It is still server.py's /api/limits route (section 5),
+        not this write path, that decides which of the SURVIVING fields
+        the hub API actually surfaces.
 
         One row per device (PRIMARY KEY device_id) -- account_limits holds
         the freshest reading per device, not a history, so this always
         overwrites, never appends, same as upsert_device/
         upsert_session_usage above.
 
-        `available`/`fetched_at` are pulled out of the payload into their
-        own columns too, alongside payload_json, purely so limits_view()
-        can filter/sort/compare in SQL without json.loads-ing every row
-        first -- they are NOT a second source of truth: on a read, the
-        payload (parsed from payload_json) is what callers actually use.
+        `available`/`fetched_at` are pulled out of the (already filtered)
+        payload into their own columns too, alongside payload_json,
+        purely so limits_view() can filter/sort/compare in SQL without
+        json.loads-ing every row first -- they are NOT a second source of
+        truth: on a read, the payload (parsed from payload_json) is what
+        callers actually use.
 
-        A payload that isn't a dict at all is skipped and logged, same
-        treatment upsert_cost_daily gives a row with no `day` -- a
-        malformed shape from one device's fleet snapshot must not raise
-        out of a poll cycle that is also ingesting that device's
-        sessions/events/usage in the same call."""
+        A payload that isn't a dict at all, or whose filtered JSON
+        encoding exceeds MAX_LIMITS_PAYLOAD_BYTES, is skipped and logged
+        (fix round 1, Minor 3) -- same treatment upsert_cost_daily gives a
+        row with no `day`: a malformed or oversized shape from one
+        device's fleet snapshot must not raise out of a poll cycle that
+        is also ingesting that device's sessions/events/usage in the
+        same call, and must not let one device grow this table without
+        bound either."""
         def _do(conn):
             if not isinstance(limits_payload, dict):
                 _LOG.warning(
-                    "upsert_account_limits: skipping non-dict payload for device %r: %r",
+                    "upsert_account_limits: skipping payload for device %r: "
+                    "not a dict (got %s)",
                     device_id, type(limits_payload).__name__)
                 return {"skipped": True}
+            sanitized = {
+                k: v for k, v in limits_payload.items()
+                if k in self._LIMITS_PAYLOAD_ALLOWED_KEYS
+            }
+            encoded = json.dumps(sanitized)
+            size = len(encoded.encode("utf-8"))
+            if size > self.MAX_LIMITS_PAYLOAD_BYTES:
+                _LOG.warning(
+                    "upsert_account_limits: skipping oversized payload for "
+                    "device %r (%d bytes > %d byte cap)",
+                    device_id, size, self.MAX_LIMITS_PAYLOAD_BYTES)
+                return {"skipped": True}
             now = now_fn()
-            available = 1 if limits_payload.get("available") else 0
-            fetched_at = limits_payload.get("fetched_at")
+            available = 1 if sanitized.get("available") else 0
+            fetched_at = sanitized.get("fetched_at")
             if isinstance(fetched_at, bool) or not isinstance(fetched_at, (int, float)):
                 fetched_at = None
             conn.execute(
@@ -851,7 +889,7 @@ class Store:
                 "ON CONFLICT(device_id) DO UPDATE SET available=excluded.available, "
                 "fetched_at=excluded.fetched_at, payload_json=excluded.payload_json, "
                 "updated_at=excluded.updated_at",
-                (device_id, available, fetched_at, json.dumps(limits_payload), now))
+                (device_id, available, fetched_at, encoded, now))
             return {"skipped": False}
         return self._write(_do)
 

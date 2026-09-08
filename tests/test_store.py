@@ -1975,6 +1975,47 @@ class AccountLimitsTest(unittest.TestCase):
         view = self.store.limits_view()
         self.assertIsNone(view["rows"][0]["fetched_at"])
 
+    def test_unknown_top_level_keys_are_stripped_not_stored(self):
+        # Minor 3, fix round 1: a remote device's /rc/fleet response is
+        # attacker-reachable input -- a compromised or buggy device could
+        # stuff arbitrary extra keys into what it claims is its `limits`
+        # object. Only CONTRACT.md's documented top-level keys survive.
+        payload = self._payload()
+        payload["token"] = "should-never-be-stored"
+        payload["unexpected_codename_field"] = {"anything": "here"}
+        self.store.upsert_account_limits("local", payload)
+        view = self.store.limits_view()
+        stored = view["rows"][0]["payload"]
+        self.assertNotIn("token", stored)
+        self.assertNotIn("unexpected_codename_field", stored)
+        self.assertEqual(stored["five_hour"], payload["five_hour"])
+
+    def test_oversized_payload_is_skipped_not_stored(self):
+        # Minor 3, fix round 1: bound what a misbehaving device can make
+        # this table hold per row.
+        payload = self._payload()
+        payload["scoped"] = [
+            {"kind": f"k{i}", "group": "weekly", "percent": 1.0,
+             "severity": "normal", "resets_at": "r", "label": "x" * 200,
+             "is_active": False}
+            for i in range(200)
+        ]
+        result = self.store.upsert_account_limits("local", payload)
+        self.assertEqual(result, {"skipped": True})
+        view = self.store.limits_view()
+        self.assertEqual(view["rows"], [])
+
+    def test_size_cap_applies_after_stripping_unknown_keys(self):
+        # A payload that's only oversized because of junk keys that get
+        # stripped anyway must not be rejected for a size it never
+        # actually ends up at.
+        payload = self._payload()
+        payload["unexpected_padding"] = "x" * (store.Store.MAX_LIMITS_PAYLOAD_BYTES * 2)
+        result = self.store.upsert_account_limits("local", payload)
+        self.assertEqual(result, {"skipped": False})
+        view = self.store.limits_view()
+        self.assertEqual(len(view["rows"]), 1)
+
 
 if __name__ == "__main__":
     unittest.main()
