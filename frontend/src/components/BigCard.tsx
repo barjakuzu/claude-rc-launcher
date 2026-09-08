@@ -1,7 +1,22 @@
-// BigCard.tsx — V5 large rich device card for the overview grid.
+// BigCard.tsx — V5 device card for the overview grid.
+//
+// Round 3: dropped the sparkline and the redundant "Open" button/row.
+// Two things drove this, not one: the sparkline's source (card.spark, the
+// same old TUI-scrape vintage as the card.tokens field Round 2 replaced)
+// produced a broken-looking solid box for at least one real device
+// (degenerate data — desktop rendered it unconditionally, with no hasSpark
+// guard the mobile branch already had), and a decorative trend line
+// standing in for content is a flagged default regardless. The "Open"
+// button was always redundant with the card's own onClick (the whole card
+// has been a click target since V5Stat existed) — a trailing chevron is
+// enough of an affordance, matching the icon-only pattern used elsewhere
+// in this app (Header.tsx's MachineSelector rows, for one). Together this
+// roughly halves the card's height: two content rows (header, stats)
+// instead of four, so meaningfully more devices are visible per screen
+// without scrolling — the actual complaint, not a decoration problem.
 import { useState } from 'react';
 import { RT, FONT_MONO, tintFor, tintSoft, tintEdge, hueForId, fmtK, kindForOs } from '../tokens';
-import { Dot, Sparkline, CapBar, Icons } from './primitives';
+import { Dot, CapBar, Icons } from './primitives';
 import type { DeviceCard, DeviceUsage } from '../types';
 
 interface BigCardProps {
@@ -57,7 +72,6 @@ export function BigCard({ card, cards, onClick, mobile = false, usage }: BigCard
 
   // lastActivity mapping
   const lastActivity = card.loadPct > 0 ? 'just now' : card.sessions > 0 ? 'active' : 'idle';
-  const hasSpark = (card.spark?.length ?? 0) > 1;
 
   return (
     <div
@@ -130,7 +144,7 @@ export function BigCard({ card, cards, onClick, mobile = false, usage }: BigCard
             );
           })()}
         </div>
-        {!mobile && <Icons.chevRight size={16} stroke={RT.textLow} />}
+        <Icons.chevRight size={mobile ? 15 : 16} stroke={RT.textLow} />
       </div>
 
       {/* Stats: Tokens | Sessions | CPU */}
@@ -158,50 +172,6 @@ export function BigCard({ card, cards, onClick, mobile = false, usage }: BigCard
           sub={lastActivity}
         />
       </div>
-
-      {/* Sparkline (only when data exists) + Open button.
-          On mobile: stack vertically so the Open button gets a full row and never clips. */}
-      {mobile ? (
-        <>
-          {hasSpark && (
-            <div style={{ color: hueColor, width: '100%' }}>
-              <Sparkline data={card.spark} w={300} h={28} color={hueColor} fillOpacity={0.10} dotEnd responsive />
-            </div>
-          )}
-          <button
-            onClick={(e) => { e.stopPropagation(); onClick(); }}
-            style={{
-              background: RT.panel, color: RT.text,
-              border: `1px solid ${RT.border}`,
-              borderRadius: 8, padding: '10px 14px', cursor: 'pointer',
-              fontFamily: 'inherit', fontSize: 13, fontWeight: 500,
-              display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 6,
-              width: '100%',
-            }}
-          >
-            Open <Icons.chevRight size={12} stroke={RT.text} />
-          </button>
-        </>
-      ) : (
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
-          <div style={{ flex: 1, color: hueColor, minWidth: 0 }}>
-            <Sparkline data={card.spark} w={300} h={32} color={hueColor} fillOpacity={0.10} dotEnd responsive />
-          </div>
-          <button
-            onClick={(e) => { e.stopPropagation(); onClick(); }}
-            style={{
-              background: RT.panel, color: RT.text,
-              border: `1px solid ${RT.border}`,
-              borderRadius: 7, padding: '8px 12px', cursor: 'pointer',
-              fontFamily: 'inherit', fontSize: 11.5, fontWeight: 500,
-              display: 'inline-flex', alignItems: 'center', gap: 6,
-              flex: 'none',
-            }}
-          >
-            Open <Icons.chevRight size={11} stroke={RT.text} />
-          </button>
-        </div>
-      )}
     </div>
   );
 }
