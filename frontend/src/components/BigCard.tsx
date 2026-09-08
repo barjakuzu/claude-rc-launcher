@@ -1,19 +1,19 @@
-// BigCard.tsx — V5 device card for the overview grid.
+// BigCard.tsx: V5 device card for the overview grid.
 //
 // Round 3: dropped the sparkline and the redundant "Open" button/row.
 // Two things drove this, not one: the sparkline's source (card.spark, the
 // same old TUI-scrape vintage as the card.tokens field Round 2 replaced)
 // produced a broken-looking solid box for at least one real device
-// (degenerate data — desktop rendered it unconditionally, with no hasSpark
+// (degenerate data, desktop rendered it unconditionally, with no hasSpark
 // guard the mobile branch already had), and a decorative trend line
 // standing in for content is a flagged default regardless. The "Open"
 // button was always redundant with the card's own onClick (the whole card
-// has been a click target since V5Stat existed) — a trailing chevron is
+// has been a click target since V5Stat existed), so a trailing chevron is
 // enough of an affordance, matching the icon-only pattern used elsewhere
 // in this app (Header.tsx's MachineSelector rows, for one). Together this
 // roughly halves the card's height: two content rows (header, stats)
 // instead of four, so meaningfully more devices are visible per screen
-// without scrolling — the actual complaint, not a decoration problem.
+// without scrolling. That is the actual complaint, not a decoration problem.
 import { useState } from 'react';
 import { RT, FONT_MONO, tintFor, tintSoft, tintEdge, hueForId, fmtK, kindForOs } from '../tokens';
 import { Dot, CapBar, Icons } from './primitives';
@@ -25,7 +25,7 @@ interface BigCardProps {
   onClick: () => void;
   mobile?: boolean;
   /** Live effective-token reading for this device (App.tsx, from
-   * /api/fleet's per-session usage) — replaces the old TUI-scrape
+   * /api/fleet's per-session usage), replaces the old TUI-scrape
    * card.tokens field, which is null for every session now. */
   usage: DeviceUsage;
 }
@@ -153,13 +153,17 @@ export function BigCard({ card, cards, onClick, mobile = false, usage }: BigCard
         gridTemplateColumns: mobile ? '1fr 1fr 1fr' : '1.4fr 1fr 1fr',
         gap: mobile ? 10 : 16,
       }}>
+        {/* Round 4: this bar used to be card.loadPct (CPU), drawn directly
+            under a token figure with no other meaning attached. Read as
+            token capacity, which nobody intended and a viewer would
+            reasonably believe. CPU already has its own stat two columns
+            over; this one carries no bar at all now rather than a
+            borrowed one. */}
         <V5Stat
           label="Tokens"
           value={tokensValue}
           sub={tokensSub}
           subColor={tokensSubColor}
-          bar={card.loadPct}
-          barColor={hueColor}
         />
         <V5Stat
           label="Sessions"

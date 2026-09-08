@@ -12,7 +12,7 @@ interface HeroProps {
   onClose?: () => void;
   onStopAllDone?: () => void;
   /** Live effective-token reading for this device (App.tsx, from
-   * /api/fleet's per-session usage) — replaces the old TUI-scrape
+   * /api/fleet's per-session usage), replaces the old TUI-scrape
    * device.tokens field, which is null for every session now. */
   usage: DeviceUsage;
 }
@@ -216,13 +216,17 @@ export function DeviceHero({ device, cards, mobile = false, onClose, onStopAllDo
         gridTemplateColumns: mobile ? '1fr 1fr' : 'repeat(4, 1fr)',
         gap: mobile ? 10 : 0,
       }}>
+        {/* Round 4: this bar used to be device.loadPct (CPU), drawn
+            directly under a token figure with no other meaning attached.
+            Read as token capacity, which nobody intended and a viewer
+            would reasonably believe. CPU already has its own stat with
+            its own bar further along this row; this one carries no bar
+            at all now rather than a borrowed one. */}
         <V5Stat
           label="Tokens"
           value={tokensValue}
           sub={tokensSub}
           subColor={tokensSubColor}
-          bar={device.loadPct}
-          barColor={hueColor}
           mobile={mobile}
         />
         <V5Stat
