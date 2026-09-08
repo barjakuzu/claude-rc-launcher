@@ -19,6 +19,7 @@ import { ConfigMatrixView } from './components/ConfigMatrix';
 import { Activity } from './components/Activity';
 import { ShareTunnel } from './components/ShareTunnel';
 import { CostView } from './components/CostView';
+import { LimitsSummary } from './components/LimitsSummary';
 import type { PanelTab } from './components/PanelTabs';
 import type { MTab } from './components/MobileNav';
 
@@ -140,6 +141,13 @@ export function App() {
       />
 
       {!layout.mobile && <Strip cards={cards} totalTokens={totalTokens} />}
+      {/* Round 3: the mobile equivalent of Strip used to live only inside
+          the Devices tab's OverviewGrid — invisible on every other mobile
+          tab. Lifted to this same top-level, always-rendered position
+          (matching desktop's Strip) so account limits and the fleet
+          numbers are reachable without switching tabs, not just glanceable
+          when you happen to be looking at Devices. */}
+      {layout.mobile && <MobileTopStrip cards={cards} totalTokens={totalTokens} />}
 
       <div style={{ flex: 1, display: 'flex', overflow: 'hidden', minHeight: 0 }}>
         {/* Left rail: only when a device is open and not mobile */}
@@ -182,7 +190,6 @@ export function App() {
               layout={layout}
               onOpen={handleOpen}
               usageByDevice={usageByDevice}
-              totalTokens={totalTokens}
             />
           ) : (
             // Desktop "All devices" overview: Devices / Tasks / Sessions / Config.
@@ -207,7 +214,7 @@ export function App() {
               </div>
               <div style={{ flex: 1, overflow: 'hidden', display: 'flex', minHeight: 0 }}>
                 {desktopView === 'devices' && (
-                  <OverviewGrid cards={cards} layout={layout} onOpen={handleOpen} usageByDevice={usageByDevice} totalTokens={totalTokens} />
+                  <OverviewGrid cards={cards} layout={layout} onOpen={handleOpen} usageByDevice={usageByDevice} />
                 )}
                 {desktopView === 'tasks' && <AllScheduled cards={cards} />}
                 {desktopView === 'sessions' && (
@@ -259,58 +266,54 @@ interface OverviewGridProps {
   layout: Layout;
   onOpen: (id: string) => void;
   usageByDevice: Map<string, DeviceUsage>;
-  totalTokens: number | null;
 }
 
 import type { Layout } from './useLayout';
 
-// totalTokens: the same App()-level aggregate Strip.tsx uses (see App.tsx's
-// own totalTokens computation) — null renders as a placeholder rather than
-// letting a still-loading or fully-unreported fleet show a lying "0K".
-function MobileStrip({ cards, totalTokens }: { cards: DeviceCard[]; totalTokens: number | null }) {
+// Mobile equivalent of Strip.tsx, now rendered at the same always-visible
+// top level (see App() above) rather than nested inside the Devices tab's
+// OverviewGrid. Round 3: dropped the Load cell (same reasoning as
+// Strip.tsx) and added a LimitsSummary row — account limits, not CPU load,
+// is what the user asked to have visible "like the status bar".
+function MobileTopStrip({ cards, totalTokens }: { cards: DeviceCard[]; totalTokens: number | null }) {
   const onlineCount = cards.filter((c) => c.online).length;
   const totalSessions = cards.reduce((s, c) => s + c.sessions, 0);
-  const onlineCards = cards.filter((c) => c.online);
-  const avgLoad = onlineCards.length > 0
-    ? Math.round(onlineCards.reduce((s, c) => s + c.loadPct, 0) / onlineCards.length)
-    : 0;
 
   type MCell = { label: string; value: string; dot?: string };
   const cells: MCell[] = [
-    { label: 'Online',  value: `${onlineCount}/${cards.length}`, dot: RT.green },
-    { label: 'Sessns',  value: String(totalSessions) },
+    { label: 'Online',    value: `${onlineCount}/${cards.length}`, dot: RT.green },
+    { label: 'Sessions',  value: String(totalSessions) },
     { label: 'Effective', value: totalTokens != null ? fmtK(totalTokens) : '—' },
-    { label: 'Load',    value: `${avgLoad}%` },
   ];
 
   return (
     <div style={{
-      display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8,
-      marginBottom: 14, background: RT.card,
+      flex: 'none', margin: '10px 12px', background: RT.card,
       border: `1px solid ${RT.border}`, borderRadius: 10, padding: 12,
     }}>
-      {cells.map((c) => (
-        <div key={c.label}>
-          <div style={{ fontSize: 8, color: RT.textLow, letterSpacing: '.14em', textTransform: 'uppercase', fontFamily: FONT_MONO }}>{c.label}</div>
-          <div style={{ display: 'flex', alignItems: 'baseline', gap: 4, marginTop: 3 }}>
-            {c.dot && <span style={{ width: 5, height: 5, borderRadius: 5, background: c.dot, display: 'inline-block' }} />}
-            <div style={{ fontFamily: FONT_MONO, fontSize: 15, fontWeight: 500 }}>{c.value}</div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8 }}>
+        {cells.map((c) => (
+          <div key={c.label}>
+            <div style={{ fontSize: 8, color: RT.textLow, letterSpacing: '.14em', textTransform: 'uppercase', fontFamily: FONT_MONO }}>{c.label}</div>
+            <div style={{ display: 'flex', alignItems: 'baseline', gap: 4, marginTop: 3 }}>
+              {c.dot && <span style={{ width: 5, height: 5, borderRadius: 5, background: c.dot, display: 'inline-block' }} />}
+              <div style={{ fontFamily: FONT_MONO, fontSize: 15, fontWeight: 500 }}>{c.value}</div>
+            </div>
           </div>
-        </div>
-      ))}
+        ))}
+      </div>
+      <div style={{ height: 1, background: RT.border, margin: '11px 0 9px' }} />
+      <LimitsSummary mobile />
     </div>
   );
 }
 
-function OverviewGrid({ cards, layout, onOpen, usageByDevice, totalTokens }: OverviewGridProps) {
+function OverviewGrid({ cards, layout, onOpen, usageByDevice }: OverviewGridProps) {
   const n = cards.length;
   const cols = layout.mobile ? 1 : layout.tablet ? Math.min(2, n) : Math.min(3, n);
 
   return (
     <div style={{ flex: 1, overflow: 'auto', padding: layout.mobile ? 14 : 24 }}>
-      {/* Mobile mini-strip */}
-      {layout.mobile && <MobileStrip cards={cards} totalTokens={totalTokens} />}
-
       <div style={{ display: 'flex', alignItems: 'baseline', marginBottom: 16, gap: 10 }}>
         <div style={{
           fontSize: 11, color: RT.textDim, letterSpacing: '.14em',

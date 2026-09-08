@@ -1,65 +1,72 @@
-// LimitsIndicator.tsx — header badge + dropdown for GET /api/limits
-// (CONTRACT.md sections 3/5/6). Mirrors AlertsIndicator.tsx's shape
-// (self-contained poll via useLimits, dropdown anchored under the button,
-// same Z-layer, same "never invent zeros" discipline) with one deliberate
-// difference: Alerts hides entirely when clean, because a hidden badge
-// there means "nothing to worry about." Limits is the opposite kind of
-// indicator — the user asked for it to be visible "like the status bar,"
-// so it never disappears once we've heard from the backend at least once;
-// it only ever switches between a real reading and a plainly-marked
-// unavailable state.
+// LimitsSummary.tsx — always-visible account-limits summary for the top
+// strip (Round 3 of the limits/mobile lane). Round 1/2 put this behind a
+// small header icon that opened a dropdown reading "Limits not available
+// yet" — invisible in a screenshot, and the opposite of "visible like the
+// status bar" (the user's own words). This replaces that badge: both
+// windows, their percentages, their reset countdowns and their severity
+// colour are drawn directly in the strip, no tap required. The dropdown
+// this opens on tap is for the things that genuinely need drill-down —
+// scoped per-model limits, spend, staleness, cross-device divergence —
+// not for the headline numbers themselves.
+//
+// Unlike the badge it replaces, this component is a permanent part of the
+// strip's layout (Strip.tsx / the mobile top strip), not something that
+// can pop in and out — so unlike AlertsIndicator's "return null while
+// loading" convention, this always renders its cells, showing '—'
+// placeholders until real data arrives rather than collapsing the row.
 import { useEffect, useRef, useState } from 'react';
 import { RT, FONT_MONO, FONT_SANS, Z, withAlpha, fmtPct } from '../tokens';
-import { Icons } from './primitives';
-import { btn } from './btn';
 import { useLimits } from '../hooks/useLimits';
 import { useNow } from '../hooks/useNow';
 import { formatCountdown, formatAbsolute, isWindowStale, limitColor } from '../limitsFormat';
 import { formatRelativeTime } from '../relativeTime';
-import type { Layout } from '../useLayout';
 import type { LimitsWindow, LimitsScoped, LimitsPrimary, LimitsReport } from '../api';
 
 const STALE_AGE_SECONDS = 120;
 
-// ─── Compact badge: two mini bars, no digits required to read them ─────────
+// ─── Compact cell: the always-visible headline reading ──────────────────
 
-function MiniBar({ pct, color }: { pct: number | null; color: string }) {
+function WindowCell({ label, window, now, compact }: {
+  label: string; window: LimitsWindow | null; now: number; compact: boolean;
+}) {
+  const has = window != null;
+  const color = has ? limitColor(window.percent, window.severity) : RT.textLow;
+  const stale = has && isWindowStale(window.resets_at, now);
+  const countdown = !has ? 'no data' : stale ? 'resetting…' : formatCountdown(window.resets_at, now);
   return (
-    <div style={{ height: 3, width: 22, borderRadius: 3, background: 'rgba(255,255,255,.10)', overflow: 'hidden', flex: 'none' }}>
-      {pct != null && (
-        <div style={{
-          height: '100%', width: `${Math.min(100, Math.max(4, pct))}%`,
-          background: color, borderRadius: 3,
-        }} />
-      )}
+    <div style={{ minWidth: 0, flex: compact ? 1 : 'none' }}>
+      <div style={{
+        fontSize: compact ? 8 : 10, color: RT.textLow, letterSpacing: '.14em',
+        textTransform: 'uppercase', fontFamily: FONT_MONO, marginBottom: compact ? 3 : 6,
+      }}>
+        {label}
+      </div>
+      <div style={{
+        fontSize: compact ? 16 : 20, fontWeight: 600, fontFamily: FONT_MONO,
+        color, lineHeight: 1, letterSpacing: '-.01em',
+      }}>
+        {has ? fmtPct(window.percent) : '—'}
+      </div>
+      <div style={{
+        height: 3, borderRadius: 3, background: 'rgba(255,255,255,.08)',
+        overflow: 'hidden', marginTop: compact ? 5 : 7, maxWidth: compact ? undefined : 130,
+      }}>
+        {has && (
+          <div style={{ height: '100%', width: `${Math.min(100, window.percent)}%`, background: color, borderRadius: 3 }} />
+        )}
+      </div>
+      <div style={{
+        fontFamily: FONT_MONO, fontSize: compact ? 9 : 10.5,
+        color: stale ? RT.amber : RT.textLow, marginTop: compact ? 4 : 5,
+        whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+      }}>
+        {countdown}
+      </div>
     </div>
   );
 }
 
-function BadgeContent({ primary }: { primary: LimitsPrimary }) {
-  const fh = primary.five_hour;
-  const sd = primary.seven_day;
-  const fhColor = fh ? limitColor(fh.percent, fh.severity) : RT.textLow;
-  const sdColor = sd ? limitColor(sd.percent, sd.severity) : RT.textLow;
-  const urgent = (fh != null && fh.percent >= 90) || (sd != null && sd.percent >= 90);
-  return (
-    <>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
-        <MiniBar pct={fh?.percent ?? null} color={fhColor} />
-        <MiniBar pct={sd?.percent ?? null} color={sdColor} />
-      </div>
-      {urgent && (
-        <span style={{
-          position: 'absolute', top: -3, right: -3,
-          width: 8, height: 8, borderRadius: 8, background: RT.red,
-          border: `1.5px solid ${RT.bgRaised}`,
-        }} />
-      )}
-    </>
-  );
-}
-
-// ─── Dropdown rows ───────────────────────────────────────────────────────
+// ─── Dropdown detail: scoped limits, spend, staleness, divergence ───────
 
 function WindowRow({ label, window, now }: { label: string; window: LimitsWindow | null; now: number }) {
   if (!window) {
@@ -222,9 +229,9 @@ function LimitsDetail({ report, now }: { report: LimitsReport; now: number }) {
   );
 }
 
-// ─── Main component ─────────────────────────────────────────────────────
+// ─── Main component ──────────────────────────────────────────────────────
 
-export function LimitsIndicator({ layout }: { layout: Layout }) {
+export function LimitsSummary({ mobile }: { mobile: boolean }) {
   const { report, status } = useLimits();
   const now = useNow(30_000);
   const [open, setOpen] = useState(false);
@@ -238,43 +245,45 @@ export function LimitsIndicator({ layout }: { layout: Layout }) {
     return () => document.removeEventListener('mousedown', off);
   }, [open]);
 
-  // Nothing to show yet (first poll still in flight): no flash of an empty
-  // or wrong-shaped badge, mirrors AlertsIndicator. Once we know the route
-  // is down, or that no device has data, that must show, not hide — a
-  // hidden limits badge reads as "plenty of runway," exactly backwards.
-  if (status === 'loading') return null;
-
-  const unavailable = status === 'unavailable' || !report || !report.primary || !report.primary.available;
   const primary = report?.primary ?? null;
-  const size = layout.mobile ? 40 : 32;
+  const unavailable = status === 'unavailable' || (status === 'ok' && (!report || !primary || !primary.available));
+  const fh = primary?.available ? primary.five_hour : null;
+  const sd = primary?.available ? primary.seven_day : null;
 
-  const title = unavailable ? 'Account limits unavailable' : 'Account limits';
+  const title = unavailable ? 'Account limits unavailable — tap for detail' : 'Account limits — tap for detail';
 
   return (
-    <div ref={ref} style={{ position: 'relative' }}>
+    <div ref={ref} style={{ position: 'relative', flex: mobile ? 'none' : 1, minWidth: 0, height: mobile ? 'auto' : '100%' }}>
       <button
         onClick={() => setOpen((o) => !o)}
         title={title}
         style={{
-          ...btn('icon'),
-          width: size, height: size,
-          position: 'relative',
-          borderColor: unavailable ? RT.border : withAlpha(RT.textDim, 0.3),
+          background: 'transparent', border: 'none', padding: 0, margin: 0,
+          cursor: 'pointer', color: 'inherit', font: 'inherit', textAlign: 'left',
+          display: 'flex', width: '100%', height: '100%',
+          gap: mobile ? 0 : 24, alignItems: 'flex-start',
         }}
       >
-        {unavailable ? (
-          <Icons.chart size={14} stroke={RT.textLow} />
+        {mobile ? (
+          <>
+            <WindowCell label="5H limit" window={fh} now={now} compact />
+            <div style={{ width: 1, background: RT.border, margin: '0 12px', alignSelf: 'stretch' }} />
+            <WindowCell label="7D limit" window={sd} now={now} compact />
+          </>
         ) : (
-          <BadgeContent primary={primary as LimitsPrimary} />
+          <>
+            <WindowCell label="5 Hour" window={fh} now={now} compact={false} />
+            <WindowCell label="7 Day" window={sd} now={now} compact={false} />
+          </>
         )}
       </button>
 
       {open && (
         <div style={{
-          position: 'absolute', top: '100%', right: 0, marginTop: 6,
+          position: 'absolute', top: 'calc(100% + 8px)', left: 0,
           background: RT.panel, border: `1px solid ${RT.borderHi}`,
           borderRadius: 10, width: 300, maxWidth: 'calc(100vw - 28px)',
-          maxHeight: 460, overflow: 'auto', padding: 6,
+          maxHeight: 420, overflow: 'auto', padding: 6,
           zIndex: Z.sticky, boxShadow: '0 12px 36px rgba(0,0,0,.4)',
           fontFamily: FONT_SANS,
         }}>
@@ -287,7 +296,7 @@ export function LimitsIndicator({ layout }: { layout: Layout }) {
             {report && <span>updated {formatRelativeTime(report.generated_at)}</span>}
           </div>
 
-          {unavailable && !report && (
+          {!report && (
             <div style={{ padding: '10px 9px', fontFamily: FONT_MONO, fontSize: 12, color: RT.textLow }}>
               Limits not available yet.
             </div>

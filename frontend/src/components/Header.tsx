@@ -8,7 +8,6 @@ import { btn } from './btn';
 import { api } from '../api';
 import { ShareTunnel } from './ShareTunnel';
 import { AlertsIndicator } from './AlertsIndicator';
-import { LimitsIndicator } from './LimitsIndicator';
 
 // ─── Props ───────────────────────────────────────────────────────────────────
 
@@ -513,8 +512,9 @@ export function Header({ cards, openId, setOpenId, layout, onRefresh }: HeaderPr
           </div>
         )}
 
-        {/* Account limits: 5h/7d runway, always visible once loaded */}
-        <LimitsIndicator layout={layout} />
+        {/* Account limits now live in the top strip (Strip.tsx / the mobile
+            top strip), always visible rather than behind a small icon —
+            see LimitsSummary.tsx. */}
 
         {/* Alerts indicator: hidden entirely when clean */}
         <AlertsIndicator mobile={layout.mobile} />
