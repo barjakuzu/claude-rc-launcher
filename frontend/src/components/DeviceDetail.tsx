@@ -13,7 +13,7 @@ import { DeviceSettings } from './DeviceSettings';
 import { PreviewModal } from './PreviewModal';
 import { ResumeList } from './ResumeList';
 import { usePanelData } from '../usePanelData';
-import type { DeviceCard, Schedule } from '../types';
+import type { DeviceCard, DeviceUsage, Schedule } from '../types';
 import type { Layout } from '../useLayout';
 
 export interface DeviceDetailProps {
@@ -23,9 +23,11 @@ export interface DeviceDetailProps {
   setTab: (t: PanelTab) => void;
   onClose: () => void;
   layout: Layout;
+  /** Live effective-token reading for this device (App.tsx). */
+  usage: DeviceUsage;
 }
 
-export function DeviceDetail({ device, cards, tab, setTab, onClose, layout }: DeviceDetailProps) {
+export function DeviceDetail({ device, cards, tab, setTab, onClose, layout, usage }: DeviceDetailProps) {
   const hue = hueForId(device.id);
   const { sessions, scheduled, reloadSessions, reloadSchedules } = usePanelData(device.id, tab);
 
@@ -49,6 +51,7 @@ export function DeviceDetail({ device, cards, tab, setTab, onClose, layout }: De
         mobile={mobile}
         onClose={onClose}
         onStopAllDone={reloadSessions}
+        usage={usage}
       />
 
       <V5Launcher

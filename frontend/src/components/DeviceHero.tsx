@@ -3,7 +3,7 @@ import { useState, useRef, useEffect } from 'react';
 import { RT, FONT_MONO, tintFor, tintSoft, hueForId, fmtK, kindForOs } from '../tokens';
 import { Icons, Dot, CapBar } from './primitives';
 import { api } from '../api';
-import type { DeviceCard } from '../types';
+import type { DeviceCard, DeviceUsage } from '../types';
 
 interface HeroProps {
   device: DeviceCard;
@@ -11,13 +11,17 @@ interface HeroProps {
   mobile?: boolean;
   onClose?: () => void;
   onStopAllDone?: () => void;
+  /** Live effective-token reading for this device (App.tsx, from
+   * /api/fleet's per-session usage) — replaces the old TUI-scrape
+   * device.tokens field, which is null for every session now. */
+  usage: DeviceUsage;
 }
 
 // V5Stat cell — compact stat with optional bar
 function V5Stat({
-  label, value, sub, bar, barColor, divider, mobile,
+  label, value, sub, subColor, bar, barColor, divider, mobile,
 }: {
-  label: string; value: string | number; sub?: string;
+  label: string; value: string | number; sub?: string; subColor?: string;
   bar?: number; barColor?: string; divider?: boolean; mobile?: boolean;
 }) {
   return (
@@ -43,7 +47,7 @@ function V5Stat({
         </div>
       )}
       {sub && (
-        <div style={{ fontSize: 10, color: RT.textLow, marginTop: 4, fontFamily: FONT_MONO }}>
+        <div style={{ fontSize: 10, color: subColor || RT.textLow, marginTop: 4, fontFamily: FONT_MONO }}>
           {sub}
         </div>
       )}
@@ -51,10 +55,17 @@ function V5Stat({
   );
 }
 
-export function DeviceHero({ device, cards, mobile = false, onClose, onStopAllDone }: HeroProps) {
+export function DeviceHero({ device, cards, mobile = false, onClose, onStopAllDone, usage }: HeroProps) {
   const hue = hueForId(device.id);
   const hueColor = tintFor(hue, 0.70, 0.10);
   const KindIcon = Icons[kindForOs(device.os)] || Icons.server;
+
+  // '—' is the established no-data placeholder (see tokens.ts's fmtUsage):
+  // unknown is never drawn as 0. usage.effective is only ever null when the
+  // fleet hasn't reported enough for this device to vouch for a number.
+  const tokensValue = usage.effective != null ? fmtK(usage.effective) : '—';
+  const tokensSub = usage.partial === true ? 'effective · partial' : 'effective';
+  const tokensSubColor = usage.partial === true ? RT.amber : undefined;
 
   const [stopPending, setStopPending] = useState(false);
   const mounted = useRef(true);
@@ -206,8 +217,10 @@ export function DeviceHero({ device, cards, mobile = false, onClose, onStopAllDo
         gap: mobile ? 10 : 0,
       }}>
         <V5Stat
-          label="Token usage"
-          value={fmtK(device.tokens)}
+          label="Tokens"
+          value={tokensValue}
+          sub={tokensSub}
+          subColor={tokensSubColor}
           bar={device.loadPct}
           barColor={hueColor}
           mobile={mobile}

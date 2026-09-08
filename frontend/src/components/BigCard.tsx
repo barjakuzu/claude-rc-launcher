@@ -2,18 +2,22 @@
 import { useState } from 'react';
 import { RT, FONT_MONO, tintFor, tintSoft, tintEdge, hueForId, fmtK, kindForOs } from '../tokens';
 import { Dot, Sparkline, CapBar, Icons } from './primitives';
-import type { DeviceCard } from '../types';
+import type { DeviceCard, DeviceUsage } from '../types';
 
 interface BigCardProps {
   card: DeviceCard;
   cards: DeviceCard[];
   onClick: () => void;
   mobile?: boolean;
+  /** Live effective-token reading for this device (App.tsx, from
+   * /api/fleet's per-session usage) — replaces the old TUI-scrape
+   * card.tokens field, which is null for every session now. */
+  usage: DeviceUsage;
 }
 
-function V5Stat({ label, value, bar, barColor, sub }: {
+function V5Stat({ label, value, bar, barColor, sub, subColor }: {
   label: string; value: string | number;
-  bar?: number; barColor?: string; sub?: string;
+  bar?: number; barColor?: string; sub?: string; subColor?: string;
 }) {
   return (
     <div>
@@ -32,17 +36,24 @@ function V5Stat({ label, value, bar, barColor, sub }: {
         </div>
       )}
       {sub && (
-        <div style={{ fontSize: 10, color: RT.textLow, marginTop: 4, fontFamily: FONT_MONO }}>{sub}</div>
+        <div style={{ fontSize: 10, color: subColor || RT.textLow, marginTop: 4, fontFamily: FONT_MONO }}>{sub}</div>
       )}
     </div>
   );
 }
 
-export function BigCard({ card, cards, onClick, mobile = false }: BigCardProps) {
+export function BigCard({ card, cards, onClick, mobile = false, usage }: BigCardProps) {
   const hue = hueForId(card.id);
   const KindIcon = Icons[kindForOs(card.os)] || Icons.server;
   const hueColor = tintFor(hue, 0.70, 0.10);
   const [hover, setHover] = useState(false);
+
+  // '—' is the established no-data placeholder (see tokens.ts's fmtUsage):
+  // unknown is never drawn as 0. usage.effective is only ever null when the
+  // fleet hasn't reported enough for this device to vouch for a number.
+  const tokensValue = usage.effective != null ? fmtK(usage.effective) : '—';
+  const tokensSub = usage.partial === true ? 'effective · partial' : 'effective';
+  const tokensSubColor = usage.partial === true ? RT.amber : undefined;
 
   // lastActivity mapping
   const lastActivity = card.loadPct > 0 ? 'just now' : card.sessions > 0 ? 'active' : 'idle';
@@ -130,7 +141,9 @@ export function BigCard({ card, cards, onClick, mobile = false }: BigCardProps) 
       }}>
         <V5Stat
           label="Tokens"
-          value={fmtK(card.tokens)}
+          value={tokensValue}
+          sub={tokensSub}
+          subColor={tokensSubColor}
           bar={card.loadPct}
           barColor={hueColor}
         />

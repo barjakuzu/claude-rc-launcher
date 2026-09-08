@@ -16,8 +16,6 @@ interface HeaderProps {
   cards: DeviceCard[];
   openId: string | null;
   setOpenId: (id: string | null) => void;
-  onlineCount: number;
-  totalTokens: number;
   layout: Layout;
   onRefresh: () => void;
 }

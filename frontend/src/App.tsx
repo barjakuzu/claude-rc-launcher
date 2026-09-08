@@ -1,9 +1,10 @@
 // App.tsx — V5 root shell: left rail + main-area detail, or big-card overview grid.
-import { useState, useEffect, useCallback } from 'react';
-import { RT, FONT_SANS, FONT_MONO, fmtK } from './tokens';
+import { useState, useEffect, useCallback, useMemo } from 'react';
+import { RT, FONT_SANS, FONT_MONO, fmtK, deviceEffectiveTokens, usagePartialFor } from './tokens';
 import { useLayout } from './useLayout';
+import { useFleet } from './hooks/useFleet';
 import { api } from './api';
-import type { DeviceCard } from './types';
+import type { DeviceCard, DeviceUsage } from './types';
 import { ensureKeyframes } from './components/primitives';
 import { Header } from './components/Header';
 import { Strip } from './components/Strip';
@@ -20,6 +21,7 @@ import { ShareTunnel } from './components/ShareTunnel';
 import { CostView } from './components/CostView';
 import type { PanelTab } from './components/PanelTabs';
 import type { MTab } from './components/MobileNav';
+
 
 ensureKeyframes();
 
@@ -43,14 +45,24 @@ export function App() {
     localStorage.setItem('rc_mtab', t);
   };
 
+  // hasLoadedCards distinguishes "confirmed zero devices" from "/rc/overview
+  // just hasn't answered yet" — cards.length is 0 in both cases, and
+  // reading the latter as the former was producing a fabricated "0" on the
+  // Effective-tokens aggregate during the brief window after mount where
+  // useFleet's SSE had already connected (fleetLoaded true) but this
+  // separate /rc/overview poll had not resolved once yet.
+  const [hasLoadedCards, setHasLoadedCards] = useState(false);
+
   const loadOverview = useCallback(async () => {
     try {
       const data = await api.overview();
       if (data?.devices) {
         setCards(data.devices as DeviceCard[]);
       }
+      setHasLoadedCards(true);
     } catch {
-      // Network error — keep existing cards.
+      // Network error — keep existing cards; hasLoadedCards stays whatever
+      // it already was rather than being forced true on a failed call.
     }
   }, []);
 
@@ -69,8 +81,40 @@ export function App() {
 
   const openCard: DeviceCard | undefined = cards.find((c) => c.id === openId);
 
-  const onlineCount = cards.filter((c) => c.online).length;
-  const totalTokens = cards.reduce((s, c) => s + c.tokens, 0);
+  // Single fleet subscription for the whole app shell — BigCard/DeviceHero
+  // both need live per-session usage, and calling useFleet() once here
+  // (rather than once per rendered card) avoids opening a redundant SSE
+  // connection per device tile.
+  const { devices: fleetDevices, sessions: fleetSessions, connected, usingFallback } = useFleet();
+  // Mirrors CostView.tsx's own fleetLoaded computation: before the fleet
+  // has reported at all (no SSE frame yet, no fallback poll response yet),
+  // an empty sessions array means "we haven't heard," not "confirmed zero
+  // sessions" — reading it as the latter would render a lying 0 during the
+  // loading window, the exact failure mode this round is about removing.
+  const fleetLoaded = connected || usingFallback || fleetDevices.length > 0 || fleetSessions.length > 0;
+  const usageByDevice = useMemo<Map<string, DeviceUsage>>(() => {
+    const m = new Map<string, DeviceUsage>();
+    for (const c of cards) {
+      m.set(c.id, {
+        effective: fleetLoaded ? deviceEffectiveTokens(c.id, fleetSessions) : null,
+        partial: fleetLoaded ? usagePartialFor(fleetDevices, c.id) : undefined,
+      });
+    }
+    return m;
+  }, [cards, fleetSessions, fleetDevices, fleetLoaded]);
+
+  // Aggregate effective tokens across devices we can vouch for. Unknown
+  // (null) devices are left out of the sum rather than treated as 0, and
+  // the whole aggregate is a placeholder rather than 0 whenever there is
+  // at least one card but not a single device has vouched for a number —
+  // an undercounted-but-confident-looking total is exactly the wrong
+  // failure mode here, one register up from the per-card fix.
+  const knownUsages = cards.map((c) => usageByDevice.get(c.id)?.effective).filter((v): v is number => v != null);
+  const totalTokens: number | null =
+    !fleetLoaded || !hasLoadedCards ? null
+    : cards.length === 0 ? 0
+    : knownUsages.length === 0 ? null
+    : knownUsages.reduce((s, v) => s + v, 0);
   const totalSessions = cards.reduce((s, c) => s + c.sessions, 0);
 
   // Handler for cross-device views that want to open a specific device.
@@ -91,13 +135,11 @@ export function App() {
         cards={cards}
         openId={openId}
         setOpenId={handleOpen}
-        onlineCount={onlineCount}
-        totalTokens={totalTokens}
         layout={layout}
         onRefresh={loadOverview}
       />
 
-      {!layout.mobile && <Strip cards={cards} />}
+      {!layout.mobile && <Strip cards={cards} totalTokens={totalTokens} />}
 
       <div style={{ flex: 1, display: 'flex', overflow: 'hidden', minHeight: 0 }}>
         {/* Left rail: only when a device is open and not mobile */}
@@ -131,6 +173,7 @@ export function App() {
               setTab={setTab}
               onClose={() => handleOpen(null)}
               layout={layout}
+              usage={usageByDevice.get(openCard.id) ?? { effective: null, partial: undefined }}
             />
           ) : layout.mobile ? (
             // Overview grid — big cards
@@ -138,6 +181,8 @@ export function App() {
               cards={cards}
               layout={layout}
               onOpen={handleOpen}
+              usageByDevice={usageByDevice}
+              totalTokens={totalTokens}
             />
           ) : (
             // Desktop "All devices" overview: Devices / Tasks / Sessions / Config.
@@ -162,7 +207,7 @@ export function App() {
               </div>
               <div style={{ flex: 1, overflow: 'hidden', display: 'flex', minHeight: 0 }}>
                 {desktopView === 'devices' && (
-                  <OverviewGrid cards={cards} layout={layout} onOpen={handleOpen} />
+                  <OverviewGrid cards={cards} layout={layout} onOpen={handleOpen} usageByDevice={usageByDevice} totalTokens={totalTokens} />
                 )}
                 {desktopView === 'tasks' && <AllScheduled cards={cards} />}
                 {desktopView === 'sessions' && (
@@ -213,14 +258,18 @@ interface OverviewGridProps {
   cards: DeviceCard[];
   layout: Layout;
   onOpen: (id: string) => void;
+  usageByDevice: Map<string, DeviceUsage>;
+  totalTokens: number | null;
 }
 
 import type { Layout } from './useLayout';
 
-function MobileStrip({ cards }: { cards: DeviceCard[] }) {
+// totalTokens: the same App()-level aggregate Strip.tsx uses (see App.tsx's
+// own totalTokens computation) — null renders as a placeholder rather than
+// letting a still-loading or fully-unreported fleet show a lying "0K".
+function MobileStrip({ cards, totalTokens }: { cards: DeviceCard[]; totalTokens: number | null }) {
   const onlineCount = cards.filter((c) => c.online).length;
   const totalSessions = cards.reduce((s, c) => s + c.sessions, 0);
-  const totalTokens = cards.reduce((s, c) => s + c.tokens, 0);
   const onlineCards = cards.filter((c) => c.online);
   const avgLoad = onlineCards.length > 0
     ? Math.round(onlineCards.reduce((s, c) => s + c.loadPct, 0) / onlineCards.length)
@@ -230,7 +279,7 @@ function MobileStrip({ cards }: { cards: DeviceCard[] }) {
   const cells: MCell[] = [
     { label: 'Online',  value: `${onlineCount}/${cards.length}`, dot: RT.green },
     { label: 'Sessns',  value: String(totalSessions) },
-    { label: 'Tokens',  value: fmtK(totalTokens) },
+    { label: 'Effective', value: totalTokens != null ? fmtK(totalTokens) : '—' },
     { label: 'Load',    value: `${avgLoad}%` },
   ];
 
@@ -253,14 +302,14 @@ function MobileStrip({ cards }: { cards: DeviceCard[] }) {
   );
 }
 
-function OverviewGrid({ cards, layout, onOpen }: OverviewGridProps) {
+function OverviewGrid({ cards, layout, onOpen, usageByDevice, totalTokens }: OverviewGridProps) {
   const n = cards.length;
   const cols = layout.mobile ? 1 : layout.tablet ? Math.min(2, n) : Math.min(3, n);
 
   return (
     <div style={{ flex: 1, overflow: 'auto', padding: layout.mobile ? 14 : 24 }}>
       {/* Mobile mini-strip */}
-      {layout.mobile && <MobileStrip cards={cards} />}
+      {layout.mobile && <MobileStrip cards={cards} totalTokens={totalTokens} />}
 
       <div style={{ display: 'flex', alignItems: 'baseline', marginBottom: 16, gap: 10 }}>
         <div style={{
@@ -289,7 +338,14 @@ function OverviewGrid({ cards, layout, onOpen }: OverviewGridProps) {
           maxWidth: cols === 2 ? 1200 : 'none',
         }}>
           {cards.map((c) => (
-            <BigCard key={c.id} card={c} cards={cards} mobile={layout.mobile} onClick={() => onOpen(c.id)} />
+            <BigCard
+              key={c.id}
+              card={c}
+              cards={cards}
+              mobile={layout.mobile}
+              onClick={() => onOpen(c.id)}
+              usage={usageByDevice.get(c.id) ?? { effective: null, partial: undefined }}
+            />
           ))}
         </div>
       )}

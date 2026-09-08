@@ -5,13 +5,18 @@ import { Dot, CapBar } from './primitives';
 
 interface StripProps {
   cards: DeviceCard[];
+  /** Live effective-token total across devices we can vouch for (App.tsx),
+   * derived from /api/fleet's per-session usage — not the old TUI-scrape
+   * `card.tokens` field, which is null for every session now. null means
+   * the fleet hasn't reported enough to vouch for any total yet: render a
+   * placeholder, never a 0 that looks like a confirmed empty fleet. */
+  totalTokens: number | null;
 }
 
-export function Strip({ cards }: StripProps) {
+export function Strip({ cards, totalTokens }: StripProps) {
   const onlineCount = cards.filter((c) => c.online).length;
   const offlineCount = cards.length - onlineCount;
   const totalSessions = cards.reduce((s, c) => s + c.sessions, 0);
-  const totalTokens = cards.reduce((s, c) => s + c.tokens, 0);
 
   const onlineCards = cards.filter((c) => c.online);
   const avgLoad = onlineCards.length > 0
@@ -20,10 +25,10 @@ export function Strip({ cards }: StripProps) {
 
   type Cell = { label: string; value: string; sub?: string; dot?: string; bar?: number };
   const cells: Cell[] = [
-    { label: 'Online',   value: `${onlineCount}/${cards.length}`, sub: `${offlineCount} offline`, dot: RT.green },
-    { label: 'Sessions', value: String(totalSessions),             sub: 'running' },
-    { label: 'Tokens',   value: fmtK(totalTokens) },
-    { label: 'Load',     value: `${avgLoad}%`,                    bar: avgLoad },
+    { label: 'Online',    value: `${onlineCount}/${cards.length}`, sub: `${offlineCount} offline`, dot: RT.green },
+    { label: 'Sessions',  value: String(totalSessions),             sub: 'running' },
+    { label: 'Effective', value: totalTokens != null ? fmtK(totalTokens) : '—', sub: 'tokens' },
+    { label: 'Load',      value: `${avgLoad}%`,                    bar: avgLoad },
   ];
 
   return (
