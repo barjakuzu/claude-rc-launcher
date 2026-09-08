@@ -14,10 +14,17 @@ token/secret inside a raised exception's message on purpose, then assert
 that string is nowhere in limits.py's output -- proving type(e).__name__
 is really all that crosses the boundary, not just that it happens not to
 today."""
+import http.server
 import json
 import os
+import socket
 import tempfile
+import threading
+import time
 import unittest
+import urllib.error
+import urllib.request
+from unittest import mock
 
 import limits
 
@@ -152,12 +159,33 @@ class ParseUsageResponseTest(unittest.TestCase):
         self.assertTrue(out["available"])
         self.assertIsNone(out["error"])
         self.assertEqual(out["fetched_at"], 1000.0)
-        self.assertEqual(out["five_hour"],
-                          {"percent": 56.0, "resets_at": "2026-09-08T00:40:00.511284+00:00"})
-        self.assertEqual(out["seven_day"],
-                          {"percent": 80.0, "resets_at": "2026-09-08T07:00:00.511301+00:00"})
+        # Contract amendment 1 (fix round 1): five_hour/seven_day carry
+        # `severity`, sourced from the matching `limits[]` row by kind
+        # ("session" for five_hour, "weekly_all" for seven_day).
+        self.assertEqual(out["five_hour"], {
+            "percent": 56.0, "resets_at": "2026-09-08T00:40:00.511284+00:00",
+            "severity": "normal",
+        })
+        self.assertEqual(out["seven_day"], {
+            "percent": 80.0, "resets_at": "2026-09-08T07:00:00.511301+00:00",
+            "severity": "warning",
+        })
         self.assertNotIn("tangelo", json.dumps(out))
         self.assertNotIn("nimbus_quill", json.dumps(out))
+
+    def test_severity_null_when_no_matching_limits_row(self):
+        raw = self._raw()
+        raw["limits"] = [row for row in raw["limits"] if row["kind"] == "weekly_scoped"]
+        out = limits._parse_usage_response(raw, now=1000.0)
+        self.assertIsNone(out["five_hour"]["severity"])
+        self.assertIsNone(out["seven_day"]["severity"])
+
+    def test_severity_null_when_limits_array_missing(self):
+        raw = self._raw()
+        del raw["limits"]
+        out = limits._parse_usage_response(raw, now=1000.0)
+        self.assertIsNone(out["five_hour"]["severity"])
+        self.assertIsNone(out["seven_day"]["severity"])
 
     def test_percentages_are_floats(self):
         out = limits._parse_usage_response(self._raw(), now=1000.0)
@@ -229,12 +257,17 @@ class ParseUsageResponseTest(unittest.TestCase):
         self.assertIsNone(out["spend"])
         self.assertIsNone(out["extra_usage"])
 
-    def test_garbage_sub_shapes_never_raise(self):
+    def test_garbage_sub_shapes_with_one_valid_field_still_available(self):
+        # Every field except spend is unusable garbage; spend alone is
+        # enough to keep this available=True (Important 3, fix round 1,
+        # is about a response with NOTHING recognisable, not one where
+        # most fields happen to be garbage).
         raw = {
             "five_hour": "not a dict",
             "seven_day": 12345,
             "limits": "not a list",
-            "spend": ["not", "a", "dict"],
+            "spend": {"used": {"amount_minor": 1, "currency": "USD", "exponent": 2},
+                      "limit": None, "percent": 1.0, "severity": "normal"},
             "extra_usage": None,
         }
         out = limits._parse_usage_response(raw, now=1000.0)
@@ -242,8 +275,28 @@ class ParseUsageResponseTest(unittest.TestCase):
         self.assertIsNone(out["five_hour"])
         self.assertIsNone(out["seven_day"])
         self.assertEqual(out["scoped"], [])
-        self.assertIsNone(out["spend"])
+        self.assertIsNotNone(out["spend"])
         self.assertIsNone(out["extra_usage"])
+
+    def test_response_with_no_recognised_keys_raises(self):
+        # Important 3 (fix round 1): a 200 whose body is a JSON object but
+        # carries none of the keys this module reads must not be reported
+        # as available -- it would become `primary` (being freshest) and
+        # silently displace a genuinely good reading from another device.
+        raw = {
+            "five_hour": "not a dict",
+            "seven_day": 12345,
+            "limits": "not a list",
+            "spend": ["not", "a", "dict"],
+            "extra_usage": None,
+            "some_unrelated_codename_key": 42,
+        }
+        with self.assertRaises(ValueError):
+            limits._parse_usage_response(raw, now=1000.0)
+
+    def test_empty_json_object_raises(self):
+        with self.assertRaises(ValueError):
+            limits._parse_usage_response({}, now=1000.0)
 
     def test_non_dict_response_raises(self):
         with self.assertRaises(ValueError):
@@ -378,7 +431,7 @@ class SecurityNeverLeaksTest(unittest.TestCase):
         self.assertEqual(result["error"], "KeyError")
 
     def test_read_token_exception_message_never_leaks_via_fetch_from_api(self):
-        def read_token_fn():
+        def read_token_fn(timeout):
             raise RuntimeError(f"could not read token {_FAKE_TOKEN}")
 
         def fetch_fn(timeout):
@@ -393,6 +446,221 @@ class SecurityNeverLeaksTest(unittest.TestCase):
         self.assertNotIn("token", result)
         self.assertNotIn("accessToken", result)
         self.assertNotIn("Authorization", result)
+
+
+class _RedirectHandler(http.server.BaseHTTPRequestHandler):
+    """Answers every GET with a 302 to `redirect_target` (set by the
+    test before starting the server)."""
+    redirect_target = None
+
+    def log_message(self, *a, **k):
+        pass  # keep test output quiet
+
+    def do_GET(self):
+        self.send_response(302)
+        self.send_header("Location", self.redirect_target)
+        self.end_headers()
+
+
+class _AttackerHandler(http.server.BaseHTTPRequestHandler):
+    """Records every request it receives (headers included) -- the
+    Critical fix round 1 test asserts this list stays empty."""
+    hits = []
+
+    def log_message(self, *a, **k):
+        pass
+
+    def do_GET(self):
+        _AttackerHandler.hits.append(dict(self.headers))
+        body = b"{}"
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+class RedirectRefusalTest(unittest.TestCase):
+    """Critical, fix round 1 security review: urlopen's default opener
+    follows a redirect and RE-SENDS Authorization to the new host -- a
+    302 from the usage endpoint to a foreign origin delivered a canary
+    bearer token to an attacker server over plaintext http. Both real
+    servers here are bound to 127.0.0.1 (loopback only, same as every
+    other test in this suite -- no non-loopback connection is ever made)."""
+
+    def setUp(self):
+        limits._cache.clear()
+        _AttackerHandler.hits = []
+        self.attacker = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _AttackerHandler)
+        self.attacker_thread = threading.Thread(target=self.attacker.serve_forever, daemon=True)
+        self.attacker_thread.start()
+        attacker_port = self.attacker.server_address[1]
+        _RedirectHandler.redirect_target = f"http://127.0.0.1:{attacker_port}/stolen"
+
+        self.origin = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _RedirectHandler)
+        self.origin_thread = threading.Thread(target=self.origin.serve_forever, daemon=True)
+        self.origin_thread.start()
+        self.origin_url = f"http://127.0.0.1:{self.origin.server_address[1]}/"
+
+    def tearDown(self):
+        self.origin.shutdown()
+        self.origin_thread.join(timeout=5)
+        self.origin.server_close()
+        self.attacker.shutdown()
+        self.attacker_thread.join(timeout=5)
+        self.attacker.server_close()
+
+    def test_opener_refuses_redirect_to_another_origin(self):
+        req = urllib.request.Request(
+            self.origin_url, headers={"Authorization": "Bearer " + _FAKE_TOKEN})
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            limits._NO_REDIRECT_OPENER.open(req, timeout=5)
+        self.assertEqual(ctx.exception.code, 302)
+        self.assertEqual(_AttackerHandler.hits, [],
+                          "the redirect target must never receive a request")
+
+    def test_fetch_from_api_never_follows_redirect_to_foreign_origin(self):
+        def read_token_fn(timeout):
+            return _FAKE_TOKEN
+
+        with mock.patch.object(limits, "USAGE_URL", self.origin_url):
+            with self.assertRaises(Exception):
+                limits._fetch_from_api(5, read_token_fn=read_token_fn)
+
+        self.assertEqual(_AttackerHandler.hits, [],
+                          "the redirect target must never receive a request, "
+                          "and the token must never reach it")
+
+    def test_get_limits_reports_a_clean_failure_not_a_hang(self):
+        def read_token_fn(timeout):
+            return _FAKE_TOKEN
+
+        def fetch_fn(timeout):
+            with mock.patch.object(limits, "USAGE_URL", self.origin_url):
+                return limits._fetch_from_api(timeout, read_token_fn=read_token_fn)
+
+        result = limits.get_limits(now_fn=lambda: 1.0, fetch_fn=fetch_fn)
+        self.assertFalse(result["available"])
+        self.assertEqual(result["error"], "HTTPError")
+        self.assertEqual(_AttackerHandler.hits, [])
+
+
+class SingleFlightConcurrencyTest(unittest.TestCase):
+    """Important 1, fix round 1: eight concurrent get_limits() calls used
+    to make eight real fetches. The hub is a ThreadingHTTPServer, so
+    concurrent callers are real -- get_limits() must guard the throttle
+    with a lock so only one of them actually fetches."""
+
+    def setUp(self):
+        limits._cache.clear()
+
+    def test_concurrent_calls_share_one_real_fetch(self):
+        calls = {"n": 0}
+        calls_lock = threading.Lock()
+
+        def fetch_fn(timeout):
+            with calls_lock:
+                calls["n"] += 1
+            time.sleep(0.05)  # widen the window concurrent callers can land in
+            return {"five_hour": {"utilization": 10.0, "resets_at": "r"},
+                    "seven_day": None, "limits": [], "spend": None, "extra_usage": None}
+
+        barrier = threading.Barrier(8)
+        results = []
+        results_lock = threading.Lock()
+
+        def worker():
+            barrier.wait(timeout=5)
+            r = limits.get_limits(now_fn=time.time, fetch_fn=fetch_fn)
+            with results_lock:
+                results.append(r)
+
+        threads = [threading.Thread(target=worker) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=5)
+
+        self.assertEqual(calls["n"], 1, "only one thread should have performed a real fetch")
+        self.assertEqual(len(results), 8)
+        for r in results:
+            self.assertTrue(r["available"])
+
+
+class FetchBudgetTest(unittest.TestCase):
+    """Important 2, fix round 1: the token read and the HTTPS call share
+    ONE overall timeout budget, not one full budget each -- worst case
+    used to be 2x timeout (measured 5.83s against a hung endpoint before
+    this fix), against a contract that promises a hard 5s cap and a hub
+    poll timeout of ~10s."""
+
+    def test_slow_token_read_leaves_a_reduced_budget_for_the_http_call(self):
+        def read_token_fn(timeout):
+            time.sleep(0.2)
+            return _FAKE_TOKEN
+
+        captured = {}
+
+        def fake_open(req, timeout):
+            captured["timeout"] = timeout
+            raise urllib.error.URLError("stop here, this test only checks the budget")
+
+        with mock.patch.object(limits._NO_REDIRECT_OPENER, "open", side_effect=fake_open):
+            with self.assertRaises(urllib.error.URLError):
+                limits._fetch_from_api(1.0, read_token_fn=read_token_fn)
+
+        self.assertLess(captured["timeout"], 1.0)
+        self.assertGreater(captured["timeout"], 0.0)
+
+    def test_token_read_exhausting_the_budget_raises_without_attempting_http(self):
+        def read_token_fn(timeout):
+            time.sleep(0.05)
+            return _FAKE_TOKEN
+
+        called = {"n": 0}
+
+        def fake_open(req, timeout):
+            called["n"] += 1
+            raise AssertionError("the HTTPS call must never be attempted here")
+
+        with mock.patch.object(limits._NO_REDIRECT_OPENER, "open", side_effect=fake_open):
+            with self.assertRaises(TimeoutError):
+                limits._fetch_from_api(0.01, read_token_fn=read_token_fn)
+
+        self.assertEqual(called["n"], 0)
+
+    def test_read_token_macos_forwards_the_remaining_budget_not_the_full_default(self):
+        captured = {}
+
+        def runner(cmd, **kwargs):
+            captured["timeout"] = kwargs.get("timeout")
+            return _FakeCompletedProcess(
+                json.dumps({"claudeAiOauth": {"accessToken": _FAKE_TOKEN}}).encode())
+
+        limits._read_token_macos(runner=runner, timeout=1.5)
+        self.assertEqual(captured["timeout"], 1.5)
+        self.assertNotEqual(captured["timeout"], limits.FETCH_TIMEOUT_SECONDS)
+
+
+class TimeoutErrorNormalizationTest(unittest.TestCase):
+    """Minor, fix round 1: a socket-level timeout's type name is
+    "timeout" on 3.9 and "TimeoutError" on 3.10+ (socket.timeout became a
+    plain alias of the builtin there). Normalised to one value here so
+    the UI never has to know which Python produced it."""
+
+    def test_socket_timeout_normalizes_to_timeouterror_string(self):
+        def fetch_fn(timeout):
+            raise socket.timeout("timed out")
+
+        result = limits._do_fetch(1000.0, 5, fetch_fn)
+        self.assertEqual(result["error"], "TimeoutError")
+
+    def test_plain_timeouterror_also_normalizes(self):
+        def fetch_fn(timeout):
+            raise TimeoutError("timed out")
+
+        result = limits._do_fetch(1000.0, 5, fetch_fn)
+        self.assertEqual(result["error"], "TimeoutError")
 
 
 if __name__ == "__main__":
