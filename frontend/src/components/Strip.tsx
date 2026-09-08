@@ -17,22 +17,39 @@ import { LimitsSummary } from './LimitsSummary';
 interface StripProps {
   cards: DeviceCard[];
   /** Live effective-token total across devices we can vouch for (App.tsx),
-   * derived from /api/fleet's per-session usage — not the old TUI-scrape
+   * derived from /api/fleet's per-session usage, not the old TUI-scrape
    * `card.tokens` field, which is null for every session now. null means
    * the fleet hasn't reported enough to vouch for any total yet: render a
    * placeholder, never a 0 that looks like a confirmed empty fleet. */
   totalTokens: number | null;
+  /** False until /rc/overview has answered at least once (App.tsx).
+   * Round 4: Online and Sessions were reading `cards` directly with no
+   * such gate, so the same fabricated-zero window the Effective fix
+   * already covers was showing a confident "Online 0/0" / "Sessions 0"
+   * during the brief pre-load period after mount, before cards had ever
+   * been populated. cards.length is 0 in both "confirmed empty fleet" and
+   * "haven't heard yet"; only hasLoadedCards tells them apart. */
+  hasLoadedCards: boolean;
 }
 
-export function Strip({ cards, totalTokens }: StripProps) {
+export function Strip({ cards, totalTokens, hasLoadedCards }: StripProps) {
   const onlineCount = cards.filter((c) => c.online).length;
   const offlineCount = cards.length - onlineCount;
   const totalSessions = cards.reduce((s, c) => s + c.sessions, 0);
 
   type Cell = { label: string; value: string; sub?: string; dot?: string };
   const cells: Cell[] = [
-    { label: 'Online',    value: `${onlineCount}/${cards.length}`, sub: `${offlineCount} offline`, dot: RT.green },
-    { label: 'Sessions',  value: String(totalSessions),             sub: 'running' },
+    {
+      label: 'Online',
+      value: hasLoadedCards ? `${onlineCount}/${cards.length}` : '—/—',
+      sub: hasLoadedCards ? `${offlineCount} offline` : undefined,
+      dot: hasLoadedCards ? RT.green : undefined,
+    },
+    {
+      label: 'Sessions',
+      value: hasLoadedCards ? String(totalSessions) : '—',
+      sub: hasLoadedCards ? 'running' : undefined,
+    },
     { label: 'Effective', value: totalTokens != null ? fmtK(totalTokens) : '—', sub: 'tokens' },
   ];
 

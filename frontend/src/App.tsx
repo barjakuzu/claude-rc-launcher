@@ -47,7 +47,7 @@ export function App() {
   };
 
   // hasLoadedCards distinguishes "confirmed zero devices" from "/rc/overview
-  // just hasn't answered yet" — cards.length is 0 in both cases, and
+  // just hasn't answered yet" (cards.length is 0 in both cases), and
   // reading the latter as the former was producing a fabricated "0" on the
   // Effective-tokens aggregate during the brief window after mount where
   // useFleet's SSE had already connected (fleetLoaded true) but this
@@ -62,7 +62,7 @@ export function App() {
       }
       setHasLoadedCards(true);
     } catch {
-      // Network error — keep existing cards; hasLoadedCards stays whatever
+      // Network error: keep existing cards, hasLoadedCards stays whatever
       // it already was rather than being forced true on a failed call.
     }
   }, []);
@@ -82,7 +82,7 @@ export function App() {
 
   const openCard: DeviceCard | undefined = cards.find((c) => c.id === openId);
 
-  // Single fleet subscription for the whole app shell — BigCard/DeviceHero
+  // Single fleet subscription for the whole app shell: BigCard/DeviceHero
   // both need live per-session usage, and calling useFleet() once here
   // (rather than once per rendered card) avoids opening a redundant SSE
   // connection per device tile.
@@ -90,8 +90,8 @@ export function App() {
   // Mirrors CostView.tsx's own fleetLoaded computation: before the fleet
   // has reported at all (no SSE frame yet, no fallback poll response yet),
   // an empty sessions array means "we haven't heard," not "confirmed zero
-  // sessions" — reading it as the latter would render a lying 0 during the
-  // loading window, the exact failure mode this round is about removing.
+  // sessions" (reading it as the latter would render a lying 0 during the
+  // loading window, the exact failure mode this round is about removing).
   const fleetLoaded = connected || usingFallback || fleetDevices.length > 0 || fleetSessions.length > 0;
   const usageByDevice = useMemo<Map<string, DeviceUsage>>(() => {
     const m = new Map<string, DeviceUsage>();
@@ -107,7 +107,7 @@ export function App() {
   // Aggregate effective tokens across devices we can vouch for. Unknown
   // (null) devices are left out of the sum rather than treated as 0, and
   // the whole aggregate is a placeholder rather than 0 whenever there is
-  // at least one card but not a single device has vouched for a number —
+  // at least one card but not a single device has vouched for a number:
   // an undercounted-but-confident-looking total is exactly the wrong
   // failure mode here, one register up from the per-card fix.
   const knownUsages = cards.map((c) => usageByDevice.get(c.id)?.effective).filter((v): v is number => v != null);
@@ -131,6 +131,16 @@ export function App() {
       fontFamily: FONT_SANS,
       display: 'flex', flexDirection: 'column', overflow: 'hidden',
       position: 'relative',
+      // Round 4: top/bottom safe areas were already handled (Header.tsx's
+      // safe-area-inset-top, MobileNav.tsx's safe-area-inset-bottom), but
+      // nothing accounted for left/right, which matter in landscape on a
+      // notched or rounded-corner device. Zero in portrait, so this has no
+      // visible effect there; applying it to the whole app shell rather
+      // than each edge-touching bar individually means every bar insets
+      // from the notch together instead of some clearing it and others
+      // running under it.
+      paddingLeft: 'env(safe-area-inset-left)',
+      paddingRight: 'env(safe-area-inset-right)',
     }}>
       <Header
         cards={cards}
@@ -140,14 +150,14 @@ export function App() {
         onRefresh={loadOverview}
       />
 
-      {!layout.mobile && <Strip cards={cards} totalTokens={totalTokens} />}
+      {!layout.mobile && <Strip cards={cards} totalTokens={totalTokens} hasLoadedCards={hasLoadedCards} />}
       {/* Round 3: the mobile equivalent of Strip used to live only inside
-          the Devices tab's OverviewGrid — invisible on every other mobile
+          the Devices tab's OverviewGrid, invisible on every other mobile
           tab. Lifted to this same top-level, always-rendered position
           (matching desktop's Strip) so account limits and the fleet
           numbers are reachable without switching tabs, not just glanceable
           when you happen to be looking at Devices. */}
-      {layout.mobile && <MobileTopStrip cards={cards} totalTokens={totalTokens} />}
+      {layout.mobile && <MobileTopStrip cards={cards} totalTokens={totalTokens} hasLoadedCards={hasLoadedCards} />}
 
       <div style={{ flex: 1, display: 'flex', overflow: 'hidden', minHeight: 0 }}>
         {/* Left rail: only when a device is open and not mobile */}
@@ -273,16 +283,23 @@ import type { Layout } from './useLayout';
 // Mobile equivalent of Strip.tsx, now rendered at the same always-visible
 // top level (see App() above) rather than nested inside the Devices tab's
 // OverviewGrid. Round 3: dropped the Load cell (same reasoning as
-// Strip.tsx) and added a LimitsSummary row — account limits, not CPU load,
+// Strip.tsx) and added a LimitsSummary row: account limits, not CPU load,
 // is what the user asked to have visible "like the status bar".
-function MobileTopStrip({ cards, totalTokens }: { cards: DeviceCard[]; totalTokens: number | null }) {
+function MobileTopStrip({ cards, totalTokens, hasLoadedCards }: {
+  cards: DeviceCard[]; totalTokens: number | null; hasLoadedCards: boolean;
+}) {
   const onlineCount = cards.filter((c) => c.online).length;
   const totalSessions = cards.reduce((s, c) => s + c.sessions, 0);
 
+  // Round 4: same fabricated-zero gate as Strip.tsx. cards.length is 0
+  // both when the fleet is confirmed empty and when /rc/overview simply
+  // has not answered yet; only hasLoadedCards tells those apart, and
+  // reading the latter as the former showed a confident "Online 0/0" /
+  // "Sessions 0" during the brief pre-load window after mount.
   type MCell = { label: string; value: string; dot?: string };
   const cells: MCell[] = [
-    { label: 'Online',    value: `${onlineCount}/${cards.length}`, dot: RT.green },
-    { label: 'Sessions',  value: String(totalSessions) },
+    { label: 'Online',    value: hasLoadedCards ? `${onlineCount}/${cards.length}` : '—/—', dot: hasLoadedCards ? RT.green : undefined },
+    { label: 'Sessions',  value: hasLoadedCards ? String(totalSessions) : '—' },
     { label: 'Effective', value: totalTokens != null ? fmtK(totalTokens) : '—' },
   ];
 
@@ -294,7 +311,7 @@ function MobileTopStrip({ cards, totalTokens }: { cards: DeviceCard[]; totalToke
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8 }}>
         {cells.map((c) => (
           <div key={c.label}>
-            <div style={{ fontSize: 8, color: RT.textLow, letterSpacing: '.14em', textTransform: 'uppercase', fontFamily: FONT_MONO }}>{c.label}</div>
+            <div style={{ fontSize: 9, color: RT.textLow, letterSpacing: '.14em', textTransform: 'uppercase', fontFamily: FONT_MONO }}>{c.label}</div>
             <div style={{ display: 'flex', alignItems: 'baseline', gap: 4, marginTop: 3 }}>
               {c.dot && <span style={{ width: 5, height: 5, borderRadius: 5, background: c.dot, display: 'inline-block' }} />}
               <div style={{ fontFamily: FONT_MONO, fontSize: 15, fontWeight: 500 }}>{c.value}</div>
