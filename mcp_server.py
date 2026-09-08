@@ -28,6 +28,8 @@ import sys
 import urllib.request
 import urllib.error
 
+import noredirect
+
 RC_PORT = os.environ.get("RC_PORT", "8200")
 RC_AUTH_USER = os.environ.get("RC_AUTH_USER", "")
 RC_AUTH_PASS = os.environ.get("RC_AUTH_PASS", "")
@@ -113,7 +115,14 @@ def _api_call(method, path, body=None):
 
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        # noredirect.NO_REDIRECT_OPENER, never bare urllib.request.urlopen:
+        # urlopen's default opener follows a redirect and re-sends the
+        # Authorization header (RC_AUTH_PASS) to wherever it points. This
+        # call is loopback-only (BASE_URL is always http://localhost),
+        # so exploiting it needs local access, but it is the exact same
+        # bug fixed everywhere else this codebase sends a credential over
+        # HTTP -- see noredirect.py.
+        with noredirect.NO_REDIRECT_OPENER.open(req, timeout=10) as resp:
             return json.loads(resp.read().decode())
     except urllib.error.HTTPError as e:
         try:
