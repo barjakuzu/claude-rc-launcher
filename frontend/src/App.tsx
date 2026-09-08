@@ -173,7 +173,7 @@ export function App() {
                 <AllSessions onOpenDevice={handleOpenDevice} />
               )}
               {mTab === 'scheduled' && (
-                <AllScheduled cards={cards} />
+                <AllScheduled cards={cards} hasLoadedCards={hasLoadedCards} />
               )}
               {mTab === 'activity' && (
                 <Activity cards={cards} />
@@ -226,7 +226,7 @@ export function App() {
                 {desktopView === 'devices' && (
                   <OverviewGrid cards={cards} layout={layout} onOpen={handleOpen} usageByDevice={usageByDevice} />
                 )}
-                {desktopView === 'tasks' && <AllScheduled cards={cards} />}
+                {desktopView === 'tasks' && <AllScheduled cards={cards} hasLoadedCards={hasLoadedCards} />}
                 {desktopView === 'sessions' && (
                   <AllSessions onOpenDevice={handleOpenDevice} />
                 )}

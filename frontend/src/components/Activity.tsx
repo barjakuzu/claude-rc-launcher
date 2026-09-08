@@ -44,7 +44,7 @@ function statusColor(status: string): string {
 }
 
 export function Activity({ cards }: ActivityProps) {
-  const schedItems = useAllSchedules(cards, true);
+  const { items: schedItems } = useAllSchedules(cards, true);
 
   // Derive events from schedule history entries.
   const events: ActivityEvent[] = [];

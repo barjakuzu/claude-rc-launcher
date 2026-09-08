@@ -27,7 +27,7 @@ interface AllSessionsProps {
 interface PreviewState { deviceId: string; name: string; sessionId?: string; mode?: string; }
 
 export function AllSessions({ onOpenDevice }: AllSessionsProps) {
-  const { devices, sessions, usingFallback, stale } = useFleet();
+  const { devices, sessions, connected, usingFallback, stale } = useFleet();
   const [pending, setPending] = useState<Record<string, boolean>>({});
   const [preview, setPreview] = useState<PreviewState | null>(null);
   const [rcUrls, setRcUrls] = useState<Record<string, string>>({});
@@ -105,10 +105,19 @@ export function AllSessions({ onOpenDevice }: AllSessionsProps) {
   const deviceCount = new Set(sessions.map((s) => s.device_id)).size;
   const connectionNote = stale ? ' · stream stale, polling' : usingFallback ? ' · polling' : '';
 
+  // Round 5: same fabricated-zero pattern as the strip (App.tsx, Strip.tsx),
+  // swept here too rather than left as a smaller, less prominent instance.
+  // A zero must mean the same thing everywhere in this app: "confirmed
+  // none," never "we have not heard yet." Mirrors CostView.tsx's own
+  // fleetLoaded computation (the same useFleet, the same three signals).
+  const fleetLoaded = connected || usingFallback || devices.length > 0 || sessions.length > 0;
+
   return (
     <div style={{ flex: 1, overflow: 'auto', display: 'flex', flexDirection: 'column' }}>
       <MobileHeader
-        subtitle={`${sessions.length} total session${sessions.length !== 1 ? 's' : ''} · across ${deviceCount} device${deviceCount !== 1 ? 's' : ''}${connectionNote}`}
+        subtitle={fleetLoaded
+          ? `${sessions.length} total session${sessions.length !== 1 ? 's' : ''} · across ${deviceCount} device${deviceCount !== 1 ? 's' : ''}${connectionNote}`
+          : 'Loading sessions…'}
         title="Sessions"
         right={
           <button style={{ background: RT.panel, border: `1px solid ${RT.border}`, borderRadius: 7, width: 44, height: 44, display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }}>
@@ -119,7 +128,7 @@ export function AllSessions({ onOpenDevice }: AllSessionsProps) {
       <div style={{ padding: '12px 12px 32px', display: 'flex', flexDirection: 'column', gap: 8 }}>
         {sortedSessions.length === 0 && (
           <div style={{ padding: 32, textAlign: 'center', color: RT.textLow, fontFamily: FONT_MONO, fontSize: 13, border: `1px dashed ${RT.border}`, borderRadius: 10 }}>
-            No active sessions across devices.
+            {fleetLoaded ? 'No active sessions across devices.' : 'Loading sessions…'}
           </div>
         )}
         {sortedSessions.map((s: FleetSession) => {
