@@ -39,8 +39,8 @@ function MiniBar({ pct, color }: { pct: number | null; color: string }) {
 function BadgeContent({ primary }: { primary: LimitsPrimary }) {
   const fh = primary.five_hour;
   const sd = primary.seven_day;
-  const fhColor = fh ? limitColor(fh.percent, undefined) : RT.textLow;
-  const sdColor = sd ? limitColor(sd.percent, undefined) : RT.textLow;
+  const fhColor = fh ? limitColor(fh.percent, fh.severity) : RT.textLow;
+  const sdColor = sd ? limitColor(sd.percent, sd.severity) : RT.textLow;
   const urgent = (fh != null && fh.percent >= 90) || (sd != null && sd.percent >= 90);
   return (
     <>
@@ -73,7 +73,7 @@ function WindowRow({ label, window, now }: { label: string; window: LimitsWindow
       </div>
     );
   }
-  const color = limitColor(window.percent, undefined);
+  const color = limitColor(window.percent, window.severity);
   const stale = isWindowStale(window.resets_at, now);
   const countdown = stale ? 'resetting…' : formatCountdown(window.resets_at, now);
   return (

@@ -361,14 +361,23 @@ export async function fetchAlerts(): Promise<AlertsReport> {
 // body just like fetchCost/fetchAlerts, so useLimits.ts can degrade honestly
 // instead of showing a spinner forever or a fabricated 0%.
 
-// A single reset window (five_hour / seven_day). CONTRACT.md section 3's
-// example carries no `severity` on these two windows (only `scoped[]` and
-// `spend` get one) — see task-l2-report.md for why the frontend falls back
-// to percent-banded colour for these specifically. resets_at is nullable:
-// an unavailable device's payload may omit or null it.
+// A single reset window (five_hour / seven_day). Amendment 1 to
+// CONTRACT.md (Round 2) added `severity` here, sourced from the matching
+// raw `limits[]` row by kind (session -> five_hour, weekly_all ->
+// seven_day), null when no matching row exists. Round 1 had these two
+// windows carrying only {percent, resets_at}, which forced the frontend to
+// fall back to percent-banded colour for the two most important numbers on
+// the screen — limitsFormat.ts's limitColor still carries that fallback as
+// a safety net for a null severity, but now prefers the real value when
+// present, per CONTRACT.md section 6. resets_at is nullable: an
+// unavailable device's payload may omit or null it.
 export interface LimitsWindow {
   percent: number;
   resets_at: string | null;
+  /** Optional for a backend a step behind Amendment 1 — treat absence the
+   * same as null (limitColor falls back to percent-band colour either
+   * way). Always present going forward per the amended contract. */
+  severity?: string | null;
 }
 
 // One scoped (per-model) weekly limit. `label` is `scope.model.display_name`
@@ -447,7 +456,14 @@ export interface LimitsReport {
 function isLimitsWindow(v: unknown): v is LimitsWindow {
   if (!v || typeof v !== 'object') return false;
   const w = v as Record<string, unknown>;
-  return typeof w.percent === 'number' && (typeof w.resets_at === 'string' || w.resets_at === null);
+  return typeof w.percent === 'number'
+    && (typeof w.resets_at === 'string' || w.resets_at === null)
+    // severity is nullable (Amendment 1: null when no matching limits[]
+    // row exists) but permissively accepted when merely absent too, same
+    // as elsewhere in this file — a backend a step behind this amendment
+    // should degrade to limitColor's percent-band fallback, not reject
+    // the whole window.
+    && (w.severity === undefined || typeof w.severity === 'string' || w.severity === null);
 }
 
 function isLimitsScoped(v: unknown): v is LimitsScoped {
