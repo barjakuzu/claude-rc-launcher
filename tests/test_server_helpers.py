@@ -1809,6 +1809,34 @@ class ApiLimitsRouteTest(_ApiRouteFixture):
         self.assertEqual(len(data["devices"]), 1)
         self.assertFalse(data["devices"][0]["available"])
 
+    def test_single_fetcher_fleet_stays_sensible_with_two_non_reporting_devices(self):
+        # Task L5 consequence 2: "A device that is not the hub has no
+        # limits of its own... Confirm the API still serves a sensible
+        # /api/limits" -- a 3-device fleet where only the elected fetcher
+        # ever had fleet.is_limits_hub()==True must still answer with a
+        # real primary, not look broken just because two of three
+        # devices never sent a "limits" key at all (fleetpoll._ingest's
+        # existing "absent means nothing to store" handling, so these two
+        # devices simply never got an account_limits row -- not an
+        # available=False one).
+        for device_id, name in (("hub", "Hub VM"), ("laptop", "Laptop"), ("phone", "Phone")):
+            server.HUB_STORE.upsert_device({"id": device_id, "name": name, "role": "full",
+                                             "version": "1", "claude_version": "1"})
+        server.HUB_STORE.upsert_account_limits("hub", self._limits_payload())
+
+        data, code = self._get_json("/api/limits")
+
+        self.assertEqual(code, 200)
+        self.assertIsNotNone(data["primary"])
+        self.assertEqual(data["primary"]["device_id"], "hub")
+        self.assertEqual(data["primary"]["five_hour"]["percent"], 56.0)
+        # Only the fetcher appears here -- the other two are never
+        # invented as available=False rows just because they're known
+        # devices in the `devices` table.
+        self.assertEqual(len(data["devices"]), 1)
+        self.assertEqual(data["devices"][0]["device_id"], "hub")
+        self.assertFalse(data["divergent"])
+
 
 class ShouldProxyQueryStringTest(unittest.TestCase):
     def test_should_proxy_classifies_correctly_with_query_string(self):
