@@ -4,6 +4,21 @@ import { api } from './api';
 import type { Session, Schedule } from './types';
 import type { PanelTab } from './components/PanelTabs';
 
+// api.ts's req() only special-cases a 401 (redirects to /login); every
+// other non-2xx status, including the hub's 502 `{"error": "device
+// unreachable", "detail": ...}` when it tries to proxy /sessions or
+// /schedules to a device it can't currently reach, resolves as ordinary
+// JSON, not a thrown exception. Without this check that error body fell
+// through the same `Array.isArray(data) ? data : (data?.sessions ?? [])`
+// fallback a genuinely-empty response takes, landing on `[]` and flipping
+// hasLoaded exactly like real data: "the hub told us it couldn't reach
+// this device" rendered identically to "confirmed zero sessions" (a fifth
+// appearance of the same bug, this time via an error response mistaken
+// for data rather than an unfetched initial state).
+function isErrorResponse(v: unknown): v is { error: string } {
+  return !!v && typeof v === 'object' && 'error' in v;
+}
+
 export function usePanelData(deviceId: string, tab: PanelTab) {
   const [sessions, setSessions]   = useState<Session[]>([]);
   const [scheduled, setScheduled] = useState<Schedule[]>([]);
@@ -35,6 +50,10 @@ export function usePanelData(deviceId: string, tab: PanelTab) {
   const fetchSessions = useCallback(async () => {
     try {
       const data = await api.sessions(deviceId);
+      // Same treatment as the catch block below: an error body is not
+      // real data, so keep whatever was last known and don't claim we've
+      // loaded (see isErrorResponse above).
+      if (isErrorResponse(data)) return;
       const arr: Session[] = Array.isArray(data) ? data : (data?.sessions ?? []);
       setSessions(arr);
       setHasLoadedSessions(true);
@@ -44,6 +63,7 @@ export function usePanelData(deviceId: string, tab: PanelTab) {
   const fetchScheduled = useCallback(async () => {
     try {
       const data = await api.schedules(deviceId);
+      if (isErrorResponse(data)) return;
       const arr: Schedule[] = Array.isArray(data) ? data : (data?.schedules ?? []);
       setScheduled(arr);
       setHasLoadedScheduled(true);
