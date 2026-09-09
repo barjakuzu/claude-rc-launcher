@@ -83,7 +83,7 @@ export function Activity({ cards, hasLoadedCards }: ActivityProps) {
         subtitle="last 24 hours"
         title="Activity"
         right={
-          <button style={{ background: RT.panel, border: `1px solid ${RT.border}`, borderRadius: 7, width: 34, height: 34, display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }}>
+          <button style={{ background: RT.panel, border: `1px solid ${RT.border}`, borderRadius: 7, width: 44, height: 44, display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }}>
             <Icons.filter size={14} stroke={RT.textDim} />
           </button>
         }

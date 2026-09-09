@@ -113,8 +113,11 @@ export function DeviceHero({ device, cards, mobile = false, onClose, onStopAllDo
           <button
             onClick={onClose}
             style={{
+              // 44px mobile floor (Apple HIG / Material): this button only
+              // ever renders on mobile (guarded above), so no desktop size
+              // to preserve.
               background: RT.panel, border: `1px solid ${RT.border}`, borderRadius: 7,
-              width: 30, height: 30, padding: 0, cursor: 'pointer',
+              width: 44, height: 44, padding: 0, cursor: 'pointer',
               display: 'flex', alignItems: 'center', justifyContent: 'center', flex: 'none',
             }}
           >

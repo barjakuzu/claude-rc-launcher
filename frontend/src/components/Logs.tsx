@@ -38,7 +38,12 @@ export function Logs({ device }: LogsProps) {
     const cores = stats.cores;
     const loadPct = Math.round((stats.loadavg[0] / cores) * 100);
     const tokensNow = stats.tokens_now ?? device.tokens;
-    const sessionCount = stats.sessions ?? device.sessions;
+    // device.sessions is null for a device overview.py can't currently
+    // reach; stats being truthy here only proves this direct /rc/stats
+    // call succeeded, which can race ahead of a stale overview card still
+    // reporting the device unreachable. Without the last fallback this
+    // rendered the literal text "sessions null".
+    const sessionCount = stats.sessions ?? device.sessions ?? '—';
     const historySamples = stats.token_history?.length ?? 0;
 
     text = [
