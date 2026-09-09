@@ -9,8 +9,51 @@ import { fixedMenuPos } from './menuPos';
 import { describeSchedule } from '../scheduleDisplay';
 import type { Schedule, DeviceCard } from '../types';
 
+// task-l3: `trigger`/`limits_unavailable` aren't on the shared Schedule
+// type (types.ts belongs to a parallel lane for this task) - declared
+// locally and intersected in, same pattern AllScheduled.tsx and
+// ScheduleModal.tsx use. Without this, a limit_reset trigger task showed
+// as "manual" here (its cron is always null) even though it will in fact
+// fire at the next reset - actively misleading, not merely incomplete.
+interface LimitResetTrigger {
+  kind: 'limit_reset';
+  window: 'five_hour' | 'seven_day';
+  delay_minutes?: number;
+}
+type ScheduleWithTrigger = Schedule & {
+  trigger?: LimitResetTrigger | null;
+  limits_unavailable?: boolean;
+};
+
+/** Timing description for a row: the shared describeSchedule() for a
+ * plain cron/manual task, or a trigger-aware label for a limit_reset
+ * task (whose cron is always null, so describeSchedule() alone would
+ * just say "manual" and lose the "why"). */
+function describeTiming(s: ScheduleWithTrigger): string {
+  if (s.trigger && s.trigger.kind === 'limit_reset') {
+    const windowLabel = s.trigger.window === 'seven_day' ? 'weekly limit resets' : '5-hour limit resets';
+    const delay = s.trigger.delay_minutes;
+    return delay ? `When ${windowLabel} (+${delay}m)` : `When ${windowLabel}`;
+  }
+  return describeSchedule(s);
+}
+
+/** Next-fire label for a row, or null when there's nothing worth
+ * showing (disabled, or a plain cron task with no next_run computed).
+ * A limit_reset task that is enabled but has no usable next_run says so
+ * plainly ("limits unavailable") instead of showing nothing, which
+ * would look identical to "no reset ever coming" - task-l3 brief. */
+function nextFireLabel(s: ScheduleWithTrigger): string | null {
+  if (!s.enabled) return null;
+  const isLimitReset = s.trigger && s.trigger.kind === 'limit_reset';
+  if (isLimitReset && (s.limits_unavailable || !s.next_run)) return 'limits unavailable';
+  if (!s.next_run) return null;
+  const time = new Date(s.next_run).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+  return `next ${time}`;
+}
+
 export interface ScheduledRowProps {
-  s: Schedule;
+  s: ScheduleWithTrigger;
   deviceId: string;
   mobile?: boolean;
   cards: DeviceCard[];
@@ -101,6 +144,10 @@ export function ScheduledRow({ s, deviceId, mobile = false, cards, onChanged, on
           }
         }
       }
+      // task-l3: a limit_reset trigger carries over on copy/move like any
+      // other schedule field - the account's usage windows are shared
+      // across the whole fleet, so "when my limit resets" means the same
+      // thing on the target device.
       const body = {
         name: s.name,
         cron: s.cron,
@@ -111,6 +158,7 @@ export function ScheduledRow({ s, deviceId, mobile = false, cards, onChanged, on
         model: s.model ?? undefined,
         enabled: s.enabled ?? false,
         concurrency: s.concurrency,
+        trigger: s.trigger ?? null,
       };
       const res = await api.schedCreate(targetDeviceId, body);
       if (res && res.ok === false) throw new Error(res.message ?? 'create failed');
@@ -171,7 +219,7 @@ export function ScheduledRow({ s, deviceId, mobile = false, cards, onChanged, on
           display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap',
         }}>
           <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-            <Icons.clock size={10} stroke={RT.textLow} /> {describeSchedule(s)}
+            <Icons.clock size={10} stroke={RT.textLow} /> {describeTiming(s)}
           </span>
           {s.mode && (
             <>
@@ -196,9 +244,9 @@ export function ScheduledRow({ s, deviceId, mobile = false, cards, onChanged, on
             <span style={{ color: RT.borderHi }}>·</span>
           </>
         )}
-        {s.next_run && (
+        {nextFireLabel(s) && (
           <span style={{ whiteSpace: 'nowrap', color: RT.textLow }}>
-            next {new Date(s.next_run).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}
+            {nextFireLabel(s)}
           </span>
         )}
       </div>

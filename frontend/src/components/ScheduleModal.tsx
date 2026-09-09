@@ -133,12 +133,16 @@ export function ScheduleModal({ deviceId, initial, onClose, onSaved }: ScheduleM
   const cronOk =
     preset === MANUAL_PRESET || preset === LIMIT_RESET_PRESET || isValidCronString(cron);
 
-  // Preset → fill cron input
+  // Preset -> fill cron input. Switching to Manual or "when my limit
+  // resets" deliberately does NOT blank `cron` here: only one trigger can
+  // ever drive a task, so a cron typed in stays out of the save payload
+  // either way (handleSave always sends cron: null for both), but the
+  // text itself is kept around rather than silently discarded - it
+  // reappears if the user switches back to a cron preset, and the note
+  // below makes the exclusivity visible instead of leaving it implicit.
   function handlePreset(value: string) {
     setPreset(value);
-    if (value === MANUAL_PRESET || value === LIMIT_RESET_PRESET) {
-      setCron('');
-    } else if (value) {
+    if (value && value !== MANUAL_PRESET && value !== LIMIT_RESET_PRESET) {
       setCron(value);
     }
   }
@@ -351,6 +355,13 @@ export function ScheduleModal({ deviceId, initial, onClose, onSaved }: ScheduleM
                   limit resets{delayMinutes > 0 ? `, delayed ${delayMinutes} minute${delayMinutes === 1 ? '' : 's'}` : ''},
                   useful for queuing work that should start the moment the window rolls over.
                 </div>
+              </div>
+            )}
+            {(preset === MANUAL_PRESET || preset === LIMIT_RESET_PRESET) && cron.trim() !== '' && (
+              <div style={{ fontSize: 11, color: RT.amber, marginTop: 5, fontFamily: FONT_MONO }}>
+                Cron "{cron.trim()}" won't be saved or run - only one trigger can drive a task, and
+                this one is set to {preset === MANUAL_PRESET ? 'Manual' : 'When my limit resets'}.
+                Switch back to Scheduled to use it.
               </div>
             )}
             {!cronOk && (
