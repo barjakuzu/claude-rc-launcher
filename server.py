@@ -7,6 +7,7 @@ import hmac
 import http.server
 import ipaddress
 import json
+import limits
 import logging
 import math
 import os
@@ -1498,6 +1499,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self._json({
                     "generated_at": now, "primary": None, "devices": [], "divergent": False,
                 })
+            # Task-m3: cheap (self-throttled, in-memory) side effect of
+            # serving this route -- see store.Store.record_usage_sample's
+            # own docstring for why sampling here, rather than from a
+            # poll loop, is enough to keep the token-budget estimate
+            # below fed at a useful resolution.
+            HUB_STORE.record_usage_sample(now_fn=lambda: now)
             view = HUB_STORE.limits_view()
             device_names = {
                 d["id"]: d.get("name", d["id"])
@@ -1534,6 +1541,27 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 # freshly parsed from payload_json on every call.
                 primary = dict(primary)
                 primary["device_id"] = view["primary_device_id"]
+                # Task-m3: attach the derived token-budget estimate to
+                # each window that has one, alongside the percent
+                # Anthropic reports -- never replacing it. A window with
+                # no estimate (not enough measurement history yet, or
+                # its percent is below limits.TOKEN_ESTIMATE_PERCENT_FLOOR)
+                # carries estimated_tokens: None, same "we don't know,
+                # don't guess" convention percent/resets_at already use
+                # elsewhere in this payload.
+                for _key, _window_seconds in (
+                    ("five_hour", limits.FIVE_HOUR_WINDOW_SECONDS),
+                    ("seven_day", limits.SEVEN_DAY_WINDOW_SECONDS),
+                ):
+                    _window = primary.get(_key)
+                    if isinstance(_window, dict):
+                        _consumed = HUB_STORE.effective_tokens_in_window(
+                            _window_seconds, now_fn=lambda: now)
+                        primary[_key] = {
+                            **_window,
+                            "estimated_tokens": limits.estimate_window_tokens(
+                                _window.get("percent"), _consumed),
+                        }
             self._json({
                 "generated_at": now,
                 "primary": primary,

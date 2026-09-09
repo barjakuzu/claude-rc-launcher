@@ -14,14 +14,31 @@
 // a proper `sessions` array to `/api/cost`, drawn from `session_usage`
 // joined to `sessions` so ended sessions survive; switch to that once the
 // API lane ships it.
-import { RT, FONT_SANS, FONT_MONO, fmtK, fmtUsage, hueForId, tintFor, usagePartialFor } from '../tokens';
+import { RT, FONT_SANS, FONT_MONO, fmtK, fmtPct, fmtUsage, hueForId, tintFor, usagePartialFor } from '../tokens';
 import { Sparkline } from './primitives';
-import type { CostDevice, CostDailyBucket, FleetSession, SessionUsage } from '../api';
+import type { CostDevice, CostDailyBucket, FleetSession, SessionUsage, LimitsWindow } from '../api';
 import { useFleet } from '../hooks/useFleet';
 import { useCost } from '../hooks/useCost';
+import { useLimits } from '../hooks/useLimits';
+import { limitColor } from '../limitsFormat';
 import { formatRelativeTime } from '../relativeTime';
 
 const TOP_SESSIONS = 10;
+
+// task-m3 (2026-09-09-usability): `estimated_tokens` isn't on the shared
+// LimitsWindow type (api.ts is owned by a parallel lane for this task) -
+// declared locally and intersected in, same pattern LimitsSummary.tsx
+// (and ScheduleModal.tsx's `trigger` field) use for the same reason.
+// This hub's own derived token-budget estimate, not a figure Anthropic
+// reports - see limits.py's estimate_window_tokens for the derivation
+// and its "never guess" refusals.
+interface EstimatedTokens {
+  consumed: number;
+  budget: number;
+  remaining: number;
+  approximate: true;
+}
+type WindowWithEstimate = LimitsWindow & { estimated_tokens?: EstimatedTokens | null };
 
 interface CostViewProps {
   /** Optional. Lets a device row jump to that device's detail view,
@@ -80,6 +97,11 @@ function PartialMark({ status }: { status: boolean | undefined }) {
 export function CostView({ onOpenDevice }: CostViewProps) {
   const { report, status } = useCost();
   const { devices: fleetDevices, sessions: fleetSessions, hasLoaded: fleetLoaded } = useFleet();
+  // task-m3: the user's own words, "I don't see how much of the 5-hour
+  // tokens and weekly tokens are consumed" -- same /api/limits payload
+  // LimitsSummary.tsx's dropdown already reads, surfaced here too since
+  // this is the other place that request was aimed at.
+  const { report: limitsReport } = useLimits();
 
   if (status === 'unavailable') {
     return (
@@ -149,6 +171,15 @@ export function CostView({ onOpenDevice }: CostViewProps) {
       <div style={{ fontFamily: FONT_MONO, fontSize: 10.5, color: RT.textLow, marginBottom: 16 }}>
         updated {formatRelativeTime(report.generated_at)}
       </div>
+
+      {limitsReport?.primary?.available && (
+        <Section title="Limits">
+          <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+            <LimitEstimateCard label="5 hour" window={limitsReport.primary.five_hour} />
+            <LimitEstimateCard label="7 day" window={limitsReport.primary.seven_day} />
+          </div>
+        </Section>
+      )}
 
       <Section title="Devices">
         {devicesByTotal.length === 0 ? (
@@ -257,6 +288,58 @@ function Section({ title, note, children }: { title: string; note?: string; chil
         </div>
       )}
       {children}
+    </div>
+  );
+}
+
+// task-m3: one window's percent + our own derived token estimate. `null`
+// (window not reported at all) and "reported but no estimate yet"
+// (below the percent floor, or not enough measurement history) are
+// deliberately different states below -- the first shows nothing to
+// derive from, the second shows the real percent while explaining the
+// token half isn't ready, never a fabricated number in either case.
+function LimitEstimateCard({ label, window }: { label: string; window: WindowWithEstimate | null }) {
+  const cardStyle: React.CSSProperties = {
+    flex: '1 1 160px', minWidth: 150, background: RT.card,
+    border: `1px solid ${RT.border}`, borderRadius: 10, padding: '12px 14px',
+  };
+  const labelStyle: React.CSSProperties = {
+    fontFamily: FONT_MONO, fontSize: 10, color: RT.textLow,
+    letterSpacing: '.1em', textTransform: 'uppercase',
+  };
+  if (!window) {
+    return (
+      <div style={cardStyle}>
+        <div style={labelStyle}>{label}</div>
+        <div style={{ fontFamily: FONT_MONO, fontSize: 18, color: RT.textLow, marginTop: 5 }}>—</div>
+      </div>
+    );
+  }
+  const color = limitColor(window.percent, window.severity);
+  const est = window.estimated_tokens;
+  return (
+    <div style={cardStyle}>
+      <div style={labelStyle}>{label}</div>
+      <div style={{ fontFamily: FONT_MONO, fontSize: 20, fontWeight: 600, color, marginTop: 4 }}>
+        {fmtPct(window.percent)}
+      </div>
+      {est ? (
+        <div
+          title="Estimated from this hub's own measured token usage in this window, divided by Anthropic's reported percent. Anthropic does not report a token budget itself, so this is never exact."
+          style={{ marginTop: 8, cursor: 'help' }}
+        >
+          <div style={{ fontFamily: FONT_MONO, fontSize: 11.5, color: RT.textDim }}>
+            {fmtK(est.consumed)} / ~{fmtK(est.budget)} tokens
+          </div>
+          <div style={{ fontFamily: FONT_MONO, fontSize: 10.5, color: RT.textLow, marginTop: 2 }}>
+            ~{fmtK(est.remaining)} left · approximate
+          </div>
+        </div>
+      ) : (
+        <div style={{ fontFamily: FONT_MONO, fontSize: 10.5, color: RT.textLow, marginTop: 8 }}>
+          token estimate not available yet
+        </div>
+      )}
     </div>
   );
 }

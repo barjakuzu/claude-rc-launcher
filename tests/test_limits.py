@@ -1119,5 +1119,61 @@ class TimeoutErrorNormalizationTest(unittest.TestCase):
         self.assertIsNone(retry_after)
 
 
+class EstimateWindowTokensTest(unittest.TestCase):
+    """Task-m3 (2026-09-09-usability): estimate_window_tokens() derives a
+    token budget from Anthropic's percent + this hub's own measured
+    `consumed`, since the usage endpoint never reports a budget itself.
+    Every case below either checks the arithmetic or checks one of the
+    "never guess" refusals the task-m3 brief asks for."""
+
+    def test_derives_budget_and_remaining_from_percent_and_consumed(self):
+        # 58% used, 100 measured -> budget ~172.4, remaining ~72.4.
+        result = limits.estimate_window_tokens(58.0, 100.0)
+        self.assertEqual(result["consumed"], 100)
+        self.assertEqual(result["budget"], 172)
+        self.assertEqual(result["remaining"], 72)
+        self.assertIs(result["approximate"], True)
+
+    def test_full_utilization_leaves_zero_remaining_not_negative(self):
+        result = limits.estimate_window_tokens(100.0, 500.0)
+        self.assertEqual(result["budget"], 500)
+        self.assertEqual(result["remaining"], 0)
+
+    def test_percent_below_floor_returns_none(self):
+        self.assertIsNone(limits.estimate_window_tokens(
+            limits.TOKEN_ESTIMATE_PERCENT_FLOOR - 0.1, 1000.0))
+
+    def test_percent_at_floor_is_allowed(self):
+        self.assertIsNotNone(limits.estimate_window_tokens(
+            limits.TOKEN_ESTIMATE_PERCENT_FLOOR, 1000.0))
+
+    def test_none_percent_returns_none(self):
+        self.assertIsNone(limits.estimate_window_tokens(None, 1000.0))
+
+    def test_none_consumed_returns_none(self):
+        self.assertIsNone(limits.estimate_window_tokens(58.0, None))
+
+    def test_zero_or_negative_consumed_returns_none(self):
+        self.assertIsNone(limits.estimate_window_tokens(58.0, 0))
+        self.assertIsNone(limits.estimate_window_tokens(58.0, -5.0))
+
+    def test_bool_is_never_treated_as_a_number(self):
+        # bool is an int subclass; both inputs must reject it explicitly.
+        self.assertIsNone(limits.estimate_window_tokens(True, 1000.0))
+        self.assertIsNone(limits.estimate_window_tokens(58.0, True))
+
+    def test_never_raises_on_garbage_or_non_finite_input(self):
+        for percent, consumed in (("58", 100), ([], 100), (58.0, "100"),
+                                   (float("nan"), 100), (58.0, float("inf")),
+                                   (float("inf"), 100), (58.0, float("nan"))):
+            with self.subTest(percent=percent, consumed=consumed):
+                try:
+                    result = limits.estimate_window_tokens(percent, consumed)
+                except Exception as e:  # pragma: no cover - failure path
+                    self.fail(f"estimate_window_tokens raised {e!r}")
+                else:
+                    self.assertIsNone(result)
+
+
 if __name__ == "__main__":
     unittest.main()

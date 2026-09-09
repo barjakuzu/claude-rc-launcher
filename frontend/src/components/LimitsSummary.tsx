@@ -23,7 +23,7 @@
 // live age, not the frozen snapshot the hub last reported), and a small
 // marker on the whole summary when devices disagree.
 import { useEffect, useRef, useState } from 'react';
-import { RT, FONT_MONO, FONT_SANS, Z, withAlpha, fmtPct } from '../tokens';
+import { RT, FONT_MONO, FONT_SANS, Z, withAlpha, fmtPct, fmtK } from '../tokens';
 import { useLimits } from '../hooks/useLimits';
 import { useNow } from '../hooks/useNow';
 import {
@@ -32,6 +32,27 @@ import {
 } from '../limitsFormat';
 import { formatRelativeTime } from '../relativeTime';
 import type { LimitsWindow, LimitsScoped, LimitsPrimary, LimitsReport } from '../api';
+
+// task-m3 (2026-09-09-usability): `estimated_tokens` isn't on the shared
+// LimitsWindow type (api.ts is owned by a parallel lane for this task) -
+// declared locally and intersected in, same pattern ScheduleModal.tsx's
+// `trigger` field uses for the same reason. The Anthropic usage endpoint
+// only ever reports a percent (see limits.py's module docstring); this
+// object is this hub's OWN derived estimate, built from Anthropic's
+// percent plus effective tokens this hub separately measured inside the
+// same window - server.py's /api/limits route attaches it (or null, when
+// it isn't trustworthy yet) to five_hour/seven_day. `approximate: true`
+// is always literally true when this object exists at all, but it
+// travels on the wire (rather than being implied purely by this
+// object's presence) so a render path can key off one flag instead of
+// "this object exists" meaning two different things in two places.
+export interface EstimatedTokens {
+  consumed: number;
+  budget: number;
+  remaining: number;
+  approximate: true;
+}
+type WindowWithEstimate = LimitsWindow & { estimated_tokens?: EstimatedTokens | null };
 
 // ─── Compact cell: the always-visible headline reading ──────────────────
 
@@ -97,7 +118,34 @@ function WindowCell({ label, window, now, compact, loading, dataStale, ageSecond
 
 // ─── Dropdown detail: scoped limits, spend, staleness, divergence ───────
 
-function WindowRow({ label, window, now }: { label: string; window: LimitsWindow | null; now: number }) {
+// Consumed/budget/remaining in effective tokens, clearly marked as our
+// own approximation rather than an Anthropic figure - task-m3's own
+// wording: "be honest about what it is". Renders nothing when
+// `estimated_tokens` is null (not enough measurement history yet, or
+// the window's percent is too low to divide by reliably): the percent
+// and countdown above already carry the real reading either way, so
+// this is purely additive, never a placeholder that implies a guess
+// exists when it doesn't.
+function TokenEstimateLine({ estimate }: { estimate: EstimatedTokens | null | undefined }) {
+  if (!estimate) return null;
+  return (
+    <div
+      title="Estimated from this hub's own measured token usage in this window, divided by Anthropic's reported percent. Anthropic does not report a token budget itself, so this number is never exact."
+      style={{ marginTop: 6, cursor: 'help' }}
+    >
+      <div style={{ fontFamily: FONT_MONO, fontSize: 11, color: RT.textDim, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+        <span>{fmtK(estimate.consumed)} / ~{fmtK(estimate.budget)} tokens</span>
+        <span style={{ color: RT.borderHi }}>·</span>
+        <span>~{fmtK(estimate.remaining)} left</span>
+      </div>
+      <div style={{ fontFamily: FONT_MONO, fontSize: 9, color: RT.textLow, marginTop: 2 }}>
+        approximate, derived from measured usage
+      </div>
+    </div>
+  );
+}
+
+function WindowRow({ label, window, now }: { label: string; window: WindowWithEstimate | null; now: number }) {
   if (!window) {
     return (
       <div style={{ padding: '8px 9px' }}>
@@ -127,6 +175,7 @@ function WindowRow({ label, window, now }: { label: string; window: LimitsWindow
       >
         {countdown}
       </div>
+      <TokenEstimateLine estimate={window.estimated_tokens} />
     </div>
   );
 }
