@@ -83,6 +83,7 @@ unrecognised-shape rejection above -- all four are exactly as three
 review rounds left them.
 """
 import json
+import logging
 import os
 import socket
 import subprocess
@@ -94,6 +95,8 @@ import urllib.request
 
 import noredirect
 
+_LOG = logging.getLogger(__name__)
+
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 CREDENTIALS_PATH_LINUX = "~/.claude/.credentials.json"
 KEYCHAIN_SERVICE_NAME = "Claude Code-credentials"
@@ -102,10 +105,33 @@ CACHE_TTL_SECONDS = 60
 FETCH_TIMEOUT_SECONDS = 5
 
 # Task L5: a 429 backs off far more patiently than a normal failure (the
-# brief: "a ceiling of at least 15 minutes"). 900s is used as the escalating
-# backoff's own ceiling; an explicit Retry-After header is honoured as-is
-# and is NOT clamped to this -- see _next_rate_limit_backoff and get_limits.
+# brief: "a ceiling of at least 15 minutes"). 900s is the escalating
+# no-Retry-After backoff's own ceiling, AND (fix round 3) the upper clamp
+# on an explicit Retry-After header too -- see _clamp_retry_after and
+# get_limits. Also doubles as CACHE_TTL_SECONDS' partner as the LOWER
+# clamp on an explicit Retry-After (fix round 3): round 0 honoured
+# Retry-After verbatim on the reasoning that "respect it" meant exactly,
+# with no ceiling either -- two real defects proved both ends of that
+# wrong. See _clamp_retry_after's own docstring for the measured numbers.
 RATE_LIMIT_BACKOFF_CEILING_SECONDS = 900
+
+# Task L5 fix round 3: set to the epoch time of the most recent 429 while
+# this device is still within the backoff that 429 triggered; None once
+# recovered (any non-429 outcome, success or otherwise, clears it -- see
+# get_limits). A last-good reading served during that window looks
+# identical to a genuine fresh success in the returned dict itself
+# (available=True, error=None -- CONTRACT.md task-l5: "a 429 should not
+# look like a failure"), which is exactly why this exists: nothing in
+# that dict says a rate limit is the reason fetched_at stopped advancing.
+# Same pattern guard.py's LAST_LOAD_ERROR already uses for "the last
+# thing that went wrong, queryable without re-triggering it" -- a caller
+# (fleet.py, or a future one) can check this directly; get_limits() also
+# logs a WARNING every time a real fetch attempt is actually rate
+# limited (see there), so this is visible in ~/.claude-rc/logs/claude-rc.log
+# without a manual probe of the real endpoint, which is how this bug was
+# found in the first place. Never anything beyond a float: no exception,
+# no message, nothing token-adjacent.
+LAST_RATE_LIMITED_AT = None
 
 # A misbehaving/compromised endpoint returning a huge body must not be
 # read into memory in full -- same defensive cap fleetpoll.py applies to
@@ -653,6 +679,35 @@ def _next_rate_limit_backoff(streak):
     return min(CACHE_TTL_SECONDS * (2 ** (streak + 1)), RATE_LIMIT_BACKOFF_CEILING_SECONDS)
 
 
+def _clamp_retry_after(seconds):
+    """Task L5 fix round 3: an explicit Retry-After header is honoured,
+    but clamped to [CACHE_TTL_SECONDS, RATE_LIMIT_BACKOFF_CEILING_SECONDS]
+    rather than trusted verbatim. Round 0 deliberately did not clamp
+    this, reasoning that "respect Retry-After" meant honouring it
+    exactly; two real defects, both against values
+    _parse_retry_after_seconds already correctly accepts as valid
+    non-negative numbers, proved that reasoning wrong on both ends:
+
+      - Retry-After: 0 set next_attempt_at = now + 0. The throttle gate
+        is `now < next_attempt_at`, already false the instant it was
+        set, so EVERY subsequent call re-fetched immediately -- a server
+        saying "you are rate limited" made this module hammer it harder
+        than before this feature existed (measured: 20 outbound calls in
+        a 5s window, against 1 correctly). rate_limit_streak also never
+        left 0 on this path, so nothing could even escalate out of it on
+        its own.
+      - An arbitrarily large value ("99999999999999999999" measured)
+        stopped this device from ever fetching again for 3.2e12 years,
+        recoverable only by restarting the process.
+
+    Both ends are clamped to the same window the no-Retry-After
+    escalating backoff (_next_rate_limit_backoff above) already lives
+    in, so an explicit header can still shorten or lengthen the wait
+    relative to this module's own guess, but never past what it already
+    treats as a sane range for holding off one account-limits fetch."""
+    return min(max(seconds, CACHE_TTL_SECONDS), RATE_LIMIT_BACKOFF_CEILING_SECONDS)
+
+
 def get_limits(now_fn=time.time, timeout=FETCH_TIMEOUT_SECONDS, fetch_fn=None):
     """CONTRACT.md section 3's `limits` object for this device's account.
     Never raises and never blocks longer than `timeout` (the token read
@@ -670,15 +725,18 @@ def get_limits(now_fn=time.time, timeout=FETCH_TIMEOUT_SECONDS, fetch_fn=None):
 
     Task L5: a 429 extends that throttle far past the normal
     CACHE_TTL_SECONDS -- respecting Retry-After when the response sent
-    one, otherwise the escalating backoff above -- so a rate limit does
-    not simply retry every 60s and get rate limited again. Every call
-    made before the extended throttle elapses still returns the SAME
-    cached result as any other throttled call (last-good-on-failure,
-    unchanged, right below), so the UI keeps showing the last good
-    reading with its true, growing age, never a fresh-looking failure.
-    The first outcome that is NOT a 429 (success or any other failure)
-    resets the backoff to normal -- "recover automatically" per the
-    brief.
+    one (fix round 3: clamped to [CACHE_TTL_SECONDS,
+    RATE_LIMIT_BACKOFF_CEILING_SECONDS], see _clamp_retry_after), otherwise
+    the escalating backoff above -- so a rate limit does not simply retry
+    every 60s and get rate limited again. Every call made before the
+    extended throttle elapses still returns the SAME cached result as any
+    other throttled call (last-good-on-failure, unchanged, right below),
+    so the UI keeps showing the last good reading with its true, growing
+    age, never a fresh-looking failure. The first outcome that is NOT a
+    429 (success or any other failure) resets the backoff to normal --
+    "recover automatically" per the brief -- and clears
+    LAST_RATE_LIMITED_AT (fix round 3), the one place a caller can tell a
+    fresh-looking last-good result apart from an actually-fresh one.
 
     Important 1 (fix round 1): the whole cache-check-and-maybe-fetch body
     runs under _cache_lock, single-flight style (same idea agents.py's
@@ -695,6 +753,7 @@ def get_limits(now_fn=time.time, timeout=FETCH_TIMEOUT_SECONDS, fetch_fn=None):
     tests/test_limits.py drives this through fetch_fn, never through a
     real credentials file or network call. Defaults to _fetch_from_api,
     which does the real token read + HTTPS call."""
+    global LAST_RATE_LIMITED_AT
     with _cache_lock:
         now = now_fn()
         next_attempt_at = _cache.get("next_attempt_at")
@@ -712,15 +771,33 @@ def get_limits(now_fn=time.time, timeout=FETCH_TIMEOUT_SECONDS, fetch_fn=None):
 
         if was_rate_limited:
             if rate_limit_retry_after is not None:
-                backoff = rate_limit_retry_after
+                # Fix round 3: clamped, not honoured verbatim -- see
+                # _clamp_retry_after's docstring for why (Retry-After: 0
+                # used to remove the throttle entirely; an absurd value
+                # used to wedge this device for millennia).
+                backoff = _clamp_retry_after(rate_limit_retry_after)
                 _cache["rate_limit_streak"] = 0
             else:
                 streak = _cache.get("rate_limit_streak") or 0
                 backoff = _next_rate_limit_backoff(streak)
                 _cache["rate_limit_streak"] = streak + 1
-            next_attempt_at = now + max(backoff, 0.0)
+            next_attempt_at = now + backoff
+            # Fix round 3: LAST_RATE_LIMITED_AT + a log line are the only
+            # place this state is visible -- the returned `result` itself
+            # looks identical to a genuine success (available=True,
+            # error=None) whenever a last_good reading exists, by design
+            # (CONTRACT.md task-l5: "a 429 should not look like a
+            # failure"). This fires once per REAL fetch attempt that hits
+            # a 429 (the throttle above means that is once per backoff
+            # window, never once per throttled call), so it never spams.
+            LAST_RATE_LIMITED_AT = now
+            _LOG.warning(
+                "limits: rate limited (429) by the usage endpoint, "
+                "backing off %.0fs before the next attempt (streak=%d)",
+                backoff, _cache["rate_limit_streak"])
         else:
             _cache["rate_limit_streak"] = 0
+            LAST_RATE_LIMITED_AT = None
             next_attempt_at = now + CACHE_TTL_SECONDS
 
         _cache["result"] = result
