@@ -13,7 +13,8 @@ from config import (SESSION_PREFIX, RC_FLAGS,
                     resolve_claude_mode, RC_MAX_SESSIONS)
 from sessions import (session_exists, setup_session, get_url, list_rc_sessions,
                       get_session_env, build_tmux_command, count_launcher_sessions)
-from schedules import load_schedules, save_schedules, add_history_entry, update_schedule
+from schedules import (load_schedules, save_schedules, add_history_entry, update_schedule,
+                       get_schedule_by_id)
 import schedules as schedules_module
 
 _last_logged_schedule_error = None
@@ -194,6 +195,21 @@ def _due_to_fire(schedule, now):
 # the latest reset, the next time it gets to check - no special "was the
 # hub down" detection needed for that part. `catch_up: "none"` opts OUT of
 # that specific behavior (see _apply_limit_reset_trigger below).
+#
+# Fix round 1 (Opus review, task-l3-findings-r1.md) changed three things:
+# Critical 1, the catch_up: "none" allowance used to be consumed by ANY
+# tick, including a no-op one, so it was gone by the time the real fire
+# needed it - now consumed only at the moment a genuine fire decision is
+# reached (_apply_limit_reset_trigger). Critical 2, a disabled schedule
+# used to be skipped entirely, so its marker rotted and re-enabling it
+# looked exactly like a missed reset - every trigger schedule is now
+# checked on every tick regardless of `enabled`, with a would-be fire
+# downgraded to a silent marker refresh while disabled
+# (_check_limit_reset_schedules). Critical 3, concurrent ticks (or, in a
+# stress probe, concurrent calls) could each read the same stale marker
+# before any of them wrote their update and each decide to fire - the
+# decide-then-persist step is now atomic, reusing _fire_schedule's own
+# claim lock rather than a new one.
 
 # In-memory only, deliberately never persisted: which schedule ids have
 # already had at least one limit_reset check performed THIS PROCESS
@@ -274,23 +290,38 @@ def _limit_reset_decision(trigger, current_resets_at, now_epoch):
     return ("fire", current_resets_at)
 
 
-def _apply_limit_reset_trigger(trigger, current_resets_at, now_epoch, first_check_this_process):
+def _apply_limit_reset_trigger(schedule_id, trigger, current_resets_at, now_epoch):
     """_limit_reset_decision, adjusted for trigger.catch_up.
 
     catch_up: "latest" (default) is the behavior described above: a hub
     that was down across one or more resets fires once, for the latest,
     the first time it checks after restart. catch_up: "none" opts a task
-    out of exactly that: on THIS process's first-ever check of this
-    schedule, a decision that would have fired is downgraded to a silent
-    reseed instead (brief: "not at all if the task's catch_up is none").
-    Every later check within the same process lifetime behaves normally -
-    only the first, potentially-stale-spanning-downtime check is
-    softened."""
+    out of exactly that: on THIS process's first-ever genuine fire
+    decision for this schedule, it is downgraded to a silent reseed
+    instead (brief: "not at all if the task's catch_up is none"). Every
+    later fire within the same process lifetime behaves normally - only
+    the first, potentially-stale-spanning-downtime one is softened.
+
+    Fix round 1 (Critical 1): "first-ever" is judged ONLY against ticks
+    that actually reached a "fire" decision - a tick that resolved to
+    skip/seed for any other reason (limits unavailable, a stale-cached
+    reading that happened to equal the marker right after a restart,
+    still waiting on delay_minutes, ...) no longer consumes the
+    allowance. The previous version marked the schedule "seen" on every
+    tick regardless of outcome, so a single no-op tick right after
+    restart (e.g. the hub's SQLite-cached limits row not having rolled
+    over yet) silently spent the one-time suppression before the real
+    missed-reset fire was even computed."""
     action, new_marker = _limit_reset_decision(trigger, current_resets_at, now_epoch)
+    if action != "fire":
+        return (action, new_marker)
     catch_up = trigger.get("catch_up", "latest")
-    if action == "fire" and first_check_this_process and catch_up == "none":
-        return ("seed", new_marker)
-    return (action, new_marker)
+    if catch_up == "none":
+        already_fired_this_process = schedule_id in _limit_reset_seen_this_process
+        _limit_reset_seen_this_process.add(schedule_id)
+        if not already_fired_this_process:
+            return ("seed", new_marker)
+    return ("fire", new_marker)
 
 
 def _get_limits_view():
@@ -316,18 +347,47 @@ def _get_limits_view():
 
 def _check_limit_reset_schedules(schedules_list, now_epoch, get_limits_view=_get_limits_view):
     """Runs once per scheduler tick (see _scheduler_loop). For every
-    enabled schedule carrying a `trigger`, reads the hub's current limits
-    view ONCE for the whole tick (not once per schedule), decides
-    whether to fire via _apply_limit_reset_trigger, and persists the
-    outcome. Never raises: the whole per-schedule body is guarded, and a
-    malformed trigger (unknown kind/window, bad delay - whether from a
-    hand-edited schedules.json or an unexpected runtime failure) disables
-    that one task with a history entry instead of ever propagating out
-    of this function and killing the scheduler thread (brief: "The
-    scheduler loop must never raise. A malformed trigger must disable
-    that one task, loudly in its history, not stop the loop")."""
-    limit_schedules = [s for s in schedules_list
-                        if s.get("enabled", False) and s.get("trigger") is not None]
+    schedule carrying a `trigger` (enabled or not - see Critical 2
+    below), reads the hub's current limits view ONCE for the whole tick
+    (not once per schedule), decides whether to fire via
+    _apply_limit_reset_trigger, and persists the outcome. Never raises:
+    the whole per-schedule body is guarded, and a malformed trigger
+    (unknown kind/window, bad delay - whether from a hand-edited
+    schedules.json or an unexpected runtime failure) disables that one
+    task with a history entry instead of ever propagating out of this
+    function and killing the scheduler thread (brief: "The scheduler
+    loop must never raise. A malformed trigger must disable that one
+    task, loudly in its history, not stop the loop").
+
+    Fix round 1 (Critical 2): schedules used to be filtered to
+    `enabled` ones before this loop even started, so a disabled
+    schedule's marker never moved while resets kept happening in the
+    background - re-enabling it later looked exactly like a missed
+    reset and fired within one tick. A task must never fire because of
+    a purely administrative action. Every trigger-carrying schedule is
+    now evaluated on every tick regardless of `enabled`, so its marker
+    stays current the whole time it's disabled; a decision that would
+    fire is downgraded to a silent marker refresh instead of an actual
+    fire whenever the schedule is disabled at decision time, so
+    re-enabling it later sees an already-current marker and does
+    nothing until the NEXT genuine reset.
+
+    Fix round 1 (Critical 3): the read-decide-persist step for one
+    schedule is now atomic under _active_scheduled_sessions_lock - the
+    same claim lock _fire_schedule already uses for run-level dedup,
+    reused here rather than inventing a second one. Each schedule is
+    also re-fetched fresh from disk INSIDE that lock rather than reused
+    from the `schedules_list` snapshot this function was called with:
+    under concurrent ticks (or, in a stress probe, concurrent direct
+    calls), several evaluators could otherwise all read the same
+    pre-write marker and each independently decide to fire before any
+    of them had persisted their update. Re-reading under the lock means
+    only the first evaluator ever sees the pre-write value; everyone
+    else sees its result and skips. The lock is released before
+    _fire_schedule is ever called - that function claims the same lock
+    itself for its own session-level dedup, and holding it across the
+    call would deadlock."""
+    limit_schedules = [s for s in schedules_list if s.get("trigger") is not None]
     if not limit_schedules:
         return
 
@@ -337,62 +397,93 @@ def _check_limit_reset_schedules(schedules_list, now_epoch, get_limits_view=_get
         view = None
     primary = view.get("primary") if isinstance(view, dict) else None
 
-    for schedule in limit_schedules:
-        schedule_id = schedule.get("id")
+    for candidate in limit_schedules:
+        schedule_id = candidate.get("id")
+        fire_name = candidate.get("name")
+        fire_window = None
+        is_enabled = None
+        to_fire = None
         try:
-            raw_trigger = schedule.get("trigger")
-            if not isinstance(raw_trigger, dict):
-                raise ValueError(f"trigger must be an object, got {type(raw_trigger).__name__}")
-            if raw_trigger.get("kind") != "limit_reset":
-                raise ValueError(f"unsupported trigger kind: {raw_trigger.get('kind')!r}")
-            window = raw_trigger.get("window")
-            if window not in schedules_module.TRIGGER_WINDOWS:
-                raise ValueError(f"unknown trigger window: {window!r}")
-            delay = raw_trigger.get("delay_minutes", 0)
-            if delay is None:
-                delay = 0
-            if (isinstance(delay, bool) or not isinstance(delay, (int, float))
-                    or not (0 <= delay <= schedules_module.TRIGGER_MAX_DELAY_MINUTES)):
-                raise ValueError(f"invalid delay_minutes: {delay!r}")
-            catch_up = raw_trigger.get("catch_up", "latest")
-            if catch_up not in schedules_module.TRIGGER_CATCH_UP_MODES:
-                raise ValueError(f"invalid catch_up: {catch_up!r}")
+            with _active_scheduled_sessions_lock:
+                _, schedule = get_schedule_by_id(schedule_id)
+                if schedule is None:
+                    continue  # deleted since this tick's snapshot was loaded
+                fire_name = schedule.get("name")
+                is_enabled = schedule.get("enabled", False)
 
-            current_resets_at = None
-            if isinstance(primary, dict):
-                bucket = primary.get(window)
-                if isinstance(bucket, dict):
-                    ra = bucket.get("resets_at")
-                    if isinstance(ra, str) and ra:
-                        current_resets_at = ra
+                raw_trigger = schedule.get("trigger")
+                if raw_trigger is None:
+                    # Cleared concurrently since this tick's candidate
+                    # list was built (an edit removed the trigger, or
+                    # converted the task back to cron/manual) - nothing
+                    # to do, and NOT an error: only a genuinely
+                    # non-dict, non-None value below is malformed.
+                    continue
+                if not isinstance(raw_trigger, dict):
+                    raise ValueError(f"trigger must be an object, got {type(raw_trigger).__name__}")
+                if raw_trigger.get("kind") != "limit_reset":
+                    raise ValueError(f"unsupported trigger kind: {raw_trigger.get('kind')!r}")
+                window = raw_trigger.get("window")
+                if window not in schedules_module.TRIGGER_WINDOWS:
+                    raise ValueError(f"unknown trigger window: {window!r}")
+                delay = raw_trigger.get("delay_minutes", 0)
+                if delay is None:
+                    delay = 0
+                if (isinstance(delay, bool) or not isinstance(delay, (int, float))
+                        or not (0 <= delay <= schedules_module.TRIGGER_MAX_DELAY_MINUTES)):
+                    raise ValueError(f"invalid delay_minutes: {delay!r}")
+                catch_up = raw_trigger.get("catch_up", "latest")
+                if catch_up not in schedules_module.TRIGGER_CATCH_UP_MODES:
+                    raise ValueError(f"invalid catch_up: {catch_up!r}")
 
-            first_check = schedule_id not in _limit_reset_seen_this_process
-            _limit_reset_seen_this_process.add(schedule_id)
+                current_resets_at = None
+                if isinstance(primary, dict):
+                    bucket = primary.get(window)
+                    if isinstance(bucket, dict):
+                        ra = bucket.get("resets_at")
+                        if isinstance(ra, str) and ra:
+                            current_resets_at = ra
 
-            action, new_marker = _apply_limit_reset_trigger(
-                raw_trigger, current_resets_at, now_epoch, first_check)
+                action, new_marker = _apply_limit_reset_trigger(
+                    schedule_id, raw_trigger, current_resets_at, now_epoch)
 
-            if action == "skip":
-                continue
+                if action == "fire" and not is_enabled:
+                    # Critical 2: never actually fire a disabled task -
+                    # only keep its marker current so re-enabling it
+                    # later doesn't see a stale marker and fire.
+                    action = "seed"
 
-            new_trigger = dict(raw_trigger)
-            new_trigger["last_seen_resets_at"] = new_marker
-            update_schedule(schedule_id, {"trigger": new_trigger})
+                if action == "skip":
+                    continue
 
-            if action == "fire":
-                print(f"  Scheduler: limit reset for '{schedule.get('name')}' ({window})")
-                _fire_schedule(schedule)
+                new_trigger = dict(raw_trigger)
+                new_trigger["last_seen_resets_at"] = new_marker
+                update_schedule(schedule_id, {"trigger": new_trigger})
+
+                if action == "fire":
+                    to_fire = schedule
+                    fire_window = window
         except Exception as e:
-            print(f"  Scheduler: disabling '{schedule.get('name')}', "
-                  f"limit_reset trigger check failed: {type(e).__name__}: {e}")
-            try:
-                add_history_entry(schedule_id, "error",
-                                   f"Disabled: limit_reset trigger check failed ({e})")
-                update_schedule(schedule_id, {"enabled": False})
-            except Exception:
-                # A second failure here (disk full, etc.) must still not
-                # escape this loop - see the module docstring above.
-                pass
+            print(f"  Scheduler: limit_reset trigger check failed for "
+                  f"'{fire_name}': {type(e).__name__}: {e}")
+            # Only log + disable on the transition INTO broken - an
+            # already-disabled schedule (is_enabled is False, never
+            # True) would otherwise get re-logged and re-written on
+            # every single tick forever for the same standing problem.
+            if is_enabled:
+                try:
+                    add_history_entry(schedule_id, "error",
+                                       f"Disabled: limit_reset trigger check failed ({e})")
+                    update_schedule(schedule_id, {"enabled": False})
+                except Exception:
+                    # A second failure here (disk full, etc.) must still
+                    # not escape this loop - see the module docstring above.
+                    pass
+            continue
+
+        if to_fire is not None:
+            print(f"  Scheduler: limit reset for '{fire_name}' ({fire_window})")
+            _fire_schedule(to_fire)
 
 
 # --- Session lifecycle tracking ---

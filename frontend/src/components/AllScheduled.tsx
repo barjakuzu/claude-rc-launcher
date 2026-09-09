@@ -38,6 +38,21 @@ function describeTiming(s: ScheduleWithTrigger): string {
   return describeSchedule(s);
 }
 
+/** "14:32" for today, "Mon 14:32" otherwise. Fix round 1 (Important 6):
+ * a bare time with no date reads as today even for a seven_day reset up
+ * to a week out - a weekday name disambiguates within that whole range
+ * (the feature's maximum reach is 7 days plus a 240-minute delay, too
+ * short to ever repeat the same weekday twice in one displayed value). */
+function formatNextFire(iso: string): string {
+  const d = new Date(iso);
+  const now = new Date();
+  const time = d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+  const sameDay = d.getFullYear() === now.getFullYear()
+    && d.getMonth() === now.getMonth() && d.getDate() === now.getDate();
+  if (sameDay) return time;
+  return `${d.toLocaleDateString(undefined, { weekday: 'short' })} ${time}`;
+}
+
 /** Next-fire label for a row, or null when there is nothing worth
  * showing (disabled, or a plain cron task with no next_run computed).
  * A limit_reset task that is enabled but has no usable next_run says so
@@ -48,8 +63,7 @@ function nextFireLabel(s: ScheduleWithTrigger): string | null {
   const isLimitReset = s.trigger && s.trigger.kind === 'limit_reset';
   if (isLimitReset && (s.limits_unavailable || !s.next_run)) return 'limits unavailable';
   if (!s.next_run) return null;
-  const time = new Date(s.next_run).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
-  return `next ${time}`;
+  return `next ${formatNextFire(s.next_run)}`;
 }
 
 interface AllScheduledProps {

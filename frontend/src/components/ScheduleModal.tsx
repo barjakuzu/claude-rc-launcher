@@ -123,6 +123,14 @@ export function ScheduleModal({ deviceId, initial, onClose, onSaved }: ScheduleM
   const [delayMinutes, setDelayMinutes] = useState<number>(
     typeof initial?.trigger?.delay_minutes === 'number' ? initial.trigger.delay_minutes : 0,
   );
+  // Fix round 1 (Important 5): the modal used to never send catch_up at
+  // all, so every save through it silently reset a stored "none" back to
+  // the server-side default "latest" (schedules.py normalizes a missing
+  // key to "latest") - catch_up was configurable only by calling the API
+  // directly, with no way to see or change it here. Now a real field.
+  const [catchUp, setCatchUp] = useState<'latest' | 'none'>(
+    initial?.trigger?.catch_up === 'none' ? 'none' : 'latest',
+  );
   const [pending,      setPending]      = useState(false);
   const [error,        setError]        = useState<string | null>(null);
   const [showBrowser,  setShowBrowser]  = useState(false);
@@ -192,7 +200,7 @@ export function ScheduleModal({ deviceId, initial, onClose, onSaved }: ScheduleM
         concurrency,
         enabled,
         trigger: isLimitReset
-          ? { kind: 'limit_reset', window: resetWindow, delay_minutes: delayMinutes }
+          ? { kind: 'limit_reset', window: resetWindow, delay_minutes: delayMinutes, catch_up: catchUp }
           : null,
       };
 
@@ -349,6 +357,17 @@ export function ScheduleModal({ deviceId, initial, onClose, onSaved }: ScheduleM
                       style={fieldStyle}
                     />
                   </div>
+                </div>
+                <div>
+                  <label style={labelStyle}>If the hub was offline when the limit reset</label>
+                  <select
+                    value={catchUp}
+                    onChange={(e) => setCatchUp(e.target.value as 'latest' | 'none')}
+                    style={{ ...fieldStyle, cursor: 'pointer' }}
+                  >
+                    <option value="latest">Fire once, for the latest reset</option>
+                    <option value="none">Skip it - only fire for a reset seen live</option>
+                  </select>
                 </div>
                 <div style={{ fontSize: 11, color: RT.textLow, fontFamily: FONT_MONO }}>
                   Fires once the account's {resetWindow === 'seven_day' ? 'weekly' : '5-hour'} usage

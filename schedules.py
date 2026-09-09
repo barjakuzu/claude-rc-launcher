@@ -29,6 +29,18 @@ LAST_LOAD_ERROR = None
 TRIGGER_WINDOWS = ("five_hour", "seven_day")
 TRIGGER_CATCH_UP_MODES = ("latest", "none")
 TRIGGER_MAX_DELAY_MINUTES = 240
+# Fix round 1 (Important 4, task-l3-findings-r1.md): the only fields a
+# client is ever allowed to send in a `trigger`. `last_seen_resets_at`
+# is deliberately absent from this set - it is server state (the
+# firing rule's own bookkeeping, written only by scheduler.py's
+# internal update_schedule() calls, never by an HTTP request) and must
+# never be settable by a caller. Before this fix, validate_trigger
+# didn't reject unknown keys at all, so a client could include
+# last_seen_resets_at in a POST /schedules/update body and
+# _normalize_trigger_for_update would trust it verbatim, forcing an
+# immediate fire on the next tick - this hub sits on the internet
+# behind a password, so the API is the trust boundary, not the modal.
+TRIGGER_ALLOWED_FIELDS = frozenset({"kind", "window", "delay_minutes", "catch_up"})
 
 
 def iso_to_epoch(ts):
@@ -70,6 +82,9 @@ def validate_trigger(trigger):
         return None
     if not isinstance(trigger, dict):
         return "trigger must be an object or null"
+    unknown = set(trigger.keys()) - TRIGGER_ALLOWED_FIELDS
+    if unknown:
+        return f"unknown trigger field(s): {', '.join(sorted(unknown))}"
     if trigger.get("kind") != "limit_reset":
         return f"unsupported trigger kind: {trigger.get('kind')!r}"
     if trigger.get("window") not in TRIGGER_WINDOWS:
@@ -174,9 +189,26 @@ def _validate_schedules(data):
         # in the UI so its history can say why it is disabled, rather
         # than vanishing the way a dropped entry does here. That deeper
         # check lives in scheduler.py's per-tick defensive re-validation.
+        #
+        # Fix round 1 (Minor, task-l3-findings-r1.md): a non-dict
+        # `trigger` used to drop the WHOLE entry here (`continue`, never
+        # reaching `valid`), the same as a missing id would - but unlike
+        # a missing id, the rest of the entry (name/cron/prompt/...) is
+        # perfectly usable. Dropping the entry meant it survived only
+        # until the next unrelated write (any other schedule's
+        # create/update/delete): save_schedules() persists exactly the
+        # `valid` list, so that next write would silently and
+        # permanently erase this schedule from disk. Given this file's
+        # own history (silently corrupt for three months, nobody
+        # noticed), losing a whole task to a single bad field is exactly
+        # the kind of quiet data loss to avoid - so only the bad field is
+        # dropped here; the entry survives, downgraded to whatever
+        # `cron` says (null cron -> manual) until a human fixes it, and
+        # the problem is still surfaced via LAST_LOAD_ERROR.
         if "trigger" in entry and entry["trigger"] is not None and not isinstance(entry["trigger"], dict):
-            problems.append(f"entry {i} ({sid}): 'trigger' must be an object or null")
-            continue
+            problems.append(f"entry {i} ({sid}): 'trigger' must be an object or null, field dropped")
+            entry = dict(entry)
+            entry["trigger"] = None
         valid.append(entry)
     error = "; ".join(problems) if problems else None
     return valid, error

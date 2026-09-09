@@ -210,6 +210,28 @@ class ValidateTriggerTest(unittest.TestCase):
         self.assertIsNotNone(schedules.validate_trigger(
             {"kind": "limit_reset", "window": "five_hour", "catch_up": "everything"}))
 
+    def test_client_supplied_marker_is_rejected(self):
+        # Fix round 1 (Important 4, task-l3-findings-r1.md): the marker
+        # is server state (the firing rule's own bookkeeping, written
+        # only by scheduler.py's internal update_schedule() calls) and
+        # must never be settable through the API - this hub sits on the
+        # internet behind a password, so the API is the trust boundary.
+        # Before this fix a client could include last_seen_resets_at in
+        # a POST /schedules/update body and force an immediate fire.
+        err = schedules.validate_trigger({
+            "kind": "limit_reset", "window": "five_hour",
+            "last_seen_resets_at": "2020-01-01T00:00:00Z",
+        })
+        self.assertIsNotNone(err)
+        self.assertIn("last_seen_resets_at", err)
+
+    def test_unknown_field_is_rejected(self):
+        err = schedules.validate_trigger({
+            "kind": "limit_reset", "window": "five_hour", "extra_field": 1,
+        })
+        self.assertIsNotNone(err)
+        self.assertIn("extra_field", err)
+
 
 class IsoToEpochTest(unittest.TestCase):
     def test_z_suffix_parses(self):
@@ -372,11 +394,33 @@ class TriggerLoadValidationTest(unittest.TestCase):
         self.assertEqual(result, [{"id": "a", "name": "A", "cron": "0 9 * * *"}])
         self.assertNotIn("trigger", result[0])
 
-    def test_non_object_trigger_is_dropped(self):
-        self._write_raw('[{"id": "a", "name": "A", "trigger": "not an object"}]')
+    def test_non_object_trigger_sanitizes_field_but_keeps_the_entry(self):
+        # Fix round 1 (Minor, task-l3-findings-r1.md): this used to drop
+        # the WHOLE entry, which meant the next unrelated write (any
+        # other schedule's create/update/delete) would silently and
+        # permanently erase it from disk via save_schedules() persisting
+        # exactly the shrunk `valid` list. Given this file's own history
+        # (silently corrupt for three months), only the bad field is
+        # dropped now - the entry survives with trigger: None (falls
+        # back to whatever `cron` says), and the problem is still
+        # surfaced via LAST_LOAD_ERROR.
+        self._write_raw('[{"id": "a", "name": "A", "cron": "0 9 * * *", '
+                         '"trigger": "not an object"}]')
         result = schedules.load_schedules()
-        self.assertEqual(result, [])
+        self.assertEqual(result, [{"id": "a", "name": "A", "cron": "0 9 * * *", "trigger": None}])
         self.assertIsNotNone(schedules.LAST_LOAD_ERROR)
+
+    def test_sanitized_trigger_survives_an_unrelated_write(self):
+        # The actual harm the previous behavior caused: a routine write
+        # for a DIFFERENT schedule used to permanently erase this one.
+        self._write_raw(
+            '[{"id": "a", "name": "A", "trigger": "not an object"}, '
+            '{"id": "b", "name": "B", "cron": null}]'
+        )
+        schedules.update_schedule("b", {"name": "B renamed"})
+        result = schedules.load_schedules()
+        ids = {e["id"] for e in result}
+        self.assertIn("a", ids)
 
     def test_semantically_bad_trigger_still_loads(self):
         # Deep validation (unknown kind/window) is deliberately NOT done

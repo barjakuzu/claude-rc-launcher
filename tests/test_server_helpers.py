@@ -2219,6 +2219,36 @@ class SchedulesTriggerRouteTest(unittest.TestCase):
         self.assertIsNone(data["schedule"]["cron"])
         self.assertEqual(data["schedule"]["trigger"]["window"], "seven_day")
 
+    def test_create_rejects_a_client_supplied_marker(self):
+        # Fix round 1 (Important 4, task-l3-findings-r1.md): the exact
+        # exploit path - a caller trying to force an immediate fire by
+        # POSTing a `resets_at` it already knows to be in the past as
+        # last_seen_resets_at. This hub is exposed to the internet behind
+        # a password, so the API is the trust boundary, not the modal.
+        data, code = self._post("/schedules", {
+            "name": "t",
+            "trigger": {"kind": "limit_reset", "window": "five_hour",
+                        "last_seen_resets_at": "2000-01-01T00:00:00Z"},
+        })
+        self.assertEqual(code, 400)
+        self.assertIn("last_seen_resets_at", data["message"])
+
+    def test_update_rejects_a_client_supplied_marker(self):
+        created, _ = self._post("/schedules", {
+            "name": "t", "trigger": {"kind": "limit_reset", "window": "five_hour"},
+        })
+        sid = created["schedule"]["id"]
+        data, code = self._post("/schedules/update", {
+            "id": sid,
+            "trigger": {"kind": "limit_reset", "window": "five_hour",
+                        "last_seen_resets_at": "2000-01-01T00:00:00Z"},
+        })
+        self.assertEqual(code, 400)
+        self.assertIn("last_seen_resets_at", data["message"])
+        # The marker on disk must be untouched by the rejected request.
+        fresh = schedules.get_schedule_by_id(sid)[1]
+        self.assertIsNone(fresh["trigger"]["last_seen_resets_at"])
+
 
 if __name__ == "__main__":
     unittest.main()
