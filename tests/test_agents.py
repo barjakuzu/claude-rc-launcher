@@ -1,5 +1,6 @@
-"""agents.py: wraps `claude agents --json`, normalizes rows, caches 30s,
-single-flight refreshes, gated on compat's agents_json capability."""
+"""agents.py: wraps `claude agents --json`, normalizes rows, caches
+briefly (agents.CACHE_TTL_SECONDS), single-flight refreshes, gated on
+compat's agents_json capability."""
 import os, sys, threading, time, unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -186,14 +187,19 @@ class ListClaudeSessionsTest(AgentsJsonCapsGateMixin, unittest.TestCase):
         fake = FakeRun(stdout='[{"pid": 1, "name": "x"}]')
         self.assertEqual(agents.list_claude_sessions(claude_bin="claude", run=fake), [])
 
-    def test_caches_for_30_seconds(self):
+    def test_caches_for_ttl_then_refreshes(self):
+        # Parametrized on the real module constant, not a hardcoded
+        # number, so this keeps testing the mechanism (cache within the
+        # window, background refresh once stale) regardless of exactly
+        # how CACHE_TTL_SECONDS is tuned.
+        ttl = agents.CACHE_TTL_SECONDS
         fake = FakeRun(stdout=RAW_JSON)
         clock = {"t": 1000.0}
         agents.list_claude_sessions(claude_bin="claude", run=fake, now_fn=lambda: clock["t"])
-        clock["t"] += 5
+        clock["t"] += ttl / 2
         agents.list_claude_sessions(claude_bin="claude", run=fake, now_fn=lambda: clock["t"])
         self.assertEqual(len(fake.calls), 1)  # second call served from cache
-        clock["t"] += 30
+        clock["t"] += ttl + 1
         agents.list_claude_sessions(claude_bin="claude", run=fake, now_fn=lambda: clock["t"])
         if agents._last_refresh_thread:
             agents._last_refresh_thread.join(timeout=5)

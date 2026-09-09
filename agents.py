@@ -9,7 +9,18 @@ import time
 import compat
 from config import CLAUDE_BIN
 
-CACHE_TTL_SECONDS = 30
+# How long a `claude agents --json` fetch is trusted before a caller
+# forces a background refresh (see list_claude_sessions below). This was
+# 30s; a dead EXTERNAL session (no tmux pane, only known through this
+# call) could sit in the UI looking alive for up to this long even after
+# its process exited, on top of whatever else re-polls this device (the
+# hub's own fleetpoll interval, out of this module's control). Lowered
+# to 5s: a real `claude agents --json` spawn measured on this box takes
+# ~0.2-0.3s, and the single-flight/serve-stale-while-refreshing design
+# below already caps this at one spawn per window regardless of caller
+# count, so a shorter window costs little and meaningfully shrinks how
+# long a gone session can keep looking alive.
+CACHE_TTL_SECONDS = 5
 
 # `claude agents --json` reports startedAt in epoch MILLISECONDS (verified
 # on a production box: a real value looks like 1787677948238), but nothing

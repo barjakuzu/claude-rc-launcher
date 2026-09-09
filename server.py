@@ -1112,6 +1112,18 @@ def _stop_external_pid(pid, run=subprocess.run):
     return True, "Stopped"
 
 
+# Reasons _stop_external_pid can return (plus the launcher-stop path's own
+# "Stopped") that mean the process is no longer running, not merely that
+# this particular request failed. The UI needs this distinction: "Process
+# not found" means the row itself is stale and should be dropped right
+# now rather than left on screen until the next poll notices, the same as
+# a successful stop; "Not a claude process" or "Permission denied" mean
+# the process may well still be alive and the row must stay, with the
+# real reason shown. Exposed on the /stop response as "gone" so the
+# frontend doesn't have to pattern-match this endpoint's message text.
+_STOP_GONE_REASONS = frozenset({"Stopped", "Process not found"})
+
+
 def _cookie_secure_flag(behind_tls, forwarded_proto):
     """True if the Secure cookie attribute should be set: either the
     operator has explicitly said we sit behind TLS termination, or the
@@ -2037,7 +2049,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     self._json({"ok": False, "message": err}, 400)
                     return
                 ok, reason = _stop_external_pid(pid)
-                self._json({"ok": ok, "message": reason}, 200 if ok else 400)
+                self._json(
+                    {"ok": ok, "message": reason, "gone": reason in _STOP_GONE_REASONS},
+                    200 if ok else 400)
                 return
             name = body.get("name", "").strip()
             if not name:
@@ -2049,7 +2063,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if session_exists(name):
                 stop_session(name)
             _audit(self, action="stop", target=name)
-            self._json({"ok": True, "message": "Stopped"})
+            # A launcher stop always ends the tmux session (or it was
+            # already gone) -- "gone": true for the same reason as the
+            # external-pid path above, so the UI can drop the row
+            # immediately instead of waiting for the next poll.
+            self._json({"ok": True, "message": "Stopped", "gone": True})
 
         elif path == "/unstick":
             body = self._read_body()

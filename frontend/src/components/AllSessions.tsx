@@ -33,6 +33,13 @@ export function AllSessions({ onOpenDevice }: AllSessionsProps) {
   const [rcUrls, setRcUrls] = useState<Record<string, string>>({});
   const [rcErrors, setRcErrors] = useState<Record<string, string>>({});
   const [stopErrors, setStopErrors] = useState<Record<string, string>>({});
+  // A stop the server confirms means the session is gone (either we just
+  // stopped it, or it had already ended) drops the row from view right
+  // away instead of leaving it looking alive until the fleet store's own
+  // next poll of that device notices. Session ids are unique, so a
+  // dismissed key never collides with a later, unrelated session.
+  const [dismissedKeys, setDismissedKeys] = useState<Set<string>>(new Set());
+  const [stopNotices, setStopNotices] = useState<Record<string, string>>({});
 
   const guard = async (key: string, fn: () => Promise<unknown>) => {
     if (pending[key]) return;
@@ -57,7 +64,18 @@ export function AllSessions({ onOpenDevice }: AllSessionsProps) {
     setStopErrors((e) => { const { [key]: _drop, ...rest } = e; return rest; });
     try {
       const result = await api.stop(deviceId, name, opts);
-      if (isFailureEnvelope(result)) {
+      const gone = !!(result && typeof result === 'object' && (result as { gone?: boolean }).gone);
+      if (gone) {
+        if (isFailureEnvelope(result)) {
+          setStopNotices((n) => ({ ...n, [key]: result.message || 'Session already ended' }));
+          setTimeout(() => {
+            setDismissedKeys((prev) => new Set(prev).add(key));
+            setStopNotices((n) => { const { [key]: _drop, ...rest } = n; return rest; });
+          }, 1200);
+        } else {
+          setDismissedKeys((prev) => new Set(prev).add(key));
+        }
+      } else if (isFailureEnvelope(result)) {
         setStopErrors((e) => ({ ...e, [key]: result.message || 'Failed to stop session' }));
       }
     } catch (err) {
@@ -74,6 +92,22 @@ export function AllSessions({ onOpenDevice }: AllSessionsProps) {
     const t = setTimeout(() => setStopErrors({}), 6000);
     return () => clearTimeout(t);
   }, [stopErrors]);
+
+  // Prune dismissed keys once the fleet store itself has caught up and
+  // the row is genuinely gone from `sessions` too, so this set stays
+  // bounded across a long-lived tab instead of growing forever.
+  useEffect(() => {
+    setDismissedKeys((prev) => {
+      if (prev.size === 0) return prev;
+      const present = new Set(sessions.map((s) => `${s.device_id}:${s.session_id}`));
+      const next = new Set<string>();
+      let changed = false;
+      for (const k of prev) {
+        if (present.has(k)) next.add(k); else changed = true;
+      }
+      return changed ? next : prev;
+    });
+  }, [sessions]);
 
   const handleEnableRc = async (key: string, deviceId: string, tmuxSessionName: string) => {
     if (pending[`rc-${key}`]) return;
@@ -128,15 +162,23 @@ export function AllSessions({ onOpenDevice }: AllSessionsProps) {
 
   // needs_attention sorts first; tie-break on a stable key (started_at,
   // then session_id) rather than last_seen, which reorders rows on every
-  // incoming event.
-  const sortedSessions = useMemo(() => [...sessions].sort((a, b) => {
-    if (a.needs_attention !== b.needs_attention) return a.needs_attention ? -1 : 1;
-    const started = (b.started_at ?? 0) - (a.started_at ?? 0);
-    if (started !== 0) return started;
-    return a.session_id < b.session_id ? -1 : a.session_id > b.session_id ? 1 : 0;
-  }), [sessions]);
+  // incoming event. Rows this tab has just confirmed are gone (via
+  // dismissedKeys, see handleStop) are filtered out here rather than
+  // waiting for the fleet store's own next poll to drop them.
+  const sortedSessions = useMemo(() => [...sessions]
+    .filter((s) => !dismissedKeys.has(`${s.device_id}:${s.session_id}`))
+    .sort((a, b) => {
+      if (a.needs_attention !== b.needs_attention) return a.needs_attention ? -1 : 1;
+      const started = (b.started_at ?? 0) - (a.started_at ?? 0);
+      if (started !== 0) return started;
+      return a.session_id < b.session_id ? -1 : a.session_id > b.session_id ? 1 : 0;
+    }), [sessions, dismissedKeys]);
 
-  const deviceCount = new Set(sessions.map((s) => s.device_id)).size;
+  // Derived from sortedSessions (post-dismiss), not the raw sessions
+  // array, so the header count never shows more sessions than the list
+  // actually renders right after a row is dropped for being confirmed
+  // gone.
+  const deviceCount = new Set(sortedSessions.map((s) => s.device_id)).size;
   const connectionNote = stale ? ' · stream stale, polling' : usingFallback ? ' · polling' : '';
 
   // Round 5: same fabricated-zero pattern as the strip (App.tsx, Strip.tsx),
@@ -156,7 +198,7 @@ export function AllSessions({ onOpenDevice }: AllSessionsProps) {
     <div style={{ flex: 1, overflow: 'auto', display: 'flex', flexDirection: 'column' }}>
       <MobileHeader
         subtitle={fleetLoaded
-          ? `${sessions.length} total session${sessions.length !== 1 ? 's' : ''} · across ${deviceCount} device${deviceCount !== 1 ? 's' : ''}${connectionNote}`
+          ? `${sortedSessions.length} total session${sortedSessions.length !== 1 ? 's' : ''} · across ${deviceCount} device${deviceCount !== 1 ? 's' : ''}${connectionNote}`
           : 'Loading sessions…'}
         title="Sessions"
         right={
@@ -354,6 +396,11 @@ export function AllSessions({ onOpenDevice }: AllSessionsProps) {
               {stopErrors[key] && (
                 <div style={{ fontFamily: FONT_MONO, fontSize: 10.5, color: RT.red }}>
                   Stop failed: {stopErrors[key]}
+                </div>
+              )}
+              {stopNotices[key] && (
+                <div style={{ fontFamily: FONT_MONO, fontSize: 10.5, color: RT.textLow, fontStyle: 'italic' }}>
+                  {stopNotices[key]}
                 </div>
               )}
             </div>
