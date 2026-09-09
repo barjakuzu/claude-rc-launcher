@@ -69,28 +69,40 @@ stream).
 The account limits endpoint (`GET /api/limits` on the hub) describes the
 Anthropic account, not the machine, so every device on the same account
 calling it independently is pure waste, and can rate limit the account.
-Only one device should ever call it. That device is decided by
-`RC_FETCH_LIMITS` in the device's environment (same file, same
-convention as `RC_ROLE` above), read by `fleet.is_limits_hub()`:
+Only one device should ever call it, decided by `fleet.is_limits_hub()`:
 
-- unset (default): this device fetches. Every existing single-device
-  install keeps working unchanged, with no new configuration.
-- `0` / `false` / `no` / `off` (case insensitive): this device never
-  calls the account limits endpoint at all. Its fleet payload omits the
-  `limits` key entirely rather than reporting `available: false`, and
-  its own `/api/limits` shows no reading of its own.
+- **Auto-detected by default** (`RC_FETCH_LIMITS` unset): a device
+  fetches if it has other devices configured to poll, i.e. its own
+  `devices.json` is non-empty. That is exactly the fleet's coordinating
+  hub, since `devices.json` is edited on the hub when you add a device
+  (see above) and never on the satellite being added. No configuration
+  is needed on the hub side of a multi-device fleet: adding the second
+  device already elects the hub as the fetcher.
+- A device with no other devices configured (an empty or missing
+  `devices.json`) does not fetch by default. This covers a satellite in
+  someone else's fleet, which is the intended fix. It also, unavoidably,
+  covers a genuinely standalone single-device install: from a device's
+  own local state, "I am someone's satellite" and "I have no fleet at
+  all" look identical (both have an empty `devices.json`), and there is
+  no reliable way to tell them apart without asking the operator. A
+  standalone install that wants limits reporting sets `RC_FETCH_LIMITS=1`
+  explicitly (see below) to restore it.
+- `RC_FETCH_LIMITS` in the device's environment (same file, same
+  convention as `RC_ROLE` above) overrides the auto-detect outright in
+  either direction: `1` / `true` / `yes` / `on` forces fetching on, `0` /
+  `false` / `no` / `off` forces it off, both regardless of `devices.json`
+  (case insensitive). Unset, or any other value, falls back to
+  auto-detect.
 
-To check which device is actually fetching, look at that device's own
-`GET /fleet` response: the fetcher's payload has a `limits` key, a
-non-fetching device's does not (the key is absent, not present with
-`available: false`).
+A non-fetching device omits the `limits` key entirely from its fleet
+payload rather than reporting `available: false`. To check which device
+is actually fetching, look at that device's own `GET /fleet` response:
+the fetcher's payload has a `limits` key, a non-fetching device's does
+not (the key is absent, not present with `available: false`).
 
-When you add a second (or third) device on the same account, set
-`RC_FETCH_LIMITS=0` on every device except the one you want to be the
-single fetcher. This is independent of `RC_ROLE` and of which device
-carries `devices.json`: nothing requires the fetcher to also be the
-device that polls the others, though in practice it usually is the same
-machine.
+This is independent of `RC_ROLE` and of which device carries
+`devices.json`: nothing requires the fetcher to also be the device that
+polls the others, though in practice it usually is the same machine.
 
 ## Tailscale ACL note
 

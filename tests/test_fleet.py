@@ -59,6 +59,20 @@ class BuildFleetTest(unittest.TestCase):
         # explicitly -- see BuildFleetLimitsTest below.
         limits_patcher = patch("fleet.limits.get_limits")
         self._limits_mock = limits_patcher.start()
+        # Task L5 fix round 1: is_limits_hub()'s auto-detect default reads
+        # devices.load_devices() (see fleet.py), which -- left unmocked --
+        # reads this MACHINE's real ~/.claude-rc/devices.json. None of
+        # this class's tests are about limits/hub-gating at all, so this
+        # is patched to a fixed, empty stand-in purely for determinism:
+        # without it, every test in this class would silently behave
+        # differently depending on whether the box running the suite
+        # happens to have a real devices.json (this repo's own dev box
+        # does), even though no assertion here reads "limits" or cares
+        # which way is_limits_hub() resolves.
+        devices_patcher = patch("fleet.devices.load_devices")
+        self._load_devices_mock = devices_patcher.start()
+        self._load_devices_mock.return_value = []
+        self.addCleanup(devices_patcher.stop)
         self._limits_mock.return_value = _EMPTY_LIMITS
         self.addCleanup(limits_patcher.stop)
 
@@ -718,6 +732,18 @@ class BuildFleetLimitsTest(unittest.TestCase):
     def setUp(self):
         fleet._cache.clear()
         fleet._last_prune_at = None
+        # Task L5 fix round 1: every test in this class is about what
+        # build_fleet() produces WHEN it fetches, not about the
+        # auto-detect default that decides WHETHER it fetches (that's
+        # IsLimitsHubTest / BuildFleetLimitsHubGatingTest below) --
+        # devices.load_devices() is patched to a non-empty stand-in
+        # ("this device has other devices configured, so it fetches")
+        # for every test here, deterministic regardless of whatever
+        # devices.json the machine running the suite happens to have.
+        devices_patcher = patch("fleet.devices.load_devices")
+        self._load_devices_mock = devices_patcher.start()
+        self._load_devices_mock.return_value = [{"id": "peer", "base_url": "http://peer:8200"}]
+        self.addCleanup(devices_patcher.stop)
 
     @patch("fleet.limits.get_limits")
     @patch("fleet.usage.rollup")
@@ -859,41 +885,90 @@ class BuildFleetLimitsTest(unittest.TestCase):
 
 
 class IsLimitsHubTest(unittest.TestCase):
-    """Task L5: is_limits_hub() is the explicit, operator-visible signal
-    deciding whether THIS device calls the account limits endpoint at
-    all. `env` is always passed explicitly here -- never the real
-    os.environ -- so these tests can't be polluted by (or leak into) the
-    actual process environment."""
+    """Task L5 fix round 1: is_limits_hub() auto-detects from
+    devices.load_devices() when RC_FETCH_LIMITS doesn't explicitly say
+    otherwise -- fetch when this device has other devices configured
+    (the fleet's coordinating hub), don't when it doesn't (a satellite,
+    or a standalone install with no fleet at all -- see the KNOWN
+    LIMITATION note in fleet.py: these two cases are locally identical,
+    "has other devices configured" is False for both, and this function
+    cannot tell them apart without an explicit RC_FETCH_LIMITS=1).
 
-    def test_unset_defaults_to_fetch(self):
-        self.assertTrue(fleet.is_limits_hub(env={}))
+    `env` and `has_other_devices` are always passed explicitly here --
+    never the real os.environ / a real devices.json -- so these tests
+    can't be polluted by (or leak into) the actual machine's state (this
+    repo's own dev box has a real, non-empty devices.json)."""
 
-    def test_explicit_off_values_disable_fetching(self):
+    # --- auto-detect (RC_FETCH_LIMITS unset) ---
+
+    def test_hub_with_other_devices_configured_fetches(self):
+        self.assertTrue(fleet.is_limits_hub(env={}, has_other_devices=True))
+
+    def test_no_other_devices_configured_does_not_fetch(self):
+        # Covers BOTH a satellite (empty devices.json, but some other
+        # device's devices.json points at it) and a standalone install
+        # (empty devices.json, no fleet at all) -- see the KNOWN
+        # LIMITATION note in fleet.is_limits_hub's docstring. This is
+        # the new default; a standalone install that wants the old
+        # always-fetch behaviour sets RC_FETCH_LIMITS=1 explicitly (see
+        # the override tests below).
+        self.assertFalse(fleet.is_limits_hub(env={}, has_other_devices=False))
+
+    def test_default_env_arg_reads_real_devices_load_devices(self):
+        # has_other_devices=None (the default) falls through to a real
+        # devices.load_devices() call -- patched here so this one test,
+        # which exists specifically to prove that wiring, still never
+        # touches this machine's actual devices.json.
+        with patch("fleet.devices.load_devices", return_value=[{"id": "x", "base_url": "http://x"}]):
+            self.assertTrue(fleet.is_limits_hub(env={}))
+        with patch("fleet.devices.load_devices", return_value=[]):
+            self.assertFalse(fleet.is_limits_hub(env={}))
+
+    # --- explicit override, either direction, wins regardless of devices.json ---
+
+    def test_explicit_on_values_force_fetch_even_with_no_other_devices(self):
+        for value in ("1", "true", "True", "YES", "on", "On"):
+            self.assertTrue(
+                fleet.is_limits_hub(env={"RC_FETCH_LIMITS": value}, has_other_devices=False),
+                f"{value!r} should force fetching on")
+
+    def test_explicit_off_values_force_no_fetch_even_with_other_devices(self):
         for value in ("0", "false", "False", "NO", "off", "Off"):
             self.assertFalse(
-                fleet.is_limits_hub(env={"RC_FETCH_LIMITS": value}),
-                f"{value!r} should disable fetching")
+                fleet.is_limits_hub(env={"RC_FETCH_LIMITS": value}, has_other_devices=True),
+                f"{value!r} should force fetching off")
 
-    def test_any_other_value_still_fetches(self):
-        for value in ("1", "true", "yes", "on", "hub"):
-            self.assertTrue(
-                fleet.is_limits_hub(env={"RC_FETCH_LIMITS": value}),
-                f"{value!r} should not disable fetching")
+    def test_whitespace_around_override_value_is_tolerated(self):
+        self.assertFalse(
+            fleet.is_limits_hub(env={"RC_FETCH_LIMITS": "  0  "}, has_other_devices=True))
+        self.assertTrue(
+            fleet.is_limits_hub(env={"RC_FETCH_LIMITS": "  1  "}, has_other_devices=False))
 
-    def test_whitespace_around_off_value_is_tolerated(self):
-        self.assertFalse(fleet.is_limits_hub(env={"RC_FETCH_LIMITS": "  0  "}))
+    def test_unrecognised_value_falls_through_to_auto_detect(self):
+        # A typo or garbage value is not silently treated as "on" (the
+        # round-0 behaviour) -- it falls through to the same auto-detect
+        # as unset, rather than an unrecognised string quietly meaning
+        # something.
+        self.assertTrue(
+            fleet.is_limits_hub(env={"RC_FETCH_LIMITS": "banana"}, has_other_devices=True))
+        self.assertFalse(
+            fleet.is_limits_hub(env={"RC_FETCH_LIMITS": "banana"}, has_other_devices=False))
 
 
 class BuildFleetLimitsHubGatingTest(unittest.TestCase):
     """Task L5: 'A device only calls the API when it is acting as the
     hub' + 'A non-fetching device omits the limits key from its payload
-    entirely, rather than sending available: false.'"""
+    entirely, rather than sending available: false.' Fix round 1: the
+    default is now auto-detected from devices.load_devices(), so these
+    tests exercise build_fleet() end-to-end through the real
+    is_limits_hub() (not a mock of it), varying only
+    fleet.devices.load_devices()."""
 
     def setUp(self):
         fleet._cache.clear()
         fleet._last_prune_at = None
 
-    @patch("fleet.is_limits_hub")
+    @patch("fleet.devices.load_devices")
     @patch("fleet.limits.get_limits")
     @patch("fleet.usage.rollup")
     @patch("fleet.events.prune")
@@ -901,22 +976,28 @@ class BuildFleetLimitsHubGatingTest(unittest.TestCase):
     @patch("fleet.sessions.list_rc_sessions")
     @patch("fleet.compat.get_caps")
     @patch("fleet.devices.get_local_name")
-    def test_non_hub_device_omits_limits_key_and_never_calls_get_limits(
+    def test_satellite_no_other_devices_omits_limits_key_and_never_calls_get_limits(
             self, get_name, get_caps, list_sess, read_ev, prune, rollup,
-            get_limits, is_hub):
+            get_limits, load_devices):
+        # Task L5 fix round 1, "test both": a satellite device (this
+        # device's own devices.json is empty, RC_FETCH_LIMITS unset) now
+        # defaults to NOT fetching -- the fix for the reported bug,
+        # verified without any per-device configuration.
         get_name.return_value = "satellite"
         get_caps.return_value = {}
         list_sess.return_value = []
         read_ev.return_value = ([], None)
         rollup.return_value = _empty_rollup(5000.0)
-        is_hub.return_value = False
+        load_devices.return_value = []
 
-        result = fleet.build_fleet(role="full", now_fn=lambda: 5000.0)
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("RC_FETCH_LIMITS", None)
+            result = fleet.build_fleet(role="full", now_fn=lambda: 5000.0)
 
         self.assertNotIn("limits", result)
         get_limits.assert_not_called()
 
-    @patch("fleet.is_limits_hub")
+    @patch("fleet.devices.load_devices")
     @patch("fleet.limits.get_limits")
     @patch("fleet.usage.rollup")
     @patch("fleet.events.prune")
@@ -924,22 +1005,24 @@ class BuildFleetLimitsHubGatingTest(unittest.TestCase):
     @patch("fleet.sessions.list_rc_sessions")
     @patch("fleet.compat.get_caps")
     @patch("fleet.devices.get_local_name")
-    def test_non_hub_device_omits_limits_key_under_metadata_role_too(
+    def test_satellite_omits_limits_key_under_metadata_role_too(
             self, get_name, get_caps, list_sess, read_ev, prune, rollup,
-            get_limits, is_hub):
+            get_limits, load_devices):
         get_name.return_value = "satellite"
         get_caps.return_value = {}
         list_sess.return_value = []
         read_ev.return_value = ([], None)
         rollup.return_value = _empty_rollup(5000.0)
-        is_hub.return_value = False
+        load_devices.return_value = []
 
-        result = fleet.build_fleet(role="metadata", now_fn=lambda: 5000.0)
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("RC_FETCH_LIMITS", None)
+            result = fleet.build_fleet(role="metadata", now_fn=lambda: 5000.0)
 
         self.assertNotIn("limits", result)
         get_limits.assert_not_called()
 
-    @patch("fleet.is_limits_hub")
+    @patch("fleet.devices.load_devices")
     @patch("fleet.limits.get_limits")
     @patch("fleet.usage.rollup")
     @patch("fleet.events.prune")
@@ -947,23 +1030,30 @@ class BuildFleetLimitsHubGatingTest(unittest.TestCase):
     @patch("fleet.sessions.list_rc_sessions")
     @patch("fleet.compat.get_caps")
     @patch("fleet.devices.get_local_name")
-    def test_hub_device_still_fetches_and_carries_limits_key(
+    def test_hub_with_other_devices_configured_fetches_and_carries_limits_key(
             self, get_name, get_caps, list_sess, read_ev, prune, rollup,
-            get_limits, is_hub):
+            get_limits, load_devices):
+        # Task L5 fix round 1: the hub (this device's own devices.json
+        # is non-empty, RC_FETCH_LIMITS unset) keeps fetching -- zero new
+        # configuration required, matches devices.json already being
+        # what an operator edits to register a device with the hub.
         get_name.return_value = "hub"
         get_caps.return_value = {}
         list_sess.return_value = []
         read_ev.return_value = ([], None)
         rollup.return_value = _empty_rollup(5000.0)
-        is_hub.return_value = True
+        load_devices.return_value = [{"id": "laptop", "base_url": "http://laptop:8200"}]
         available_limits = dict(_EMPTY_LIMITS, available=True, fetched_at=5000.0)
         get_limits.return_value = available_limits
 
-        result = fleet.build_fleet(role="full", now_fn=lambda: 5000.0)
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("RC_FETCH_LIMITS", None)
+            result = fleet.build_fleet(role="full", now_fn=lambda: 5000.0)
 
         self.assertEqual(result["limits"], available_limits)
         get_limits.assert_called_once()
 
+    @patch("fleet.devices.load_devices")
     @patch("fleet.limits.get_limits")
     @patch("fleet.usage.rollup")
     @patch("fleet.events.prune")
@@ -971,29 +1061,84 @@ class BuildFleetLimitsHubGatingTest(unittest.TestCase):
     @patch("fleet.sessions.list_rc_sessions")
     @patch("fleet.compat.get_caps")
     @patch("fleet.devices.get_local_name")
-    def test_default_env_still_fetches_zero_config(
-            self, get_name, get_caps, list_sess, read_ev, prune, rollup, get_limits):
-        # fleet.is_limits_hub is deliberately NOT patched here: with
-        # RC_FETCH_LIMITS unset in the real process environment (the
-        # normal case for every single-device install, and for CI),
-        # build_fleet must keep fetching exactly as it always has -- zero
-        # new configuration required. patch.dict restores whatever the
-        # real environment had afterwards; the pop only affects this
-        # block.
-        with patch.dict(os.environ, {}, clear=False):
-            os.environ.pop("RC_FETCH_LIMITS", None)
-            get_name.return_value = "hub"
-            get_caps.return_value = {}
-            list_sess.return_value = []
-            read_ev.return_value = ([], None)
-            rollup.return_value = _empty_rollup(5000.0)
-            available_limits = dict(_EMPTY_LIMITS, available=True, fetched_at=5000.0)
-            get_limits.return_value = available_limits
+    def test_standalone_install_fetches_with_explicit_override(
+            self, get_name, get_caps, list_sess, read_ev, prune, rollup,
+            get_limits, load_devices):
+        # Task L5 fix round 1, "test both": a standalone install looks
+        # exactly like a satellite here (empty devices.json) and so gets
+        # the same new default (no fetch) -- the one edge this round's
+        # auto-detect genuinely cannot resolve on its own (see fleet.py's
+        # KNOWN LIMITATION note and this task's report). It is restored
+        # to the old always-fetch behaviour with one explicit env var.
+        get_name.return_value = "standalone"
+        get_caps.return_value = {}
+        list_sess.return_value = []
+        read_ev.return_value = ([], None)
+        rollup.return_value = _empty_rollup(5000.0)
+        load_devices.return_value = []
+        available_limits = dict(_EMPTY_LIMITS, available=True, fetched_at=5000.0)
+        get_limits.return_value = available_limits
 
+        with patch.dict(os.environ, {"RC_FETCH_LIMITS": "1"}):
             result = fleet.build_fleet(role="full", now_fn=lambda: 5000.0)
 
-            self.assertEqual(result["limits"], available_limits)
-            get_limits.assert_called_once()
+        self.assertEqual(result["limits"], available_limits)
+        get_limits.assert_called_once()
+
+    @patch("fleet.devices.load_devices")
+    @patch("fleet.limits.get_limits")
+    @patch("fleet.usage.rollup")
+    @patch("fleet.events.prune")
+    @patch("fleet.events.read_events")
+    @patch("fleet.sessions.list_rc_sessions")
+    @patch("fleet.compat.get_caps")
+    @patch("fleet.devices.get_local_name")
+    def test_standalone_install_without_override_does_not_fetch(
+            self, get_name, get_caps, list_sess, read_ev, prune, rollup,
+            get_limits, load_devices):
+        # The other half of "test both": documents, explicitly, that a
+        # standalone install with RC_FETCH_LIMITS left unset now also
+        # defaults to no fetch, identically to a satellite -- proving
+        # the KNOWN LIMITATION note in fleet.py is real, not theoretical.
+        get_name.return_value = "standalone"
+        get_caps.return_value = {}
+        list_sess.return_value = []
+        read_ev.return_value = ([], None)
+        rollup.return_value = _empty_rollup(5000.0)
+        load_devices.return_value = []
+
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("RC_FETCH_LIMITS", None)
+            result = fleet.build_fleet(role="full", now_fn=lambda: 5000.0)
+
+        self.assertNotIn("limits", result)
+        get_limits.assert_not_called()
+
+    @patch("fleet.devices.load_devices")
+    @patch("fleet.limits.get_limits")
+    @patch("fleet.usage.rollup")
+    @patch("fleet.events.prune")
+    @patch("fleet.events.read_events")
+    @patch("fleet.sessions.list_rc_sessions")
+    @patch("fleet.compat.get_caps")
+    @patch("fleet.devices.get_local_name")
+    def test_hub_can_be_forced_off_despite_having_other_devices_configured(
+            self, get_name, get_caps, list_sess, read_ev, prune, rollup,
+            get_limits, load_devices):
+        # "an operator may want to force it either way" -- even a device
+        # with other devices configured can be told not to fetch.
+        get_name.return_value = "hub"
+        get_caps.return_value = {}
+        list_sess.return_value = []
+        read_ev.return_value = ([], None)
+        rollup.return_value = _empty_rollup(5000.0)
+        load_devices.return_value = [{"id": "laptop", "base_url": "http://laptop:8200"}]
+
+        with patch.dict(os.environ, {"RC_FETCH_LIMITS": "0"}):
+            result = fleet.build_fleet(role="full", now_fn=lambda: 5000.0)
+
+        self.assertNotIn("limits", result)
+        get_limits.assert_not_called()
 
 
 if __name__ == "__main__":

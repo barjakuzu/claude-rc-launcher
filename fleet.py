@@ -43,38 +43,71 @@ _last_prune_at = None
 # device's own Claude Code status line polling the same endpoint
 # independently. Only the fleet's elected single fetcher calls it now;
 # see is_limits_hub() and its use below.
+#
+# Fix round 1 (coordinator): the first version of this function defaulted
+# to "fetch" for every device, which meant a multi-device fleet only
+# stopped duplicate-fetching once an operator manually set
+# RC_FETCH_LIMITS=0 on every satellite -- a workaround the user has to
+# deploy, not a fix for the reported bug. The default is now auto-detected
+# from devices.json (see below): a device that has other devices
+# configured (the fleet's coordinating hub) fetches; a device that does
+# not (a satellite, or a genuinely standalone install) does not, unless
+# RC_FETCH_LIMITS overrides it explicitly in either direction.
 RC_FETCH_LIMITS_ENV = "RC_FETCH_LIMITS"
+_FETCH_LIMITS_ON_VALUES = frozenset(("1", "true", "yes", "on"))
 _FETCH_LIMITS_OFF_VALUES = frozenset(("0", "false", "no", "off"))
 
 
-def is_limits_hub(env=None):
+def is_limits_hub(env=None, has_other_devices=None):
     """Whether THIS device is elected to call limits.get_limits() at all
     this poll (Task L5: "a device only calls the API when it is acting
-    as the hub"). The explicit, operator-visible signal is the
-    RC_FETCH_LIMITS environment variable (same convention as RC_ROLE in
-    config.py; documented in docs/DEVICES.md): unset, or anything other
-    than one of _FETCH_LIMITS_OFF_VALUES, means "fetch" -- which is
-    exactly today's behaviour, so the overwhelmingly common single-device
-    install needs zero new configuration and keeps working unchanged.
-    A multi-device fleet's operator sets RC_FETCH_LIMITS=0 in every
-    device's ~/.claude-rc/env EXCEPT the one they want to be the
-    account's single fetcher.
+    as the hub").
 
-    Deliberately NOT: (a) inferred from devices.json's own contents --
-    non-empty there says "I poll other devices", which is true of a
-    fleet's coordinating hub, but a lone single-device install (by far
-    the common case) has an empty devices.json too and must keep
-    fetching regardless, so devices.json alone cannot carry this
-    decision; (b) inferred from hostname -- the task brief for this fix
-    rules that out explicitly, since it is invisible to the operator and
-    fragile the moment a machine is renamed or cloned.
+    Precedence:
+    1. RC_FETCH_LIMITS in the environment, if it is one of
+       _FETCH_LIMITS_ON_VALUES/_FETCH_LIMITS_OFF_VALUES, wins outright --
+       an explicit, operator-visible override in either direction (same
+       convention as RC_ROLE in config.py; documented in docs/DEVICES.md).
+       An unset or unrecognised value falls through to auto-detect below.
+    2. Otherwise: fetch iff this device has other devices configured to
+       poll (devices.json non-empty, `devices.load_devices()`) -- the
+       fleet's coordinating hub, by construction, always has this and
+       every satellite, by construction, never does (docs/DEVICES.md:
+       "On the hub, add an entry to ~/.claude-rc/devices.json"). This
+       needs no new state and nothing for an operator to set: adding a
+       second device to a fleet already means editing devices.json on the
+       hub, and that same edit is now also what elects it as the fetcher.
 
-    `env` is an injection seam for tests (defaults to os.environ) so
-    every branch here can be driven without mutating the real process
-    environment."""
+    KNOWN LIMITATION, read before changing the default again: a
+    genuinely standalone single-device install (never configured any
+    other device) and a satellite device in someone else's fleet are
+    BOTH "has other devices configured == False" from this device's own
+    local state -- devices.json alone cannot tell them apart, since a
+    satellite's own devices.json is empty by design, same as a solo
+    install's. This function's default therefore does NOT fetch for
+    either case. A standalone install that wants the old always-fetch
+    behaviour back sets RC_FETCH_LIMITS=1 explicitly. Deliberately NOT
+    inferred from hostname (the task brief for this fix rules that out:
+    invisible to the operator, fragile the moment a machine is renamed or
+    cloned) and deliberately NOT inferred from whether this device has
+    ever answered a remote /fleet request (this product's own PWA/mobile
+    remote-access feature means a genuinely standalone device is
+    routinely reached from a non-loopback address by its own owner, so
+    "polled remotely" is not evidence of being someone else's satellite
+    here).
+
+    `env`/`has_other_devices` are injection seams for tests (default to
+    os.environ / devices.load_devices()) so every branch can be driven
+    without touching the real environment or a real devices.json."""
     env = os.environ if env is None else env
     raw = (env.get(RC_FETCH_LIMITS_ENV) or "").strip().lower()
-    return raw not in _FETCH_LIMITS_OFF_VALUES
+    if raw in _FETCH_LIMITS_ON_VALUES:
+        return True
+    if raw in _FETCH_LIMITS_OFF_VALUES:
+        return False
+    if has_other_devices is None:
+        has_other_devices = bool(devices.load_devices())
+    return has_other_devices
 
 
 def _events_root():
