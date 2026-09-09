@@ -87,10 +87,13 @@ Only one device should ever call it, decided by `fleet.is_limits_hub()`:
   rather than a standalone install silently losing the feature, which is
   the safer direction to err in. If a hub goes quiet (down, or the
   operator removed this device from `devices.json`), the marker goes
-  stale after 5 minutes and the device resumes fetching on its own
-  rather than staying silent forever; the window is generous enough
-  (10x the default 30s poll interval) that a brief hub outage does not
-  make every satellite it was polling start fetching at once.
+  stale after 5 minutes (plus a small, stable, per-device jitter of up
+  to 60 more seconds, so several satellites marked in the same poll
+  cycle do not all resume at the exact same instant after a hub outage)
+  and the device resumes fetching on its own rather than staying silent
+  forever; the base window alone is generous enough (10x the default 30s
+  poll interval) that a brief hub outage does not make every satellite
+  it was polling start fetching at once.
 - `RC_FETCH_LIMITS` in the device's environment (same file, same
   convention as `RC_ROLE` above) overrides this outright in either
   direction: `1` / `true` / `yes` / `on` forces fetching on, `0` /
@@ -108,6 +111,16 @@ This is independent of `RC_ROLE`: nothing requires the fetcher to also
 be the device that polls the others, though in practice it is the same
 machine, since only a device that polls others (the hub) ever sends the
 marker in the first place.
+
+**Do not add two devices to each other's `devices.json`.** `devices.json`
+is meant to be edited on ONE coordinating hub only (see "Adding one"
+above). If two devices instead each list the other, they each poll and
+mark the other as a satellite, so BOTH conclude they are the satellite
+and elect zero fetchers for the account, not one. This is silent and
+total: no error, no `available: false`, just an absent `limits` key on
+every device, forever. Out of contract for Task L5 (a device cannot
+locally tell "my hub polls me" apart from this misconfiguration), fix
+it by removing the reciprocal entry so exactly one device is the hub.
 
 ## Tailscale ACL note
 

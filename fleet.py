@@ -185,6 +185,21 @@ def is_limits_hub(env=None, polled_by_hub_recently=None):
     of that poll going stale should the hub then disappear, and resumes
     automatically if the hub keeps polling.
 
+    KNOWN LIMITATION (fix round 3, out of contract, not fixed here): two
+    devices that each list the OTHER in their own devices.json (a
+    mutually-polling pair, rather than the documented one-hub-many-
+    satellites shape) each receive a marker from the other and each
+    concludes it is the satellite -- electing ZERO fetchers for the
+    account, not one. Nothing here detects or reports this: from either
+    device's own local state, "my hub polls me" is indistinguishable
+    between a correctly configured satellite and this misconfiguration,
+    same class of problem as the standalone-vs-satellite one above, and
+    the failure is silent and total (no error, no available=False, just
+    an absent `limits` key on every device forever). Documented rather
+    than solved: devices.json is meant to be edited on ONE coordinating
+    hub only (see docs/DEVICES.md), and this stays a documented
+    footgun for the one topology that violates that.
+
     `env`/`polled_by_hub_recently` are injection seams for tests (default
     to os.environ / _polled_by_hub_recently()) so every branch can be
     driven without touching the real environment or the real module-level
