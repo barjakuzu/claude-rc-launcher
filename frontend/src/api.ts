@@ -644,6 +644,28 @@ async function req(method: string, path: string, device?: string, body?: unknown
   return data;
 }
 
+// A metadata-role device answers ANY path outside its small allowlist
+// (server.py's METADATA_ALLOWED_GET_PATHS check, not endpoint-specific)
+// with {"ok": false, "message": "This device is metadata-role only"} at
+// 403 -- reachable by GET /sessions, /schedules, /resume/sessions, and
+// others alike, and a real device in this fleet ("the work MacBook Pro")
+// runs this role. Deliberately NOT thrown from req() itself, unlike
+// ApiError above: {"ok": false, "message": ...} is ALSO the normal,
+// expected response shape for every mutating action in this app
+// (start/stop/restart/enableRc/deviceRename/POST /update/...), whose own
+// callers already read result.ok/result.message directly as real data,
+// not a failure (POST /update's 409 confirmation-needed response is the
+// same shape plus real extra fields, read correctly at Header.tsx's
+// runUpdateFlow). req() has no way to tell which kind of endpoint it's
+// serving, so making it throw for every {"ok": false} body would break
+// all of those. Exported for a read-only endpoint's own caller to check
+// for itself before treating the response as its expected list/array
+// shape -- the same reasoning /schedules' error-plus-data shape stays a
+// caller's job rather than the generator's (see ApiError above).
+export function isFailureEnvelope(v: unknown): v is { ok: false; message?: string } {
+  return !!v && typeof v === 'object' && (v as { ok?: unknown }).ok === false;
+}
+
 // Mirrors api.overview()'s fetch style — hub-only, never proxied to a device.
 export async function fetchConfigMatrix(): Promise<ConfigMatrix> {
   return req('GET', '/api/config-matrix') as Promise<ConfigMatrix>;

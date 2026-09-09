@@ -32,7 +32,8 @@ export function DeviceDetail({ device, cards, tab, setTab, onClose, layout, usag
   const {
     sessions, scheduled,
     hasLoadedSessions, hasLoadedScheduled,
-    deviceUnreachable, scheduledLoadError,
+    sessionsUnreachable, scheduledUnreachable,
+    sessionsError, scheduledError, scheduledLoadError,
     reloadSessions, reloadSchedules,
   } = usePanelData(device.id, tab);
 
@@ -93,13 +94,18 @@ export function DeviceDetail({ device, cards, tab, setTab, onClose, layout, usag
                 !hasLoadedSessions ? 'Loading sessions…'
                 // Round 4: this used to defer to device.online, from the
                 // separate, staler /rc/overview poll. usePanelData's own
-                // direct probes are fresher and more authoritative for
-                // this exact question, and a successful fetch
-                // (hasLoadedSessions true, deviceUnreachable false)
-                // already proves the device answered, so it wins outright
-                // rather than being cross-checked against a second
-                // opinion that can lag behind it in either direction.
-                : deviceUnreachable ? 'Device offline.'
+                // direct probe is fresher and more authoritative for this
+                // exact question, and a successful fetch (hasLoadedSessions
+                // true, sessionsUnreachable false) already proves the
+                // device answered, so it wins outright rather than being
+                // cross-checked against a second opinion that can lag
+                // behind it in either direction.
+                : sessionsUnreachable ? 'Device offline.'
+                // Round 6: a reachable device that refused this specific
+                // request (most commonly a metadata-role device's blanket
+                // 403) is neither "offline" nor "confirmed zero sessions":
+                // its own message.
+                : sessionsError ? sessionsError
                 : `No active sessions on ${device.name}. Launch one above.`
               } />
             ) : (
@@ -166,14 +172,22 @@ export function DeviceDetail({ device, cards, tab, setTab, onClose, layout, usag
               // Round 5: this used to read hasLoadedScheduled only, so an
               // unreachable device's Scheduled tab still confidently said
               // "No scheduled tasks on this device." (only the Sessions
-              // tab consulted deviceUnreachable). Wired to the same
-              // signal here too. Also suppresses this empty-state claim
-              // entirely when scheduledLoadError is set: the banner above
-              // already says the file couldn't be trusted, and "No
-              // scheduled tasks" right beside it would still read as a
-              // confident count, contradicting its own caveat.
+              // tab consulted its own unreachable signal). Wired to
+              // scheduledUnreachable here too -- this fetch's OWN signal,
+              // not a shared one (round 6: a shared deviceUnreachable let
+              // this fetch succeeding silently clear what the Sessions
+              // fetch separately knew; each tab reads only what its own
+              // fetch most recently confirmed). Also suppresses this
+              // empty-state claim entirely when scheduledLoadError is set:
+              // the banner above already says the file couldn't be
+              // trusted, and "No scheduled tasks" right beside it would
+              // still read as a confident count, contradicting its own
+              // caveat.
               !hasLoadedScheduled ? <V5Empty text="Loading scheduled tasks…" />
-              : deviceUnreachable ? <V5Empty text="Device offline." />
+              : scheduledUnreachable ? <V5Empty text="Device offline." />
+              // Round 6: a reachable device that refused this specific
+              // request (metadata-role, most commonly).
+              : scheduledError ? <V5Empty text={scheduledError} />
               : scheduledLoadError ? null
               : <V5Empty text="No scheduled tasks on this device." />
             ) : (
