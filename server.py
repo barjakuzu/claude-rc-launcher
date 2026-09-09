@@ -1,5 +1,6 @@
 """HTTP handler and routing."""
 
+import agents
 import base64
 import compat
 import fleet
@@ -2049,9 +2050,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     self._json({"ok": False, "message": err}, 400)
                     return
                 ok, reason = _stop_external_pid(pid)
-                self._json(
-                    {"ok": ok, "message": reason, "gone": reason in _STOP_GONE_REASONS},
-                    200 if ok else 400)
+                gone = reason in _STOP_GONE_REASONS
+                if gone:
+                    # The pid is confirmed gone (stopped just now, or
+                    # already gone before we tried) -- force the very
+                    # next claude-agents read to be fresh instead of
+                    # waiting for agents.py's own TTL to expire, so a
+                    # poll landing right after this one doesn't show the
+                    # same dead row again. Targeted, not a shorter TTL
+                    # for every caller all the time (see agents.py).
+                    agents.invalidate_cache()
+                self._json({"ok": ok, "message": reason, "gone": gone}, 200 if ok else 400)
                 return
             name = body.get("name", "").strip()
             if not name:

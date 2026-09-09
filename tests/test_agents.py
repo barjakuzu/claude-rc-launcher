@@ -226,6 +226,50 @@ class ListClaudeSessionsTest(AgentsJsonCapsGateMixin, unittest.TestCase):
         self.assertEqual(fake.calls, [])  # never even spawned
 
 
+class InvalidateCacheTest(AgentsJsonCapsGateMixin, unittest.TestCase):
+    """The targeted alternative to a shorter CACHE_TTL_SECONDS: a caller
+    that already knows the truth just changed (server.py's POST /stop
+    confirming a pid is gone) forces the next read fresh on demand,
+    instead of every device polling faster all the time on the chance
+    something changed."""
+
+    def test_forces_a_fresh_fetch_well_within_the_ttl_window(self):
+        fake = FakeRun(stdout=RAW_JSON)
+        clock = {"t": 1000.0}
+        agents.list_claude_sessions(claude_bin="claude", run=fake, now_fn=lambda: clock["t"])
+        self.assertEqual(len(fake.calls), 1)
+        clock["t"] += 1  # nowhere near CACHE_TTL_SECONDS
+        agents.invalidate_cache(claude_bin="claude")
+        rows = agents.list_claude_sessions(claude_bin="claude", run=fake, now_fn=lambda: clock["t"])
+        # Invalidated, not merely marked stale: this call blocks for its
+        # own synchronous fetch (the "nothing cached yet" path) and
+        # returns fresh data immediately, rather than serving the old
+        # rows once more while a background refresh catches up behind it.
+        self.assertEqual(len(fake.calls), 2)
+        self.assertEqual(len(rows), 3)
+
+    def test_defaults_to_the_configured_claude_bin(self):
+        fake = FakeRun(stdout=RAW_JSON)
+        clock = {"t": 1000.0}
+        agents.list_claude_sessions(claude_bin=agents.CLAUDE_BIN, run=fake, now_fn=lambda: clock["t"])
+        agents.invalidate_cache()  # no claude_bin given
+        agents.list_claude_sessions(claude_bin=agents.CLAUDE_BIN, run=fake, now_fn=lambda: clock["t"])
+        self.assertEqual(len(fake.calls), 2)
+
+    def test_does_not_affect_a_different_bins_cache(self):
+        fake_a = FakeRun(stdout=RAW_JSON)
+        fake_b = FakeRun(stdout="[]")
+        clock = {"t": 1000.0}
+        agents.list_claude_sessions(claude_bin="claude-a", run=fake_a, now_fn=lambda: clock["t"])
+        agents.invalidate_cache(claude_bin="claude-b")  # a different, never-fetched bin
+        agents.list_claude_sessions(claude_bin="claude-a", run=fake_a, now_fn=lambda: clock["t"])
+        self.assertEqual(len(fake_a.calls), 1)  # claude-a's cache untouched, still fresh
+
+    def test_noop_when_nothing_cached_yet(self):
+        agents.invalidate_cache(claude_bin="claude")  # must not raise
+        self.assertEqual(agents._cache["at"], 0.0)
+
+
 class SingleFlightRefreshTest(AgentsJsonCapsGateMixin, unittest.TestCase):
     """Two concurrent callers with nothing cached yet must trigger exactly
     one `claude agents --json` spawn, not one each."""

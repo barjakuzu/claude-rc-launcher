@@ -665,6 +665,27 @@ class StopGoneFieldTest(unittest.TestCase):
             result = self._post(b'{"name": "rc-foo"}')
         self.assertEqual(result["data"], {"ok": True, "message": "Stopped", "gone": True})
 
+    def test_gone_external_stop_invalidates_agents_cache(self):
+        # Targeted invalidation (agents.invalidate_cache), not a shorter
+        # CACHE_TTL_SECONDS: forces the very next claude-agents read to
+        # be fresh right when the truth just changed, at no ongoing cost
+        # to every other poll on this device.
+        with mock.patch.object(server, "_stop_external_pid",
+                                return_value=(False, "Process not found")), \
+             mock.patch.object(server.agents, "invalidate_cache") as fake_invalidate:
+            self._post(b'{"external": true, "pid": 12345}')
+        fake_invalidate.assert_called_once_with()
+
+    def test_non_gone_external_stop_does_not_invalidate_agents_cache(self):
+        # The process may still be alive under this pid -- nothing about
+        # the agents list is known to have changed, so there is nothing
+        # to invalidate.
+        with mock.patch.object(server, "_stop_external_pid",
+                                return_value=(False, "Not a claude process")), \
+             mock.patch.object(server.agents, "invalidate_cache") as fake_invalidate:
+            self._post(b'{"external": true, "pid": 12345}')
+        fake_invalidate.assert_not_called()
+
 
 class DeriveSessionStateStartingBoundaryTest(unittest.TestCase):
     def test_within_grace_window_is_starting(self):
