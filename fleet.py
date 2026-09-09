@@ -94,6 +94,24 @@ HUB_POLL_HEADER = "X-RC-Hub-Poll"
 # within one poll cycle of the hub coming back.
 HUB_POLL_STALE_SECONDS = 300
 
+# Fix round 3 (coordinator): HUB_POLL_STALE_SECONDS alone is the SAME
+# fixed window for every device. A hub polls its satellites in the same
+# cycle (fleetpoll.poll_once() loops over devices.load_devices() one
+# poll_once() call after another, seconds apart at most), so their
+# markers all land within moments of each other -- and if the hub then
+# goes down for exactly that long, every satellite it was polling lapses
+# within the same instant and all resume fetching together: the original
+# many-callers bug this whole feature exists to fix, rebuilt in degraded
+# mode. Each device adds a small, STABLE, per-device jitter on top of the
+# base window so simultaneous markings lapse at spread-out times instead
+# of one instant. Derived by hashing config.RC_HASH_SALT (already a
+# unique value generated once per device into ~/.claude-rc/env, see
+# config.py) rather than plain randomness, so it needs no new persisted
+# state, is stable across restarts (a device does not get a new jitter,
+# and therefore a new resume time, every time it restarts), and is
+# reproducible for tests.
+HUB_POLL_JITTER_SECONDS = 60
+
 # Advisory only, not behind a lock: the worst case of a race between two
 # concurrent /fleet requests updating this is one poll cycle's worth of
 # imprecision in is_limits_hub()'s staleness check (an extra fetch, or
@@ -112,14 +130,32 @@ def note_hub_poll(now=None, now_fn=time.time):
     _last_hub_poll_at = now if now is not None else now_fn()
 
 
-def _polled_by_hub_recently(now_fn=time.time, last_poll_at=None):
+def _hub_poll_jitter(seed=None):
+    """A stable, non-negative offset in [0, HUB_POLL_JITTER_SECONDS) for
+    THIS device (fix round 3), derived by hashing `seed` (defaults to
+    config.RC_HASH_SALT). Two devices with different salts get different
+    offsets; the SAME device gets the SAME offset every time, including
+    across restarts -- this is spreading, not randomising, the resume
+    time. Never raises, never negative."""
+    if seed is None:
+        seed = getattr(config, "RC_HASH_SALT", "") or ""
+    digest = hashlib.sha256(("hub-poll-jitter|" + str(seed)).encode()).hexdigest()
+    return (int(digest[:8], 16) % (HUB_POLL_JITTER_SECONDS * 1000)) / 1000.0
+
+
+def _polled_by_hub_recently(now_fn=time.time, last_poll_at=None, stale_seconds=None):
     """True iff note_hub_poll() (or the `last_poll_at` override, for
-    tests) was called within the last HUB_POLL_STALE_SECONDS."""
+    tests) was called within the last HUB_POLL_STALE_SECONDS plus this
+    device's own jitter (_hub_poll_jitter() above) -- `stale_seconds` is
+    an injection seam (tests) to bypass jitter for exact-boundary
+    assertions; real callers leave it unset."""
     if last_poll_at is None:
         last_poll_at = _last_hub_poll_at
     if last_poll_at is None:
         return False
-    return (now_fn() - last_poll_at) < HUB_POLL_STALE_SECONDS
+    if stale_seconds is None:
+        stale_seconds = HUB_POLL_STALE_SECONDS + _hub_poll_jitter()
+    return (now_fn() - last_poll_at) < stale_seconds
 
 
 def is_limits_hub(env=None, polled_by_hub_recently=None):

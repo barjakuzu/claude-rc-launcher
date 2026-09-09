@@ -973,10 +973,17 @@ class HubPollMarkerTest(unittest.TestCase):
 
     def test_marker_goes_stale_after_the_window(self):
         fleet.note_hub_poll(now=1000.0)
+        # stale_seconds pinned explicitly (fix round 3 added per-device
+        # jitter on top of the base window -- see HubPollJitterTest for
+        # that) so this boundary stays exact regardless of whatever
+        # config.RC_HASH_SALT the machine running the suite happens to
+        # have.
         self.assertFalse(fleet._polled_by_hub_recently(
-            now_fn=lambda: 1000.0 + fleet.HUB_POLL_STALE_SECONDS))
+            now_fn=lambda: 1000.0 + fleet.HUB_POLL_STALE_SECONDS,
+            stale_seconds=fleet.HUB_POLL_STALE_SECONDS))
         self.assertFalse(fleet._polled_by_hub_recently(
-            now_fn=lambda: 1000.0 + fleet.HUB_POLL_STALE_SECONDS + 60))
+            now_fn=lambda: 1000.0 + fleet.HUB_POLL_STALE_SECONDS + 60,
+            stale_seconds=fleet.HUB_POLL_STALE_SECONDS))
 
     def test_note_hub_poll_defaults_to_now_fn(self):
         fleet.note_hub_poll(now_fn=lambda: 4242.0)
@@ -989,6 +996,78 @@ class HubPollMarkerTest(unittest.TestCase):
         # first one alone would have just gone stale by this clock.
         self.assertTrue(fleet._polled_by_hub_recently(
             now_fn=lambda: 1000.0 + fleet.HUB_POLL_STALE_SECONDS))
+
+
+class HubPollJitterTest(unittest.TestCase):
+    """Task L5 fix round 3: _hub_poll_jitter() spreads simultaneous hub
+    markings across devices so they do not all lapse (and resume
+    fetching independently) at the same instant after a hub outage --
+    the original many-callers bug, rebuilt in degraded mode, that a
+    fixed HUB_POLL_STALE_SECONDS alone would allow."""
+
+    def tearDown(self):
+        fleet._last_hub_poll_at = None
+
+    def test_deterministic_for_the_same_seed(self):
+        self.assertEqual(fleet._hub_poll_jitter(seed="device-a"),
+                          fleet._hub_poll_jitter(seed="device-a"))
+
+    def test_stable_across_repeated_calls_with_no_seed_too(self):
+        # No seed given -> falls through to config.RC_HASH_SALT, which
+        # does not change between calls in the same process (or across a
+        # real restart -- it is read once into ~/.claude-rc/env).
+        self.assertEqual(fleet._hub_poll_jitter(), fleet._hub_poll_jitter())
+
+    def test_differs_across_seeds_in_the_common_case(self):
+        # Not a mathematical guarantee (a hash collision is always
+        # possible in principle) but overwhelmingly likely across 20
+        # arbitrary seeds, and this IS the point of jitter: two devices
+        # must not, in practice, land on the same offset.
+        values = {fleet._hub_poll_jitter(seed=f"device-{i}") for i in range(20)}
+        self.assertGreater(len(values), 1)
+
+    def test_bounded_in_range(self):
+        for i in range(50):
+            value = fleet._hub_poll_jitter(seed=f"seed-{i}")
+            self.assertGreaterEqual(value, 0.0)
+            self.assertLess(value, fleet.HUB_POLL_JITTER_SECONDS)
+
+    def test_empty_or_missing_seed_never_raises(self):
+        fleet._hub_poll_jitter(seed="")
+        fleet._hub_poll_jitter(seed=None)
+
+    def test_polled_by_hub_recently_default_adds_jitter_on_top_of_the_base_window(self):
+        with patch("fleet._hub_poll_jitter", return_value=12.5):
+            fleet.note_hub_poll(now=1000.0)
+            # Still within base + jitter.
+            self.assertTrue(fleet._polled_by_hub_recently(
+                now_fn=lambda: 1000.0 + fleet.HUB_POLL_STALE_SECONDS + 10))
+            # Past base + jitter.
+            self.assertFalse(fleet._polled_by_hub_recently(
+                now_fn=lambda: 1000.0 + fleet.HUB_POLL_STALE_SECONDS + 13))
+
+    def test_two_devices_marked_at_the_same_instant_lapse_at_different_times(self):
+        # The actual property this round asks for: given the SAME poll
+        # timestamp (as a hub polling two satellites moments apart in
+        # the same cycle would produce), two devices with different
+        # jitter must not both flip from "recent" to "stale" at the same
+        # `now` -- there must be a `now` where one has lapsed and the
+        # other has not.
+        poll_at = 1000.0
+        with patch("fleet._hub_poll_jitter", return_value=5.0):
+            fleet.note_hub_poll(now=poll_at)
+            device_a_stale_at = poll_at + fleet.HUB_POLL_STALE_SECONDS + 5.0
+        with patch("fleet._hub_poll_jitter", return_value=45.0):
+            fleet.note_hub_poll(now=poll_at)  # same marker timestamp
+            device_b_stale_at = poll_at + fleet.HUB_POLL_STALE_SECONDS + 45.0
+        self.assertNotEqual(device_a_stale_at, device_b_stale_at)
+
+        with patch("fleet._hub_poll_jitter", return_value=45.0):
+            # At device A's stale instant, device B (more jitter) is
+            # still within its own, longer window -- it has not lapsed
+            # yet, so it does not resume fetching at the same moment A does.
+            fleet.note_hub_poll(now=poll_at)
+            self.assertTrue(fleet._polled_by_hub_recently(now_fn=lambda: device_a_stale_at))
 
 
 class BuildFleetLimitsHubGatingTest(unittest.TestCase):
@@ -1132,7 +1211,13 @@ class BuildFleetLimitsHubGatingTest(unittest.TestCase):
         rollup.return_value = _empty_rollup(5000.0)
         available_limits = dict(_EMPTY_LIMITS, available=True, fetched_at=5000.0)
         get_limits.return_value = available_limits
-        fleet.note_hub_poll(now=5000.0 - fleet.HUB_POLL_STALE_SECONDS)  # exactly stale
+        # Well past stale regardless of this device's own real jitter
+        # (fix round 3, up to HUB_POLL_JITTER_SECONDS on top of the base
+        # window) -- this test is about the end-to-end "resumes
+        # fetching" behaviour, not the exact boundary (see
+        # HubPollJitterTest for that).
+        fleet.note_hub_poll(
+            now=5000.0 - fleet.HUB_POLL_STALE_SECONDS - fleet.HUB_POLL_JITTER_SECONDS - 1)
 
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("RC_FETCH_LIMITS", None)
