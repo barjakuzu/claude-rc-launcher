@@ -1,8 +1,8 @@
 // useCrossDevice.ts — cross-device data aggregation hooks.
-// Each hook polls every 5s (sessions) or 8s (schedules) while active === true.
-// Uses Promise.allSettled so one slow/offline device never blocks the rest.
+// Polls every 8s while active === true. Uses Promise.allSettled so one
+// slow/offline device never blocks the rest.
 //
-// Round 5: found and fixed a real bug in both hooks' `mounted` ref while
+// Round 5: found and fixed a real bug in this hook's `mounted` ref while
 // verifying useAllSchedules's new hasLoaded flag in dev. `useRef(true)`
 // only sets the initial value once; the mount-tracking effect's body did
 // nothing to reset it back to true on mount, only its cleanup set it to
@@ -19,55 +19,18 @@
 // "stuck loading", which is exactly the failure mode this lane exists to
 // remove. Fixed by setting mounted.current = true in the effect body
 // itself, not just relying on the ref's one-time initializer.
+//
+// useAllSessions (the per-device sessions.py fan-out this file used to
+// also export) was removed here: useFleet.ts replaced it as the Sessions
+// tab's data source, and it had been left with zero importers ever since,
+// still carrying its own unswept copy of the fabricated-zero pattern
+// (returning `items` with no hasLoaded at all). Same judgment as deleting
+// Grid.tsx: confirmed dead (grep for `useAllSessions` across frontend/src
+// turns up only this definition), so deleted rather than left for a
+// future sweep to trip over.
 import { useState, useEffect, useRef } from 'react';
 import { api } from './api';
-import type { DeviceCard, Session, Schedule } from './types';
-
-// ─── SessionWithDevice ─────────────────────────────────────────────────────────
-export interface SessionWithDevice {
-  device: DeviceCard;
-  session: Session;
-}
-
-export function useAllSessions(cards: DeviceCard[], active: boolean): SessionWithDevice[] {
-  const [items, setItems] = useState<SessionWithDevice[]>([]);
-  const mounted = useRef(true);
-  useEffect(() => {
-    mounted.current = true;
-    return () => { mounted.current = false; };
-  }, []);
-
-  const cardsRef = useRef(cards);
-  cardsRef.current = cards;
-  const key = cards.map((c) => c.id + ':' + (c.online ? 1 : 0)).join(',');
-
-  useEffect(() => {
-    if (!active) return;
-    let cancelled = false;
-
-    const fetchAll = async () => {
-      const online = cardsRef.current.filter((c) => c.online);
-      const results = await Promise.allSettled(online.map((d) => api.sessions(d.id)));
-      if (cancelled || !mounted.current) return;
-      const flat: SessionWithDevice[] = [];
-      results.forEach((r, i) => {
-        if (r.status === 'fulfilled') {
-          const sessions = Array.isArray(r.value)
-            ? r.value
-            : ((r.value as { sessions?: Session[] })?.sessions ?? []);
-          for (const s of sessions) flat.push({ device: online[i], session: s });
-        }
-      });
-      setItems(flat);
-    };
-
-    fetchAll();
-    const id = setInterval(fetchAll, 5000);
-    return () => { cancelled = true; clearInterval(id); };
-  }, [active, key]);
-
-  return items;
-}
+import type { DeviceCard, Schedule } from './types';
 
 // ─── ScheduleWithDevice ────────────────────────────────────────────────────────
 export interface ScheduleWithDevice {
@@ -100,6 +63,14 @@ export function useAllSchedules(cards: DeviceCard[], active: boolean): UseAllSch
   const key = cards.map((c) => c.id + ':' + (c.online ? 1 : 0)).join(',');
 
   useEffect(() => {
+    // The device-list identity changed (a device added/removed, or one's
+    // online status flipped) since the last time this fan-out completed:
+    // that completed run only ever queried the previous set of devices,
+    // so a stale hasLoaded=true must not keep asserting a "confirmed"
+    // schedule count that never included whatever changed. Reset until
+    // the new fetchAll below (once active) lands a fresh answer for the
+    // current key.
+    setHasLoaded(false);
     if (!active) return;
     let cancelled = false;
 
