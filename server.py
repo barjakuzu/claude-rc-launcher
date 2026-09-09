@@ -1409,6 +1409,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif path.split('?')[0] == "/fleet":
             qs = parse_qs(urlparse(self.path).query)
             since = qs.get("since", [None])[0]
+            # Task L5 fix round 2: HUB_POLL_HEADER means a hub is polling
+            # THIS device as part of a fleet -- record it so this
+            # device's own fleet.is_limits_hub() can stop fetching
+            # account limits on its own, without any operator
+            # configuration. This route already requires the same
+            # _check_auth as everything else on it; this marker carries
+            # no new trust beyond that.
+            if self.headers.get(fleet.HUB_POLL_HEADER):
+                fleet.note_hub_poll()
             self._json(fleet.build_fleet(since=since))
 
         elif path == "/api/fleet":

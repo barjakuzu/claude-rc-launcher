@@ -1266,6 +1266,27 @@ class Store:
     # the other), not two different truths -- 5 is generous enough to
     # absorb that normal skew without flagging on it constantly, while
     # still catching a device that is actually stuck on stale data.
+    #
+    # Task L5 decision: KEPT, deliberately, not removed. Single-fetcher
+    # (fleet.is_limits_hub(), CONTRACT.md task-l5) means a correctly
+    # configured fleet writes at most one account_limits row with
+    # available=True, so this comparison normally has nothing to compare
+    # and `divergent` sits dormant (never True) under normal operation --
+    # the exact "field that can never be true" this decision had to be
+    # deliberate about. It is kept anyway because it is not actually dead
+    # in every case: this table's writer is store.upsert_account_limits,
+    # called by ANY device fleetpoll ingests a `limits` key from, with no
+    # enforcement here that only one ever does -- so if an operator leaves
+    # RC_FETCH_LIMITS unset (fetching) on more than one device sharing an
+    # account, `divergent` is exactly what surfaces that misconfiguration
+    # to the UI, which is more useful than silently picking one reading.
+    # It also stays live machinery for a plausible future case CONTRACT.md
+    # does not cover today -- a hub tracking more than one Anthropic
+    # account -- without requiring anyone to resurrect a deleted feature
+    # first. Nothing about limits_view()'s query changed for this
+    # decision; only this comment, since the brief this task came from
+    # (2026-09-08-limits-and-mobile/task-l5-brief.md) is explicit that a
+    # field which can never be true must never be left unexplained.
     LIMITS_DIVERGENCE_THRESHOLD = 5
 
     def limits_view(self):

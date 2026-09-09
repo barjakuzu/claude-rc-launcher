@@ -54,6 +54,13 @@ def _default_http_get(base_url, path, auth_user="", auth_pass="", since=None, ti
     if since:
         url += "?since=" + urllib.parse.quote(since)
     req = urllib.request.Request(url)
+    # Task L5 fix round 2: every request this function makes IS a hub
+    # polling a device as part of a fleet (it is the only caller of this
+    # function). Marks it as such so the device's own fleet.is_limits_hub()
+    # can tell "I am being polled by a hub" apart from "nobody polls me"
+    # without inferring it from credentials or a remote address -- see
+    # fleet.py's HUB_POLL_HEADER/note_hub_poll for the receiving side.
+    req.add_header(fleet.HUB_POLL_HEADER, "1")
     if auth_user or auth_pass:
         tok = base64.b64encode(f"{auth_user}:{auth_pass}".encode()).decode()
         req.add_header("Authorization", f"Basic {tok}")

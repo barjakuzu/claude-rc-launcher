@@ -1,5 +1,6 @@
 import datetime
 import json
+import os
 import time
 import unittest
 from unittest.mock import patch
@@ -58,6 +59,20 @@ class BuildFleetTest(unittest.TestCase):
         # explicitly -- see BuildFleetLimitsTest below.
         limits_patcher = patch("fleet.limits.get_limits")
         self._limits_mock = limits_patcher.start()
+        # Task L5 fix round 1: is_limits_hub()'s auto-detect default reads
+        # devices.load_devices() (see fleet.py), which -- left unmocked --
+        # reads this MACHINE's real ~/.claude-rc/devices.json. None of
+        # this class's tests are about limits/hub-gating at all, so this
+        # is patched to a fixed, empty stand-in purely for determinism:
+        # without it, every test in this class would silently behave
+        # differently depending on whether the box running the suite
+        # happens to have a real devices.json (this repo's own dev box
+        # does), even though no assertion here reads "limits" or cares
+        # which way is_limits_hub() resolves.
+        devices_patcher = patch("fleet.devices.load_devices")
+        self._load_devices_mock = devices_patcher.start()
+        self._load_devices_mock.return_value = []
+        self.addCleanup(devices_patcher.stop)
         self._limits_mock.return_value = _EMPTY_LIMITS
         self.addCleanup(limits_patcher.stop)
 
@@ -717,6 +732,18 @@ class BuildFleetLimitsTest(unittest.TestCase):
     def setUp(self):
         fleet._cache.clear()
         fleet._last_prune_at = None
+        # Task L5 fix round 1: every test in this class is about what
+        # build_fleet() produces WHEN it fetches, not about the
+        # auto-detect default that decides WHETHER it fetches (that's
+        # IsLimitsHubTest / BuildFleetLimitsHubGatingTest below) --
+        # devices.load_devices() is patched to a non-empty stand-in
+        # ("this device has other devices configured, so it fetches")
+        # for every test here, deterministic regardless of whatever
+        # devices.json the machine running the suite happens to have.
+        devices_patcher = patch("fleet.devices.load_devices")
+        self._load_devices_mock = devices_patcher.start()
+        self._load_devices_mock.return_value = [{"id": "peer", "base_url": "http://peer:8200"}]
+        self.addCleanup(devices_patcher.stop)
 
     @patch("fleet.limits.get_limits")
     @patch("fleet.usage.rollup")
@@ -855,6 +882,396 @@ class BuildFleetLimitsTest(unittest.TestCase):
         self.assertFalse(result["limits"]["available"])
         self.assertEqual(result["limits"]["error"], "TypeError")
         self.assertEqual(result["errors"], ["limits: TypeError"])
+
+
+class IsLimitsHubTest(unittest.TestCase):
+    """Task L5 fix round 2: is_limits_hub() trusts a hub's own
+    HUB_POLL_HEADER marker (relayed here via note_hub_poll(), or the
+    `polled_by_hub_recently` seam directly) over any local inference --
+    fetch UNLESS a hub has said "you are my satellite" recently. The
+    default direction is now the opposite of round 1: absent any signal,
+    this device fetches, which is what keeps a standalone install
+    (nobody ever polls it) working with zero configuration.
+
+    `env` and `polled_by_hub_recently` are always passed explicitly here
+    -- never the real os.environ / the real module-level poll-marker
+    state -- so these tests can't be polluted by (or leak into) each
+    other or the actual process."""
+
+    def tearDown(self):
+        fleet._last_hub_poll_at = None
+
+    # --- the marker (RC_FETCH_LIMITS unset) ---
+
+    def test_no_marker_at_all_fetches(self):
+        # Covers a standalone install with no fleet, AND a satellite
+        # whose hub hasn't reached it yet (startup, or the hub itself
+        # not yet upgraded) -- both fetch, by design: absent a signal,
+        # assume nobody else is doing it.
+        self.assertTrue(fleet.is_limits_hub(env={}, polled_by_hub_recently=False))
+
+    def test_recent_marker_does_not_fetch(self):
+        self.assertFalse(fleet.is_limits_hub(env={}, polled_by_hub_recently=True))
+
+    def test_default_arg_reads_real_poll_marker_state(self):
+        # polled_by_hub_recently=None (the default) falls through to a
+        # real _polled_by_hub_recently() call against the real module
+        # state -- proven here via note_hub_poll() using a real
+        # timestamp (so is_limits_hub()'s own default now_fn=time.time
+        # sees it as recent too), reset by tearDown, never leaking into
+        # any other test.
+        self.assertTrue(fleet.is_limits_hub(env={}))  # no poll ever recorded
+        fleet.note_hub_poll()  # real time.time(), right now
+        self.assertFalse(fleet.is_limits_hub(env={}))
+
+    # --- explicit override, either direction, wins regardless of the marker ---
+
+    def test_explicit_on_values_force_fetch_even_with_a_recent_marker(self):
+        for value in ("1", "true", "True", "YES", "on", "On"):
+            self.assertTrue(
+                fleet.is_limits_hub(env={"RC_FETCH_LIMITS": value}, polled_by_hub_recently=True),
+                f"{value!r} should force fetching on")
+
+    def test_explicit_off_values_force_no_fetch_even_with_no_marker(self):
+        for value in ("0", "false", "False", "NO", "off", "Off"):
+            self.assertFalse(
+                fleet.is_limits_hub(env={"RC_FETCH_LIMITS": value}, polled_by_hub_recently=False),
+                f"{value!r} should force fetching off")
+
+    def test_whitespace_around_override_value_is_tolerated(self):
+        self.assertFalse(
+            fleet.is_limits_hub(env={"RC_FETCH_LIMITS": "  0  "}, polled_by_hub_recently=False))
+        self.assertTrue(
+            fleet.is_limits_hub(env={"RC_FETCH_LIMITS": "  1  "}, polled_by_hub_recently=True))
+
+    def test_unrecognised_value_falls_through_to_the_marker(self):
+        self.assertTrue(
+            fleet.is_limits_hub(env={"RC_FETCH_LIMITS": "banana"}, polled_by_hub_recently=False))
+        self.assertFalse(
+            fleet.is_limits_hub(env={"RC_FETCH_LIMITS": "banana"}, polled_by_hub_recently=True))
+
+
+class HubPollMarkerTest(unittest.TestCase):
+    """Task L5 fix round 2: note_hub_poll()/_polled_by_hub_recently()
+    are the module-level state is_limits_hub() reads by default. Tested
+    directly here (rather than only indirectly through is_limits_hub's
+    seam) so the staleness window itself, and note_hub_poll's own
+    now/now_fn handling, are covered on their own."""
+
+    def tearDown(self):
+        fleet._last_hub_poll_at = None
+
+    def test_never_polled_is_not_recent(self):
+        self.assertIsNone(fleet._last_hub_poll_at)
+        self.assertFalse(fleet._polled_by_hub_recently(now_fn=lambda: 1000.0))
+
+    def test_just_polled_is_recent(self):
+        fleet.note_hub_poll(now=1000.0)
+        self.assertTrue(fleet._polled_by_hub_recently(now_fn=lambda: 1000.0))
+        self.assertTrue(fleet._polled_by_hub_recently(
+            now_fn=lambda: 1000.0 + fleet.HUB_POLL_STALE_SECONDS - 1))
+
+    def test_marker_goes_stale_after_the_window(self):
+        fleet.note_hub_poll(now=1000.0)
+        # stale_seconds pinned explicitly (fix round 3 added per-device
+        # jitter on top of the base window -- see HubPollJitterTest for
+        # that) so this boundary stays exact regardless of whatever
+        # config.RC_HASH_SALT the machine running the suite happens to
+        # have.
+        self.assertFalse(fleet._polled_by_hub_recently(
+            now_fn=lambda: 1000.0 + fleet.HUB_POLL_STALE_SECONDS,
+            stale_seconds=fleet.HUB_POLL_STALE_SECONDS))
+        self.assertFalse(fleet._polled_by_hub_recently(
+            now_fn=lambda: 1000.0 + fleet.HUB_POLL_STALE_SECONDS + 60,
+            stale_seconds=fleet.HUB_POLL_STALE_SECONDS))
+
+    def test_note_hub_poll_defaults_to_now_fn(self):
+        fleet.note_hub_poll(now_fn=lambda: 4242.0)
+        self.assertEqual(fleet._last_hub_poll_at, 4242.0)
+
+    def test_a_later_poll_extends_the_window(self):
+        fleet.note_hub_poll(now=1000.0)
+        fleet.note_hub_poll(now=1000.0 + fleet.HUB_POLL_STALE_SECONDS - 1)
+        # Still recent relative to the SECOND poll, even though the
+        # first one alone would have just gone stale by this clock.
+        self.assertTrue(fleet._polled_by_hub_recently(
+            now_fn=lambda: 1000.0 + fleet.HUB_POLL_STALE_SECONDS))
+
+
+class HubPollJitterTest(unittest.TestCase):
+    """Task L5 fix round 3: _hub_poll_jitter() spreads simultaneous hub
+    markings across devices so they do not all lapse (and resume
+    fetching independently) at the same instant after a hub outage --
+    the original many-callers bug, rebuilt in degraded mode, that a
+    fixed HUB_POLL_STALE_SECONDS alone would allow."""
+
+    def tearDown(self):
+        fleet._last_hub_poll_at = None
+
+    def test_deterministic_for_the_same_seed(self):
+        self.assertEqual(fleet._hub_poll_jitter(seed="device-a"),
+                          fleet._hub_poll_jitter(seed="device-a"))
+
+    def test_stable_across_repeated_calls_with_no_seed_too(self):
+        # No seed given -> falls through to config.RC_HASH_SALT, which
+        # does not change between calls in the same process (or across a
+        # real restart -- it is read once into ~/.claude-rc/env).
+        self.assertEqual(fleet._hub_poll_jitter(), fleet._hub_poll_jitter())
+
+    def test_differs_across_seeds_in_the_common_case(self):
+        # Not a mathematical guarantee (a hash collision is always
+        # possible in principle) but overwhelmingly likely across 20
+        # arbitrary seeds, and this IS the point of jitter: two devices
+        # must not, in practice, land on the same offset.
+        values = {fleet._hub_poll_jitter(seed=f"device-{i}") for i in range(20)}
+        self.assertGreater(len(values), 1)
+
+    def test_bounded_in_range(self):
+        for i in range(50):
+            value = fleet._hub_poll_jitter(seed=f"seed-{i}")
+            self.assertGreaterEqual(value, 0.0)
+            self.assertLess(value, fleet.HUB_POLL_JITTER_SECONDS)
+
+    def test_empty_or_missing_seed_never_raises(self):
+        fleet._hub_poll_jitter(seed="")
+        fleet._hub_poll_jitter(seed=None)
+
+    def test_polled_by_hub_recently_default_adds_jitter_on_top_of_the_base_window(self):
+        with patch("fleet._hub_poll_jitter", return_value=12.5):
+            fleet.note_hub_poll(now=1000.0)
+            # Still within base + jitter.
+            self.assertTrue(fleet._polled_by_hub_recently(
+                now_fn=lambda: 1000.0 + fleet.HUB_POLL_STALE_SECONDS + 10))
+            # Past base + jitter.
+            self.assertFalse(fleet._polled_by_hub_recently(
+                now_fn=lambda: 1000.0 + fleet.HUB_POLL_STALE_SECONDS + 13))
+
+    def test_two_devices_marked_at_the_same_instant_lapse_at_different_times(self):
+        # The actual property this round asks for: given the SAME poll
+        # timestamp (as a hub polling two satellites moments apart in
+        # the same cycle would produce), two devices with different
+        # jitter must not both flip from "recent" to "stale" at the same
+        # `now` -- there must be a `now` where one has lapsed and the
+        # other has not.
+        poll_at = 1000.0
+        with patch("fleet._hub_poll_jitter", return_value=5.0):
+            fleet.note_hub_poll(now=poll_at)
+            device_a_stale_at = poll_at + fleet.HUB_POLL_STALE_SECONDS + 5.0
+        with patch("fleet._hub_poll_jitter", return_value=45.0):
+            fleet.note_hub_poll(now=poll_at)  # same marker timestamp
+            device_b_stale_at = poll_at + fleet.HUB_POLL_STALE_SECONDS + 45.0
+        self.assertNotEqual(device_a_stale_at, device_b_stale_at)
+
+        with patch("fleet._hub_poll_jitter", return_value=45.0):
+            # At device A's stale instant, device B (more jitter) is
+            # still within its own, longer window -- it has not lapsed
+            # yet, so it does not resume fetching at the same moment A does.
+            fleet.note_hub_poll(now=poll_at)
+            self.assertTrue(fleet._polled_by_hub_recently(now_fn=lambda: device_a_stale_at))
+
+
+class BuildFleetLimitsHubGatingTest(unittest.TestCase):
+    """Task L5: 'A device only calls the API when it is acting as the
+    hub' + 'A non-fetching device omits the limits key from its payload
+    entirely, rather than sending available: false.' Fix round 2: the
+    signal is the hub-poll marker (note_hub_poll()), not an inference --
+    these tests exercise build_fleet() end-to-end through the real
+    is_limits_hub(), varying only whether a poll was ever recorded."""
+
+    def setUp(self):
+        fleet._cache.clear()
+        fleet._last_prune_at = None
+        fleet._last_hub_poll_at = None
+
+    def tearDown(self):
+        fleet._last_hub_poll_at = None
+
+    @patch("fleet.limits.get_limits")
+    @patch("fleet.usage.rollup")
+    @patch("fleet.events.prune")
+    @patch("fleet.events.read_events")
+    @patch("fleet.sessions.list_rc_sessions")
+    @patch("fleet.compat.get_caps")
+    @patch("fleet.devices.get_local_name")
+    def test_satellite_recently_polled_by_hub_omits_limits_key(
+            self, get_name, get_caps, list_sess, read_ev, prune, rollup, get_limits):
+        # Task L5 fix round 2, "test both": a satellite (its hub polled
+        # it moments ago, RC_FETCH_LIMITS unset) does not fetch -- the
+        # fix for the reported bug, requiring zero configuration on the
+        # satellite once its hub is upgraded and has polled it once.
+        get_name.return_value = "satellite"
+        get_caps.return_value = {}
+        list_sess.return_value = []
+        read_ev.return_value = ([], None)
+        rollup.return_value = _empty_rollup(5000.0)
+        fleet.note_hub_poll(now=4990.0)
+
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("RC_FETCH_LIMITS", None)
+            result = fleet.build_fleet(role="full", now_fn=lambda: 5000.0)
+
+        self.assertNotIn("limits", result)
+        get_limits.assert_not_called()
+
+    @patch("fleet.limits.get_limits")
+    @patch("fleet.usage.rollup")
+    @patch("fleet.events.prune")
+    @patch("fleet.events.read_events")
+    @patch("fleet.sessions.list_rc_sessions")
+    @patch("fleet.compat.get_caps")
+    @patch("fleet.devices.get_local_name")
+    def test_satellite_omits_limits_key_under_metadata_role_too(
+            self, get_name, get_caps, list_sess, read_ev, prune, rollup, get_limits):
+        get_name.return_value = "satellite"
+        get_caps.return_value = {}
+        list_sess.return_value = []
+        read_ev.return_value = ([], None)
+        rollup.return_value = _empty_rollup(5000.0)
+        fleet.note_hub_poll(now=4990.0)
+
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("RC_FETCH_LIMITS", None)
+            result = fleet.build_fleet(role="metadata", now_fn=lambda: 5000.0)
+
+        self.assertNotIn("limits", result)
+        get_limits.assert_not_called()
+
+    @patch("fleet.limits.get_limits")
+    @patch("fleet.usage.rollup")
+    @patch("fleet.events.prune")
+    @patch("fleet.events.read_events")
+    @patch("fleet.sessions.list_rc_sessions")
+    @patch("fleet.compat.get_caps")
+    @patch("fleet.devices.get_local_name")
+    def test_hub_never_polled_by_anyone_fetches_and_carries_limits_key(
+            self, get_name, get_caps, list_sess, read_ev, prune, rollup, get_limits):
+        # Task L5 fix round 2: the hub (nobody ever polls IT -- its own
+        # fleetpoll self-polls in-process, no HTTP, no header) keeps
+        # fetching -- zero configuration.
+        get_name.return_value = "hub"
+        get_caps.return_value = {}
+        list_sess.return_value = []
+        read_ev.return_value = ([], None)
+        rollup.return_value = _empty_rollup(5000.0)
+        available_limits = dict(_EMPTY_LIMITS, available=True, fetched_at=5000.0)
+        get_limits.return_value = available_limits
+
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("RC_FETCH_LIMITS", None)
+            result = fleet.build_fleet(role="full", now_fn=lambda: 5000.0)
+
+        self.assertEqual(result["limits"], available_limits)
+        get_limits.assert_called_once()
+
+    @patch("fleet.limits.get_limits")
+    @patch("fleet.usage.rollup")
+    @patch("fleet.events.prune")
+    @patch("fleet.events.read_events")
+    @patch("fleet.sessions.list_rc_sessions")
+    @patch("fleet.compat.get_caps")
+    @patch("fleet.devices.get_local_name")
+    def test_standalone_install_fetches_zero_config(
+            self, get_name, get_caps, list_sess, read_ev, prune, rollup, get_limits):
+        # Task L5 fix round 2, "test both": a standalone install (nobody
+        # has ever polled it, RC_FETCH_LIMITS unset) fetches -- exactly
+        # the case round 1's devices.json inference broke, fixed here
+        # with no explicit override needed at all.
+        get_name.return_value = "standalone"
+        get_caps.return_value = {}
+        list_sess.return_value = []
+        read_ev.return_value = ([], None)
+        rollup.return_value = _empty_rollup(5000.0)
+        available_limits = dict(_EMPTY_LIMITS, available=True, fetched_at=5000.0)
+        get_limits.return_value = available_limits
+
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("RC_FETCH_LIMITS", None)
+            result = fleet.build_fleet(role="full", now_fn=lambda: 5000.0)
+
+        self.assertEqual(result["limits"], available_limits)
+        get_limits.assert_called_once()
+
+    @patch("fleet.limits.get_limits")
+    @patch("fleet.usage.rollup")
+    @patch("fleet.events.prune")
+    @patch("fleet.events.read_events")
+    @patch("fleet.sessions.list_rc_sessions")
+    @patch("fleet.compat.get_caps")
+    @patch("fleet.devices.get_local_name")
+    def test_satellite_whose_marker_has_gone_stale_resumes_fetching(
+            self, get_name, get_caps, list_sess, read_ev, prune, rollup, get_limits):
+        # "recovers automatically" / avalanche protection: a hub that
+        # stopped polling (down, or a satellite the operator removed
+        # from devices.json) leaves this device fetching again once the
+        # marker is older than HUB_POLL_STALE_SECONDS, not forever.
+        get_name.return_value = "satellite"
+        get_caps.return_value = {}
+        list_sess.return_value = []
+        read_ev.return_value = ([], None)
+        rollup.return_value = _empty_rollup(5000.0)
+        available_limits = dict(_EMPTY_LIMITS, available=True, fetched_at=5000.0)
+        get_limits.return_value = available_limits
+        # Well past stale regardless of this device's own real jitter
+        # (fix round 3, up to HUB_POLL_JITTER_SECONDS on top of the base
+        # window) -- this test is about the end-to-end "resumes
+        # fetching" behaviour, not the exact boundary (see
+        # HubPollJitterTest for that).
+        fleet.note_hub_poll(
+            now=5000.0 - fleet.HUB_POLL_STALE_SECONDS - fleet.HUB_POLL_JITTER_SECONDS - 1)
+
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("RC_FETCH_LIMITS", None)
+            result = fleet.build_fleet(role="full", now_fn=lambda: 5000.0)
+
+        self.assertEqual(result["limits"], available_limits)
+        get_limits.assert_called_once()
+
+    @patch("fleet.limits.get_limits")
+    @patch("fleet.usage.rollup")
+    @patch("fleet.events.prune")
+    @patch("fleet.events.read_events")
+    @patch("fleet.sessions.list_rc_sessions")
+    @patch("fleet.compat.get_caps")
+    @patch("fleet.devices.get_local_name")
+    def test_hub_can_be_forced_off_despite_never_being_polled(
+            self, get_name, get_caps, list_sess, read_ev, prune, rollup, get_limits):
+        # "an operator may want to force it either way" -- even a device
+        # nobody polls (the hub itself) can be told not to fetch.
+        get_name.return_value = "hub"
+        get_caps.return_value = {}
+        list_sess.return_value = []
+        read_ev.return_value = ([], None)
+        rollup.return_value = _empty_rollup(5000.0)
+
+        with patch.dict(os.environ, {"RC_FETCH_LIMITS": "0"}):
+            result = fleet.build_fleet(role="full", now_fn=lambda: 5000.0)
+
+        self.assertNotIn("limits", result)
+        get_limits.assert_not_called()
+
+    @patch("fleet.limits.get_limits")
+    @patch("fleet.usage.rollup")
+    @patch("fleet.events.prune")
+    @patch("fleet.events.read_events")
+    @patch("fleet.sessions.list_rc_sessions")
+    @patch("fleet.compat.get_caps")
+    @patch("fleet.devices.get_local_name")
+    def test_satellite_can_be_forced_on_despite_a_recent_marker(
+            self, get_name, get_caps, list_sess, read_ev, prune, rollup, get_limits):
+        get_name.return_value = "satellite"
+        get_caps.return_value = {}
+        list_sess.return_value = []
+        read_ev.return_value = ([], None)
+        rollup.return_value = _empty_rollup(5000.0)
+        available_limits = dict(_EMPTY_LIMITS, available=True, fetched_at=5000.0)
+        get_limits.return_value = available_limits
+        fleet.note_hub_poll(now=4990.0)
+
+        with patch.dict(os.environ, {"RC_FETCH_LIMITS": "1"}):
+            result = fleet.build_fleet(role="full", now_fn=lambda: 5000.0)
+
+        self.assertEqual(result["limits"], available_limits)
+        get_limits.assert_called_once()
 
 
 if __name__ == "__main__":

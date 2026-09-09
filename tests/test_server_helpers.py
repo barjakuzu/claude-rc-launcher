@@ -1590,6 +1590,59 @@ class _ApiRouteFixture(unittest.TestCase):
         return captured["data"], captured.get("code", 200)
 
 
+class FleetRouteHubPollMarkerTest(_ApiRouteFixture):
+    """Task L5 fix round 2: GET /fleet records a hub poll when
+    fleet.HUB_POLL_HEADER is present on the request, so a satellite's
+    own fleet.is_limits_hub() can stop fetching without any operator
+    configuration. fleet.build_fleet() itself is mocked out here -- this
+    route's own header handling is what's under test, not build_fleet's
+    behavior (covered in tests/test_fleet.py)."""
+
+    def _hit_fleet_route(self, headers):
+        h = self._make_handler("/fleet")
+        h.headers = headers
+        captured = {}
+
+        def fake_json(data, code=200, _captured=captured):
+            _captured["data"] = data
+            _captured["code"] = code
+
+        h._json = fake_json
+        with mock.patch.object(server, "_check_auth", return_value=True):
+            h.do_GET()
+        return captured
+
+    @mock.patch("server.fleet.note_hub_poll")
+    @mock.patch("server.fleet.build_fleet", return_value={"device_name": "x"})
+    def test_header_present_records_the_poll(self, build_fleet, note_hub_poll):
+        self._hit_fleet_route({server.fleet.HUB_POLL_HEADER: "1"})
+        note_hub_poll.assert_called_once()
+
+    @mock.patch("server.fleet.note_hub_poll")
+    @mock.patch("server.fleet.build_fleet", return_value={"device_name": "x"})
+    def test_header_absent_does_not_record_a_poll(self, build_fleet, note_hub_poll):
+        self._hit_fleet_route({})
+        note_hub_poll.assert_not_called()
+
+    @mock.patch("server.fleet.note_hub_poll")
+    @mock.patch("server.fleet.build_fleet", return_value={"device_name": "x"})
+    def test_rc_fleet_alias_also_records_the_poll(self, build_fleet, note_hub_poll):
+        # /rc/fleet is the same route after the "/rc" prefix is stripped
+        # earlier in do_GET -- fleetpoll.py always polls this path, never
+        # bare /fleet, so this is the one that matters in production.
+        h = self._make_handler("/rc/fleet")
+        h.headers = {server.fleet.HUB_POLL_HEADER: "1"}
+        captured = {}
+
+        def fake_json(data, code=200, _captured=captured):
+            _captured["data"] = data
+
+        h._json = fake_json
+        with mock.patch.object(server, "_check_auth", return_value=True):
+            h.do_GET()
+        note_hub_poll.assert_called_once()
+
+
 class ApiRouteQueryStringToleranceTest(_ApiRouteFixture):
     """Regression test: the hub's exact-match GET routes must match on the
     query-stripped path, not on self.path verbatim. A request carrying a
@@ -1879,6 +1932,34 @@ class ApiLimitsRouteTest(_ApiRouteFixture):
         self.assertIsNone(data["primary"])
         self.assertEqual(len(data["devices"]), 1)
         self.assertFalse(data["devices"][0]["available"])
+
+    def test_single_fetcher_fleet_stays_sensible_with_two_non_reporting_devices(self):
+        # Task L5 consequence 2: "A device that is not the hub has no
+        # limits of its own... Confirm the API still serves a sensible
+        # /api/limits" -- a 3-device fleet where only the elected fetcher
+        # ever had fleet.is_limits_hub()==True must still answer with a
+        # real primary, not look broken just because two of three
+        # devices never sent a "limits" key at all (fleetpoll._ingest's
+        # existing "absent means nothing to store" handling, so these two
+        # devices simply never got an account_limits row -- not an
+        # available=False one).
+        for device_id, name in (("hub", "Hub VM"), ("laptop", "Laptop"), ("phone", "Phone")):
+            server.HUB_STORE.upsert_device({"id": device_id, "name": name, "role": "full",
+                                             "version": "1", "claude_version": "1"})
+        server.HUB_STORE.upsert_account_limits("hub", self._limits_payload())
+
+        data, code = self._get_json("/api/limits")
+
+        self.assertEqual(code, 200)
+        self.assertIsNotNone(data["primary"])
+        self.assertEqual(data["primary"]["device_id"], "hub")
+        self.assertEqual(data["primary"]["five_hour"]["percent"], 56.0)
+        # Only the fetcher appears here -- the other two are never
+        # invented as available=False rows just because they're known
+        # devices in the `devices` table.
+        self.assertEqual(len(data["devices"]), 1)
+        self.assertEqual(data["devices"][0]["device_id"], "hub")
+        self.assertFalse(data["divergent"])
 
 
 class ShouldProxyQueryStringTest(unittest.TestCase):
