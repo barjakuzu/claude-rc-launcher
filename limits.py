@@ -57,6 +57,30 @@ had the exact same bare-urlopen bug sending the hub's device Basic auth
 password -- can share it instead of each duplicating it (see noredirect.py
 docstring); _read_token_linux's docstring now states its timeout residual
 explicitly rather than growing timeout machinery for a plain file read.
+
+Task L5 (live bug, single fetcher + 429 handling) changed: WHO calls
+get_limits() at all is now decided by the caller -- fleet.py's
+is_limits_hub() -- not by anything in this module; this module still
+never knows or cares whether it is "the" fetcher, it only fetches when
+asked, exactly as before. What DID change here is 429 handling: a 429
+response is no longer just another failure. _fetch_from_api raises the
+new RateLimited (carrying only a parsed, non-negative retry_after float
+or None -- never the response body, never the request) instead of
+letting urllib.error.HTTPError fall through to the generic branch;
+_do_fetch reports it as unavailable_result(..., error="RateLimited")
+(same TYPE-NAME-only idiom CredentialsUnavailable already uses) and
+additionally returns the parsed retry_after to get_limits(), which uses
+it -- or, absent a usable Retry-After header, an escalating backoff
+starting above the normal cache interval and capped at
+RATE_LIMIT_BACKOFF_CEILING_SECONDS -- to hold off the NEXT attempt far
+longer than the normal 60s throttle, while every call in between keeps
+returning the last good reading with its true, growing age (the
+existing last-good-on-failure path below, unchanged). A run of 429s
+never escalates past the cap; the first non-429 outcome (success or any
+other failure) resets the backoff to normal. None of this touches the
+single-flight lock, the no-redirect opener, the 5s fetch budget, or the
+unrecognised-shape rejection above -- all four are exactly as three
+review rounds left them.
 """
 import json
 import os
@@ -65,6 +89,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
 import urllib.request
 
 import noredirect
@@ -75,6 +100,12 @@ KEYCHAIN_SERVICE_NAME = "Claude Code-credentials"
 
 CACHE_TTL_SECONDS = 60
 FETCH_TIMEOUT_SECONDS = 5
+
+# Task L5: a 429 backs off far more patiently than a normal failure (the
+# brief: "a ceiling of at least 15 minutes"). 900s is used as the escalating
+# backoff's own ceiling; an explicit Retry-After header is honoured as-is
+# and is NOT clamped to this -- see _next_rate_limit_backoff and get_limits.
+RATE_LIMIT_BACKOFF_CEILING_SECONDS = 900
 
 # A misbehaving/compromised endpoint returning a huge body must not be
 # read into memory in full -- same defensive cap fleetpoll.py applies to
@@ -105,14 +136,24 @@ _cache_lock = threading.Lock()
 # cleared via _cache.clear() in tests (see tests/test_limits.py setUp).
 # Always accessed under _cache_lock.
 # "result": the last value get_limits() returned (success or failure).
-# "attempted_at": when that value was computed -- gates the 60s throttle
-#   for BOTH outcomes, so a failing fetch is retried at most once per
-#   CACHE_TTL_SECONDS too, not on every poll (CONTRACT.md doesn't say
-#   this explicitly for the failure case; see task-l1-report.md for why
-#   throttling failures the same as successes is the safer reading in a
-#   long-running poll loop, unlike the statusline script this mirrors,
-#   which is invoked fresh per render and effectively retries on every
-#   failure until it next succeeds).
+# "attempted_at": when that value was computed -- informational (see
+#   "next_attempt_at" below for the actual throttle gate).
+# "next_attempt_at": the earliest time get_limits() will attempt a fresh
+#   fetch again -- normally attempted_at + CACHE_TTL_SECONDS (a failing
+#   fetch is throttled the same as a success, at most once per
+#   CACHE_TTL_SECONDS; CONTRACT.md doesn't say this explicitly for the
+#   failure case; see task-l1-report.md for why throttling failures the
+#   same as successes is the safer reading in a long-running poll loop,
+#   unlike the statusline script this mirrors, which is invoked fresh
+#   per render and effectively retries on every failure until it next
+#   succeeds), but pushed much further out after a 429 (Task L5; see
+#   _next_rate_limit_backoff and get_limits) so a rate limit is not
+#   simply retried into another rate limit every 60s.
+# "rate_limit_streak": Task L5, count of CONSECUTIVE 429s with no usable
+#   Retry-After header, used only to escalate the backoff above; reset
+#   to 0 the moment an attempt is anything other than a 429 (an explicit
+#   Retry-After also resets it -- that backoff comes from the header,
+#   not from this streak).
 # "last_good": the most recent available=True result, held onto
 #   independent of the throttle above so a run of failures always has
 #   something to fall back to, with its ORIGINAL fetched_at intact
@@ -127,6 +168,29 @@ class CredentialsUnavailable(Exception):
     accessToken. This is CONTRACT.md's "normal state" (a device may not
     be logged in) -- callers report its TYPE NAME as `error`, never a
     message, exactly like any other fetch failure."""
+
+
+class RateLimited(Exception):
+    """Raised by _fetch_from_api when the usage endpoint answers 429.
+    Task L5: a 429 means "you called too often", not "something is
+    broken" -- kept as its own type (reported as error="RateLimited",
+    same TYPE-NAME-only idiom CredentialsUnavailable uses above) so
+    get_limits() can back off far more patiently than a normal failure,
+    and so a caller/UI can tell the two apart without ever needing a
+    message string.
+
+    `retry_after` is the ALREADY-PARSED Retry-After header value in
+    seconds (a non-negative float), or None if the header was absent or
+    not a plain delta-seconds value -- never the raw header string, and
+    never anything derived from the request. No message is ever passed
+    to Exception.__init__ (str(e) stays empty), consistent with every
+    other exception this module raises near the token: only .retry_after
+    is ever read off this by a caller, exactly like CredentialsUnavailable
+    carries nothing but its own type name."""
+
+    def __init__(self, retry_after=None):
+        super().__init__()
+        self.retry_after = retry_after
 
 
 def unavailable_result(now, error=None):
@@ -171,6 +235,31 @@ def _int_or_none(value):
 
 def _str_or_none(value):
     return value if isinstance(value, str) else None
+
+
+def _parse_retry_after_seconds(value):
+    """A 429's `Retry-After` header -> seconds (non-negative float), or
+    None. RFC 7231 allows either delta-seconds (a plain non-negative
+    integer) or an HTTP-date; only delta-seconds is handled here -- a
+    stated residual, same style as _read_token_linux's timeout residual
+    above, not a silent gap: every usage-endpoint response seen in
+    practice sends delta-seconds, and correctly resolving an HTTP-date
+    would mean comparing it against wall-clock time fetched via a SECOND
+    clock read inside a function whose caller is already budgeting a
+    hard timeout -- meaningfully heavier than the rest of this parse for
+    a form that has not actually been observed. An HTTP-date (or any
+    other unparseable value) returns None here, exactly like a missing
+    header: get_limits() then falls back to its own escalating backoff
+    instead of trusting a value it couldn't parse. Never raises."""
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    if not value or not value.isdigit():
+        return None
+    try:
+        return float(int(value))
+    except (ValueError, OverflowError):
+        return None
 
 
 def _severity_by_kind(raw_limits, kind):
@@ -466,7 +555,11 @@ def _fetch_from_api(timeout, read_token_fn=None):
     -- every test double in tests/test_limits.py does; defaults to
     _read_token, which forwards it to the macOS branch only (a Linux
     file read has no use for it -- see _read_token_linux's own docstring
-    for the timeout residual that leaves on Linux specifically)."""
+    for the timeout residual that leaves on Linux specifically).
+
+    Task L5: a 429 response raises RateLimited (defined above), not a
+    plain HTTPError -- every other non-2xx status still surfaces as
+    urllib.error.HTTPError, unchanged from before this task."""
     read_token = read_token_fn or _read_token
     start = time.monotonic()
     token = read_token(timeout=timeout)
@@ -484,8 +577,25 @@ def _fetch_from_api(timeout, read_token_fn=None):
     # Critical (fix round 1): _NO_REDIRECT_OPENER, never bare
     # urllib.request.urlopen -- see _NoRedirectHandler above. A 3xx here
     # surfaces as urllib.error.HTTPError, never a second request.
-    with _NO_REDIRECT_OPENER.open(req, timeout=remaining) as resp:
-        data = resp.read(MAX_RESPONSE_BYTES + 1)
+    try:
+        with _NO_REDIRECT_OPENER.open(req, timeout=remaining) as resp:
+            data = resp.read(MAX_RESPONSE_BYTES + 1)
+    except urllib.error.HTTPError as e:
+        if e.code == 429:
+            # Task L5: distinguished from every other HTTPError so
+            # get_limits() can back off far more patiently than a normal
+            # failure. e.headers is the RESPONSE's headers (whatever
+            # Anthropic sent back, Retry-After included if present) --
+            # reading it carries none of the risk this module's own
+            # docstring warns about for str(e) on THIS SAME exception
+            # type (a urllib HTTPError's string form can embed the
+            # REQUEST, Authorization header included); only e.code and
+            # one named response header are ever read here, never the
+            # exception's message/string form, and never the request.
+            headers = e.headers
+            raw_retry_after = headers.get("Retry-After") if headers is not None else None
+            raise RateLimited(retry_after=_parse_retry_after_seconds(raw_retry_after))
+        raise
     if len(data) > MAX_RESPONSE_BYTES:
         raise ValueError("usage response exceeded size limit")
     return json.loads(data)
@@ -496,10 +606,20 @@ def _do_fetch(now, timeout, fetch_fn):
     fetch (including CredentialsUnavailable) or from parsing its response
     becomes unavailable_result(now, error=type(e).__name__) -- section 2's
     "type name only, never str(e)" rule applied at the one place that
-    ever sees the raw exception."""
+    ever sees the raw exception.
+
+    Returns (result, rate_limit_retry_after): the second element is None
+    for every outcome except a 429 (RateLimited), in which case it is
+    RateLimited.retry_after (a parsed, non-negative float, or None if no
+    usable Retry-After header was sent) -- Task L5: get_limits() uses it
+    to schedule the NEXT attempt, without ever inspecting an exception
+    itself; every exception this module raises near the token is still
+    only ever caught, named and discarded right here."""
     fetch = fetch_fn or _fetch_from_api
     try:
         raw = fetch(timeout)
+    except RateLimited as e:
+        return unavailable_result(now, error="RateLimited"), e.retry_after
     except socket.timeout:
         # Minor (fix round 1): a socket-level timeout's type name is
         # "timeout" on 3.9 and "TimeoutError" on 3.10+ (socket.timeout
@@ -510,13 +630,27 @@ def _do_fetch(now, timeout, fetch_fn):
         # so this branch also catches the plain TimeoutError
         # _fetch_from_api raises itself when the token read exhausts the
         # whole budget -- nothing extra needed for that case.
-        return unavailable_result(now, error="TimeoutError")
+        return unavailable_result(now, error="TimeoutError"), None
     except Exception as e:
-        return unavailable_result(now, error=type(e).__name__)
+        return unavailable_result(now, error=type(e).__name__), None
     try:
-        return _parse_usage_response(raw, now)
+        return _parse_usage_response(raw, now), None
     except Exception as e:
-        return unavailable_result(now, error=type(e).__name__)
+        return unavailable_result(now, error=type(e).__name__), None
+
+
+def _next_rate_limit_backoff(streak):
+    """Task L5: the backoff to use for the NEXT attempt after a 429 with
+    no usable Retry-After header, given `streak` PRIOR consecutive such
+    429s (0 on the first one). Starts above the normal CACHE_TTL_SECONDS
+    cadence and doubles on every consecutive occurrence, capped at
+    RATE_LIMIT_BACKOFF_CEILING_SECONDS (>= 15 minutes, per the brief) --
+    reaches the cap within a handful of consecutive 429s rather than
+    creeping up over hours. A real Retry-After header (see get_limits)
+    is used as-is instead of this, and resets `streak` back to 0: this
+    escalation is only for the case Anthropic did NOT tell us how long
+    to wait."""
+    return min(CACHE_TTL_SECONDS * (2 ** (streak + 1)), RATE_LIMIT_BACKOFF_CEILING_SECONDS)
 
 
 def get_limits(now_fn=time.time, timeout=FETCH_TIMEOUT_SECONDS, fetch_fn=None):
@@ -533,6 +667,18 @@ def get_limits(now_fn=time.time, timeout=FETCH_TIMEOUT_SECONDS, fetch_fn=None):
     so a caller/UI can compute staleness from fetched_at rather than being
     handed a fresh failure that masks how long the account has actually
     gone unread.
+
+    Task L5: a 429 extends that throttle far past the normal
+    CACHE_TTL_SECONDS -- respecting Retry-After when the response sent
+    one, otherwise the escalating backoff above -- so a rate limit does
+    not simply retry every 60s and get rate limited again. Every call
+    made before the extended throttle elapses still returns the SAME
+    cached result as any other throttled call (last-good-on-failure,
+    unchanged, right below), so the UI keeps showing the last good
+    reading with its true, growing age, never a fresh-looking failure.
+    The first outcome that is NOT a 429 (success or any other failure)
+    resets the backoff to normal -- "recover automatically" per the
+    brief.
 
     Important 1 (fix round 1): the whole cache-check-and-maybe-fetch body
     runs under _cache_lock, single-flight style (same idea agents.py's
@@ -551,17 +697,33 @@ def get_limits(now_fn=time.time, timeout=FETCH_TIMEOUT_SECONDS, fetch_fn=None):
     which does the real token read + HTTPS call."""
     with _cache_lock:
         now = now_fn()
-        attempted_at = _cache.get("attempted_at")
-        if attempted_at is not None and now - attempted_at < CACHE_TTL_SECONDS:
+        next_attempt_at = _cache.get("next_attempt_at")
+        if next_attempt_at is not None and now < next_attempt_at:
             return _cache["result"]
 
-        result = _do_fetch(now, timeout, fetch_fn)
-        if result["available"]:
-            _cache["last_good"] = result
+        fresh_result, rate_limit_retry_after = _do_fetch(now, timeout, fetch_fn)
+        was_rate_limited = fresh_result["error"] == "RateLimited"
+        if fresh_result["available"]:
+            _cache["last_good"] = fresh_result
+            result = fresh_result
         else:
             last_good = _cache.get("last_good")
-            if last_good is not None:
-                result = last_good
+            result = last_good if last_good is not None else fresh_result
+
+        if was_rate_limited:
+            if rate_limit_retry_after is not None:
+                backoff = rate_limit_retry_after
+                _cache["rate_limit_streak"] = 0
+            else:
+                streak = _cache.get("rate_limit_streak") or 0
+                backoff = _next_rate_limit_backoff(streak)
+                _cache["rate_limit_streak"] = streak + 1
+            next_attempt_at = now + max(backoff, 0.0)
+        else:
+            _cache["rate_limit_streak"] = 0
+            next_attempt_at = now + CACHE_TTL_SECONDS
+
         _cache["result"] = result
         _cache["attempted_at"] = now
+        _cache["next_attempt_at"] = next_attempt_at
         return result
