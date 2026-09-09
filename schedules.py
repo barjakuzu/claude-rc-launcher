@@ -214,6 +214,31 @@ def _validate_schedules(data):
     return valid, error
 
 
+def _load_schedules_locked():
+    """The actual load logic. Caller MUST already hold _schedules_lock -
+    this is the shared body behind the public load_schedules() (a
+    standalone read, which acquires the lock itself) and every CRUD
+    function below, whose entire load-modify-save must happen under ONE
+    lock acquisition rather than three separate ones (see fix round 3,
+    task-l3-findings-r3.md, in save_schedules()'s docstring)."""
+    global LAST_LOAD_ERROR
+    if not os.path.isfile(SCHEDULES_FILE):
+        LAST_LOAD_ERROR = None
+        return []
+    try:
+        with open(SCHEDULES_FILE, "r") as f:
+            data = json.load(f)
+    except Exception as e:
+        LAST_LOAD_ERROR = f"failed to parse {SCHEDULES_FILE}: {e}"
+        print(f"  Warning: failed to load schedules: {e}")
+        return []
+    valid, error = _validate_schedules(data)
+    LAST_LOAD_ERROR = error
+    if error:
+        print(f"  Warning: schedules.json has invalid entries: {error}")
+    return valid
+
+
 def load_schedules():
     """Load schedules from JSON file. Returns list of schedule dicts.
 
@@ -223,54 +248,66 @@ def load_schedules():
     looking indistinguishable from "no schedules configured". Cleared to
     None on a fully clean load.
     """
-    global LAST_LOAD_ERROR
     with _schedules_lock:
-        if not os.path.isfile(SCHEDULES_FILE):
-            LAST_LOAD_ERROR = None
-            return []
+        return _load_schedules_locked()
+
+
+def _save_schedules_locked(schedules):
+    """The actual atomic-write logic (temp file + os.replace, rolling
+    .bak). Caller MUST already hold _schedules_lock - see
+    _load_schedules_locked's docstring."""
+    directory = os.path.dirname(SCHEDULES_FILE)
+    os.makedirs(directory, exist_ok=True)
+    if os.path.isfile(SCHEDULES_FILE):
         try:
-            with open(SCHEDULES_FILE, "r") as f:
-                data = json.load(f)
-        except Exception as e:
-            LAST_LOAD_ERROR = f"failed to parse {SCHEDULES_FILE}: {e}"
-            print(f"  Warning: failed to load schedules: {e}")
-            return []
-        valid, error = _validate_schedules(data)
-        LAST_LOAD_ERROR = error
-        if error:
-            print(f"  Warning: schedules.json has invalid entries: {error}")
-        return valid
+            shutil.copyfile(SCHEDULES_FILE, SCHEDULES_FILE + ".bak")
+            try:
+                os.chmod(SCHEDULES_FILE + ".bak", 0o600)
+            except OSError:
+                pass
+        except OSError as e:
+            print(f"  Warning: could not update schedules.json.bak: {e}")
+    fd, tmp_path = tempfile.mkstemp(
+        prefix=".schedules-", suffix=".json.tmp", dir=directory)
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(schedules, f, indent=2)
+        os.chmod(tmp_path, 0o600)
+        os.replace(tmp_path, SCHEDULES_FILE)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
 
 
 def save_schedules(schedules):
     """Write schedules list to JSON file atomically (temp file in the same
     directory + os.replace), mode 0600. Keeps one rolling backup of the
-    previous contents at SCHEDULES_FILE + '.bak' before overwriting."""
+    previous contents at SCHEDULES_FILE + '.bak' before overwriting.
+
+    Fix round 3 (task-l3-findings-r3.md): every CRUD function below used
+    to call the public load_schedules() and this function separately -
+    each acquiring and releasing _schedules_lock on its own - with a
+    window in between, while the caller mutated its own in-memory copy,
+    where the lock was free. A second caller's ENTIRE load-modify-save
+    could complete inside that window; whichever caller's save landed
+    LAST then won outright and silently discarded the other's change
+    (a lost update), since each save persists a full snapshot built from
+    its own, by-then-stale, load. For the limit_reset trigger marker
+    specifically this meant an unrelated HTTP edit (rename, workdir
+    change, anything) whose load happened to precede a firing tick's
+    save could revert the marker the tick had just written - and the
+    NEXT tick would then see a stale marker again and fire a SECOND real
+    session for the same reset. The identical shape affects the cron
+    path's last_run dedup (_due_to_fire), meaning it can also produce a
+    duplicate cron-triggered run. Every CRUD function now holds
+    _schedules_lock ONCE across its whole load-modify-save via
+    _load_schedules_locked/_save_schedules_locked, closing the window
+    entirely rather than narrowing it."""
     with _schedules_lock:
-        directory = os.path.dirname(SCHEDULES_FILE)
-        os.makedirs(directory, exist_ok=True)
-        if os.path.isfile(SCHEDULES_FILE):
-            try:
-                shutil.copyfile(SCHEDULES_FILE, SCHEDULES_FILE + ".bak")
-                try:
-                    os.chmod(SCHEDULES_FILE + ".bak", 0o600)
-                except OSError:
-                    pass
-            except OSError as e:
-                print(f"  Warning: could not update schedules.json.bak: {e}")
-        fd, tmp_path = tempfile.mkstemp(
-            prefix=".schedules-", suffix=".json.tmp", dir=directory)
-        try:
-            with os.fdopen(fd, "w") as f:
-                json.dump(schedules, f, indent=2)
-            os.chmod(tmp_path, 0o600)
-            os.replace(tmp_path, SCHEDULES_FILE)
-        except Exception:
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
-            raise
+        _save_schedules_locked(schedules)
 
 
 def get_schedule_by_id(schedule_id):
@@ -291,7 +328,11 @@ def create_schedule(data):
     always wins over `cron` for firing purposes (scheduler.py's cron path
     only ever looks at `cron`, and a limit_reset schedule's `cron` is
     forced to null here) so the two mechanisms can never both drive the
-    same task."""
+    same task.
+
+    Fix round 3: load-modify-save happens under ONE _schedules_lock
+    acquisition (via _load_schedules_locked/_save_schedules_locked), not
+    two separate ones - see save_schedules()'s docstring for why."""
     from datetime import datetime
     trigger = _normalize_trigger_for_create(data.get("trigger"))
     schedule = {
@@ -310,9 +351,10 @@ def create_schedule(data):
         "created_at": datetime.now().isoformat() + 'Z',
         "history": [],
     }
-    schedules = load_schedules()
-    schedules.append(schedule)
-    save_schedules(schedules)
+    with _schedules_lock:
+        schedules = _load_schedules_locked()
+        schedules.append(schedule)
+        _save_schedules_locked(schedules)
     return schedule
 
 
@@ -341,61 +383,87 @@ def update_schedule(schedule_id, updates):
     always seeds silently on the next observation and only fires on the
     reset AFTER that - see scheduler.py's _limit_reset_decision) closes
     both paths at the transition, without needing a live limits fetch
-    synchronized with this call."""
+    synchronized with this call.
+
+    Fix round 3 (task-l3-findings-r3.md): load-modify-save happens under
+    ONE _schedules_lock acquisition, not two separate ones (see
+    save_schedules()'s docstring). Before this fix, a concurrent call
+    (another HTTP edit, or the scheduler's own tick) could load its own
+    snapshot in the window this function's load and save used to leave
+    open, and whichever call's save landed last silently discarded the
+    other's change - for the trigger marker specifically, that meant a
+    firing tick's marker advance could be reverted by an unrelated edit,
+    and the next tick would then fire a second real session for the same
+    reset."""
     allowed = {"name", "cron", "prompt", "instructions_file", "workdir",
                "mode", "model", "concurrency", "enabled", "last_run", "history",
                "trigger"}
-    schedules = load_schedules()
-    for i, s in enumerate(schedules):
-        if s.get("id") == schedule_id:
-            was_enabled = s.get("enabled", False)
-            for k, v in updates.items():
-                if k not in allowed:
-                    continue
-                if k == "trigger":
-                    s["trigger"] = _normalize_trigger_for_update(v, s.get("trigger"))
-                else:
-                    s[k] = v
-            if isinstance(s.get("trigger"), dict):
-                s["cron"] = None
-            trigger = s.get("trigger")
-            if (not was_enabled and s.get("enabled", False)
-                    and isinstance(trigger, dict) and trigger.get("kind") == "limit_reset"):
-                trigger = dict(trigger)
-                trigger["last_seen_resets_at"] = None
-                s["trigger"] = trigger
-            save_schedules(schedules)
-            return s
+    with _schedules_lock:
+        schedules = _load_schedules_locked()
+        for i, s in enumerate(schedules):
+            if s.get("id") == schedule_id:
+                was_enabled = s.get("enabled", False)
+                for k, v in updates.items():
+                    if k not in allowed:
+                        continue
+                    if k == "trigger":
+                        s["trigger"] = _normalize_trigger_for_update(v, s.get("trigger"))
+                    else:
+                        s[k] = v
+                if isinstance(s.get("trigger"), dict):
+                    s["cron"] = None
+                trigger = s.get("trigger")
+                if (not was_enabled and s.get("enabled", False)
+                        and isinstance(trigger, dict) and trigger.get("kind") == "limit_reset"):
+                    trigger = dict(trigger)
+                    trigger["last_seen_resets_at"] = None
+                    s["trigger"] = trigger
+                _save_schedules_locked(schedules)
+                return s
     return None
 
 
 def delete_schedule(schedule_id):
-    """Delete a schedule by id. Returns True if found and deleted."""
-    schedules = load_schedules()
-    new_schedules = [s for s in schedules if s.get("id") != schedule_id]
-    if len(new_schedules) < len(schedules):
-        save_schedules(new_schedules)
-        return True
-    return False
+    """Delete a schedule by id. Returns True if found and deleted.
+
+    Fix round 3: load-modify-save happens under ONE _schedules_lock
+    acquisition - see save_schedules()'s docstring."""
+    with _schedules_lock:
+        schedules = _load_schedules_locked()
+        new_schedules = [s for s in schedules if s.get("id") != schedule_id]
+        if len(new_schedules) < len(schedules):
+            _save_schedules_locked(new_schedules)
+            return True
+        return False
 
 
 def add_history_entry(schedule_id, status, message, **kwargs):
-    """Add a history entry to a schedule, capped at 50 entries."""
+    """Add a history entry to a schedule, capped at 50 entries.
+
+    Fix round 3 (task-l3-findings-r3.md): load-modify-save happens under
+    ONE _schedules_lock acquisition, not two separate ones (see
+    save_schedules()'s docstring) - this is the cron half of the same
+    defect the trigger marker fix closes: `last_run`, written here, is
+    what _due_to_fire() reads to dedup a cron schedule within the same
+    minute, so a lost update here could produce a duplicate cron-
+    triggered session the same way a lost update to the trigger marker
+    produces a duplicate reset-triggered one."""
     from datetime import datetime
-    schedules = load_schedules()
-    for s in schedules:
-        if s.get("id") == schedule_id:
-            history = s.get("history", [])
-            entry = {
-                "timestamp": datetime.now().isoformat() + 'Z',
-                "status": status,
-                "message": message,
-            }
-            # Add any extra fields (e.g. duration_minutes, summary)
-            for k, v in kwargs.items():
-                entry[k] = v
-            history.append(entry)
-            s["history"] = history[-50:]
-            s["last_run"] = datetime.now().isoformat() + 'Z'
-            save_schedules(schedules)
-            return
+    with _schedules_lock:
+        schedules = _load_schedules_locked()
+        for s in schedules:
+            if s.get("id") == schedule_id:
+                history = s.get("history", [])
+                entry = {
+                    "timestamp": datetime.now().isoformat() + 'Z',
+                    "status": status,
+                    "message": message,
+                }
+                # Add any extra fields (e.g. duration_minutes, summary)
+                for k, v in kwargs.items():
+                    entry[k] = v
+                history.append(entry)
+                s["history"] = history[-50:]
+                s["last_run"] = datetime.now().isoformat() + 'Z'
+                _save_schedules_locked(schedules)
+                return

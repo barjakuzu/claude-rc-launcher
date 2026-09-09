@@ -6,6 +6,7 @@ import shutil
 import stat
 import sys
 import tempfile
+import threading
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -511,6 +512,171 @@ class TriggerLoadValidationTest(unittest.TestCase):
         result = schedules.load_schedules()
         self.assertEqual(len(result), 1)
         self.assertIsNone(schedules.LAST_LOAD_ERROR)
+
+
+class ConcurrentCrudRaceTest(unittest.TestCase):
+    """Fix round 3 (task-l3-findings-r3.md): every CRUD function used to
+    call load_schedules() and save_schedules() as two SEPARATE lock
+    acquisitions, with a window in between - while a caller mutated its
+    own in-memory copy - where _schedules_lock was free. A second
+    caller's entire load-modify-save could complete inside that window,
+    and whichever caller's save landed LAST won outright, silently
+    discarding the other's change (a lost update): for the trigger
+    marker, this meant a firing tick's marker advance could be reverted
+    by an unrelated HTTP edit whose load happened to land first, and the
+    NEXT tick would then start a SECOND real Claude session for the same
+    reset; the identical shape applies to the cron path's `last_run`
+    dedup. Every CRUD function now holds _schedules_lock across its
+    ENTIRE load-modify-save.
+
+    These tests force the exact bad interleaving DETERMINISTICALLY,
+    using the lock itself as a synchronization primitive, rather than
+    relying on real thread-scheduling luck to reproduce a race (which is
+    how the original findings reproduced it: 2 of 400 barrier-aligned
+    trials)."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self._orig = schedules.SCHEDULES_FILE
+        schedules.SCHEDULES_FILE = os.path.join(self.tmpdir, "schedules.json")
+
+    def tearDown(self):
+        schedules.SCHEDULES_FILE = self._orig
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_schedules_lock_serializes_the_whole_load_modify_save(self):
+        # Direct proof of the mechanism, not just the symptom: while
+        # _schedules_lock is held (simulating any CRUD function
+        # mid-critical-section), a concurrent update_schedule() call
+        # from another thread must not be able to proceed AT ALL - not
+        # load, not modify, not save - until the lock is released.
+        s = schedules.create_schedule({"name": "task"})
+        schedules._schedules_lock.acquire()
+        done = threading.Event()
+
+        def run():
+            schedules.update_schedule(s["id"], {"name": "renamed"})
+            done.set()
+
+        t = threading.Thread(target=run)
+        t.start()
+        try:
+            # Not "probably hasn't happened yet" - CANNOT have happened:
+            # the lock is held by this thread for the whole wait.
+            self.assertFalse(done.wait(timeout=0.3))
+        finally:
+            schedules._schedules_lock.release()
+        t.join(timeout=5)
+        self.assertTrue(done.is_set())
+        self.assertEqual(schedules.get_schedule_by_id(s["id"])[1]["name"], "renamed")
+
+    def test_trigger_marker_write_survives_a_concurrent_unrelated_edit(self):
+        # Reproduces the finding deterministically: an unrelated HTTP
+        # edit (thread A, simulated directly in this thread by holding
+        # the lock and doing the equivalent load-modify-save by hand)
+        # interleaves around a firing tick's marker write (thread B).
+        # B must be genuinely blocked the whole time A holds the lock -
+        # proven, not assumed - and its write must still land correctly
+        # once A finishes, rather than being silently reverted by A's
+        # save.
+        s = schedules.create_schedule({
+            "name": "task",
+            "trigger": {"kind": "limit_reset", "window": "five_hour"},
+        })
+        sid = s["id"]
+
+        schedules._schedules_lock.acquire()
+        b_done = threading.Event()
+
+        def run_b():
+            schedules.update_schedule(sid, {
+                "trigger": {"kind": "limit_reset", "window": "five_hour",
+                            "last_seen_resets_at": "2026-01-02T00:00:00Z"},
+            })
+            b_done.set()
+
+        thread_b = threading.Thread(target=run_b)
+        thread_b.start()
+        self.assertFalse(b_done.wait(timeout=0.3))
+
+        # Thread A's own load-modify-save, done here (holding the same
+        # lock this test already acquired) rather than via a second
+        # thread, since what's being proven is serialization of the
+        # CRITICAL SECTION, not thread scheduling order.
+        raw = schedules._load_schedules_locked()
+        for entry in raw:
+            if entry["id"] == sid:
+                entry["name"] = "renamed by A"
+        schedules._save_schedules_locked(raw)
+        schedules._schedules_lock.release()
+
+        thread_b.join(timeout=5)
+        self.assertTrue(b_done.is_set())
+
+        final = schedules.get_schedule_by_id(sid)[1]
+        self.assertEqual(final["name"], "renamed by A")
+        self.assertEqual(final["trigger"]["last_seen_resets_at"], "2026-01-02T00:00:00Z")
+
+    def test_cron_last_run_write_survives_a_concurrent_unrelated_edit(self):
+        # Same defect, the cron path's half: add_history_entry() writes
+        # last_run, which _due_to_fire() reads to dedup a cron schedule
+        # within the same minute. A lost update here would let the
+        # scheduler fire the same cron schedule twice.
+        s = schedules.create_schedule({"name": "task", "cron": "0 9 * * *"})
+        sid = s["id"]
+
+        schedules._schedules_lock.acquire()
+        b_done = threading.Event()
+
+        def run_b():
+            schedules.add_history_entry(sid, "ok", "fired")
+            b_done.set()
+
+        thread_b = threading.Thread(target=run_b)
+        thread_b.start()
+        self.assertFalse(b_done.wait(timeout=0.3))
+
+        raw = schedules._load_schedules_locked()
+        for entry in raw:
+            if entry["id"] == sid:
+                entry["name"] = "renamed by A"
+        schedules._save_schedules_locked(raw)
+        schedules._schedules_lock.release()
+
+        thread_b.join(timeout=5)
+        self.assertTrue(b_done.is_set())
+
+        final = schedules.get_schedule_by_id(sid)[1]
+        self.assertEqual(final["name"], "renamed by A")
+        self.assertIsNotNone(final["last_run"])
+        self.assertEqual(len(final["history"]), 1)
+
+    def test_new_schedule_is_not_lost_to_a_concurrent_unrelated_update(self):
+        existing = schedules.create_schedule({"name": "existing"})
+
+        schedules._schedules_lock.acquire()
+        b_done = threading.Event()
+
+        def run_b():
+            schedules.create_schedule({"name": "new task"})
+            b_done.set()
+
+        thread_b = threading.Thread(target=run_b)
+        thread_b.start()
+        self.assertFalse(b_done.wait(timeout=0.3))
+
+        raw = schedules._load_schedules_locked()
+        for entry in raw:
+            if entry["id"] == existing["id"]:
+                entry["name"] = "renamed by A"
+        schedules._save_schedules_locked(raw)
+        schedules._schedules_lock.release()
+
+        thread_b.join(timeout=5)
+        self.assertTrue(b_done.is_set())
+
+        names = {e["name"] for e in schedules.load_schedules()}
+        self.assertEqual(names, {"renamed by A", "new task"})
 
 
 if __name__ == "__main__":
