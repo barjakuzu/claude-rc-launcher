@@ -473,6 +473,7 @@ class RateLimitBackoffTest(unittest.TestCase):
 
     def setUp(self):
         limits._cache.clear()
+        limits.LAST_RATE_LIMITED_AT = None
 
     def test_error_is_rate_limited_not_a_generic_http_error(self):
         def fetch_fn(timeout):
@@ -623,6 +624,145 @@ class RateLimitBackoffTest(unittest.TestCase):
             set(result.keys()),
             {"available", "fetched_at", "five_hour", "seven_day", "scoped",
              "spend", "extra_usage", "error"})
+
+    def test_retry_after_zero_still_throttles_does_not_hammer(self):
+        # Fix round 3, MUST FIX: Retry-After: 0 used to set
+        # next_attempt_at = now + 0, which the throttle gate (now <
+        # next_attempt_at) treats as already expired -- every subsequent
+        # call refetched immediately. Floored at CACHE_TTL_SECONDS now.
+        calls = {"n": 0}
+
+        def fetch_fn(timeout):
+            calls["n"] += 1
+            raise limits.RateLimited(retry_after=0.0)
+
+        clock = {"t": 1000.0}
+
+        def now_fn():
+            return clock["t"]
+
+        # Simulate what a naive caller polling once a second for 5
+        # seconds would do -- the exact shape of the measured regression
+        # (20 outbound calls in a 5s window against 1 correctly).
+        for _ in range(5):
+            limits.get_limits(now_fn=now_fn, fetch_fn=fetch_fn)
+            clock["t"] += 1.0
+        self.assertEqual(calls["n"], 1, "a Retry-After: 0 must not remove the throttle")
+
+        # The floor is CACHE_TTL_SECONDS, not "forever" -- it still
+        # recovers on its own once that's elapsed.
+        clock["t"] = 1000.0 + limits.CACHE_TTL_SECONDS
+        limits.get_limits(now_fn=now_fn, fetch_fn=fetch_fn)
+        self.assertEqual(calls["n"], 2)
+
+    def test_absurdly_large_retry_after_is_clamped_not_honoured_verbatim(self):
+        # Fix round 3, MUST FIX: an unbounded Retry-After used to wedge
+        # this device for millennia (99999999999999999999 measured),
+        # recoverable only by restarting the process.
+        calls = {"n": 0}
+
+        def fetch_fn(timeout):
+            calls["n"] += 1
+            raise limits.RateLimited(retry_after=99999999999999999999.0)
+
+        clock = {"t": 1000.0}
+
+        def now_fn():
+            return clock["t"]
+
+        limits.get_limits(now_fn=now_fn, fetch_fn=fetch_fn)
+        self.assertEqual(calls["n"], 1)
+
+        clock["t"] = 1000.0 + limits.RATE_LIMIT_BACKOFF_CEILING_SECONDS
+        limits.get_limits(now_fn=now_fn, fetch_fn=fetch_fn)
+        self.assertEqual(calls["n"], 2, "must recover within the ceiling, not stay wedged")
+
+    def test_last_rate_limited_at_set_on_a_429_and_cleared_on_recovery(self):
+        limits.LAST_RATE_LIMITED_AT = None
+
+        def rate_limited_fetch(timeout):
+            raise limits.RateLimited(retry_after=60.0)
+
+        def good_fetch(timeout):
+            return {"five_hour": {"utilization": 5.0, "resets_at": "r"},
+                    "seven_day": None, "limits": [], "spend": None, "extra_usage": None}
+
+        limits.get_limits(now_fn=lambda: 1000.0, fetch_fn=rate_limited_fetch)
+        self.assertEqual(limits.LAST_RATE_LIMITED_AT, 1000.0)
+
+        limits.get_limits(now_fn=lambda: 1061.0, fetch_fn=good_fetch)
+        self.assertIsNone(limits.LAST_RATE_LIMITED_AT)
+
+    def test_last_rate_limited_at_cleared_on_a_different_kind_of_failure_too(self):
+        limits.LAST_RATE_LIMITED_AT = None
+
+        def rate_limited_fetch(timeout):
+            raise limits.RateLimited(retry_after=60.0)
+
+        def other_failure_fetch(timeout):
+            raise ValueError("boom")
+
+        limits.get_limits(now_fn=lambda: 1000.0, fetch_fn=rate_limited_fetch)
+        self.assertIsNotNone(limits.LAST_RATE_LIMITED_AT)
+
+        limits.get_limits(now_fn=lambda: 1061.0, fetch_fn=other_failure_fetch)
+        self.assertIsNone(limits.LAST_RATE_LIMITED_AT)
+
+    def test_a_429_logs_a_warning_visible_without_a_manual_probe(self):
+        def fetch_fn(timeout):
+            raise limits.RateLimited(retry_after=60.0)
+
+        with self.assertLogs("limits", level="WARNING") as ctx:
+            limits.get_limits(now_fn=lambda: 1000.0, fetch_fn=fetch_fn)
+        self.assertTrue(any("rate limited" in line for line in ctx.output))
+        # Never the token, never an exception message -- only the two
+        # plain numbers this module already exposes elsewhere.
+        for line in ctx.output:
+            self.assertNotIn(_FAKE_TOKEN, line)
+
+    def test_throttled_return_from_cache_does_not_log_again(self):
+        calls = {"n": 0}
+
+        def fetch_fn(timeout):
+            calls["n"] += 1
+            raise limits.RateLimited(retry_after=300.0)
+
+        clock = {"t": 1000.0}
+        with self.assertLogs("limits", level="WARNING") as ctx:
+            limits.get_limits(now_fn=lambda: clock["t"], fetch_fn=fetch_fn)
+        self.assertEqual(len(ctx.output), 1)
+
+        clock["t"] += 61  # still inside the 300s backoff, no real fetch
+        with self.assertRaises(AssertionError):
+            # assertLogs raises AssertionError itself if nothing was
+            # logged in the block -- exactly what we want to confirm.
+            with self.assertLogs("limits", level="WARNING"):
+                limits.get_limits(now_fn=lambda: clock["t"], fetch_fn=fetch_fn)
+        self.assertEqual(calls["n"], 1)
+
+
+class ClampRetryAfterTest(unittest.TestCase):
+    """_clamp_retry_after: [CACHE_TTL_SECONDS, RATE_LIMIT_BACKOFF_CEILING_SECONDS]."""
+
+    def test_zero_clamps_up_to_the_floor(self):
+        self.assertEqual(limits._clamp_retry_after(0.0), limits.CACHE_TTL_SECONDS)
+
+    def test_below_the_floor_clamps_up(self):
+        self.assertEqual(limits._clamp_retry_after(1.0), limits.CACHE_TTL_SECONDS)
+
+    def test_huge_value_clamps_down_to_the_ceiling(self):
+        self.assertEqual(
+            limits._clamp_retry_after(99999999999999999999.0),
+            limits.RATE_LIMIT_BACKOFF_CEILING_SECONDS)
+
+    def test_value_within_range_passes_through_unchanged(self):
+        self.assertEqual(limits._clamp_retry_after(300.0), 300.0)
+
+    def test_exact_floor_and_ceiling_pass_through_unchanged(self):
+        self.assertEqual(limits._clamp_retry_after(limits.CACHE_TTL_SECONDS),
+                          limits.CACHE_TTL_SECONDS)
+        self.assertEqual(limits._clamp_retry_after(limits.RATE_LIMIT_BACKOFF_CEILING_SECONDS),
+                          limits.RATE_LIMIT_BACKOFF_CEILING_SECONDS)
 
 
 class FetchFromApiRateLimitTest(unittest.TestCase):
