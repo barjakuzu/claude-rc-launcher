@@ -529,11 +529,42 @@ class ConcurrentCrudRaceTest(unittest.TestCase):
     dedup. Every CRUD function now holds _schedules_lock across its
     ENTIRE load-modify-save.
 
-    These tests force the exact bad interleaving DETERMINISTICALLY,
-    using the lock itself as a synchronization primitive, rather than
-    relying on real thread-scheduling luck to reproduce a race (which is
-    how the original findings reproduced it: 2 of 400 barrier-aligned
-    trials)."""
+    Fix round 4 (task-l3-findings-r4.md): the FIRST version of these
+    tests held _schedules_lock directly IN THE TEST THREAD to simulate
+    "a CRUD function mid-critical-section". That is vacuous - thread B
+    blocks on that externally-held lock whether or not the CODE UNDER
+    TEST holds it correctly, so the tests passed identically against
+    the pre-round-3 bug (proven by reverting the fix and watching all
+    of them still pass while the reverted code demonstrably started a
+    second session - see the mutation check in the round 4 report).
+
+    These versions instead suspend thread A INSIDE its own real call to
+    update_schedule()/add_history_entry(), between that function's own
+    load and its own save, by monkeypatching a function each of them
+    genuinely calls at exactly that point:
+    _normalize_trigger_for_update() for update_schedule (called from
+    inside the per-schedule mutation loop, after the load and before
+    the save, whenever `updates` includes a `trigger` key), and
+    datetime.datetime.now() for add_history_entry() (datetime.datetime
+    can't be monkeypatched directly - it's an immutable extension type -
+    so the datetime MODULE's `datetime` attribute is swapped instead,
+    which add_history_entry's `from datetime import datetime` picks up
+    at call time). Each patch pauses only on its FIRST invocation (a
+    counter guard), so thread B's own later call through the same
+    patched function - it may go through the same hook, since both
+    threads share the same module - passes straight through instead of
+    also blocking on the pause.
+
+    Whether thread B can complete WHILE thread A is paused there is
+    exactly what distinguishes the fix from the bug: if update_schedule/
+    add_history_entry hold _schedules_lock continuously across their own
+    load-modify-save (the fix), thread A is still holding it during the
+    pause, and thread B's own load_schedules() call blocks until A
+    finishes. If they release the lock after loading and only
+    reacquire it for the save (the bug), the lock is free during the
+    pause, thread B's entire load-modify-save can complete right there,
+    and thread A's later save then overwrites B's already-completed
+    write with A's own stale snapshot."""
 
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
@@ -544,77 +575,78 @@ class ConcurrentCrudRaceTest(unittest.TestCase):
         schedules.SCHEDULES_FILE = self._orig
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def test_schedules_lock_serializes_the_whole_load_modify_save(self):
-        # Direct proof of the mechanism, not just the symptom: while
-        # _schedules_lock is held (simulating any CRUD function
-        # mid-critical-section), a concurrent update_schedule() call
-        # from another thread must not be able to proceed AT ALL - not
-        # load, not modify, not save - until the lock is released.
-        s = schedules.create_schedule({"name": "task"})
-        schedules._schedules_lock.acquire()
-        done = threading.Event()
-
-        def run():
-            schedules.update_schedule(s["id"], {"name": "renamed"})
-            done.set()
-
-        t = threading.Thread(target=run)
-        t.start()
-        try:
-            # Not "probably hasn't happened yet" - CANNOT have happened:
-            # the lock is held by this thread for the whole wait.
-            self.assertFalse(done.wait(timeout=0.3))
-        finally:
-            schedules._schedules_lock.release()
-        t.join(timeout=5)
-        self.assertTrue(done.is_set())
-        self.assertEqual(schedules.get_schedule_by_id(s["id"])[1]["name"], "renamed")
-
     def test_trigger_marker_write_survives_a_concurrent_unrelated_edit(self):
-        # Reproduces the finding deterministically: an unrelated HTTP
-        # edit (thread A, simulated directly in this thread by holding
-        # the lock and doing the equivalent load-modify-save by hand)
-        # interleaves around a firing tick's marker write (thread B).
-        # B must be genuinely blocked the whole time A holds the lock -
-        # proven, not assumed - and its write must still land correctly
-        # once A finishes, rather than being silently reverted by A's
-        # save.
         s = schedules.create_schedule({
             "name": "task",
             "trigger": {"kind": "limit_reset", "window": "five_hour"},
         })
         sid = s["id"]
 
-        schedules._schedules_lock.acquire()
+        # Thread A: edits the trigger's OWN delay_minutes - a field
+        # unrelated to the marker under test, the way a modal save that
+        # re-submits delay_minutes alongside other fields would be.
+        # _normalize_trigger_for_update runs squarely between
+        # update_schedule's load and its save; pausing there, on A's
+        # first (and only A's first) call, suspends A at exactly that
+        # boundary.
+        a_paused = threading.Event()
+        resume_a = threading.Event()
+        call_count = [0]
+        orig_normalize = schedules._normalize_trigger_for_update
+
+        def paced_normalize(trigger, previous):
+            result = orig_normalize(trigger, previous)
+            call_count[0] += 1
+            if call_count[0] == 1:
+                a_paused.set()
+                resume_a.wait(timeout=5)
+            return result
+
+        def run_a():
+            schedules._normalize_trigger_for_update = paced_normalize
+            try:
+                schedules.update_schedule(sid, {
+                    "trigger": {"kind": "limit_reset", "window": "five_hour",
+                                "delay_minutes": 30},
+                })
+            finally:
+                schedules._normalize_trigger_for_update = orig_normalize
+
+        thread_a = threading.Thread(target=run_a)
+        thread_a.start()
+        self.assertTrue(a_paused.wait(timeout=5))
+
+        # Thread B: the firing tick's marker write, reading the CURRENT
+        # trigger fresh (as scheduler.py's real _check_limit_reset_
+        # schedules does) and only changing last_seen_resets_at -
+        # attempted while A is paused between its own load and save.
         b_done = threading.Event()
 
         def run_b():
-            schedules.update_schedule(sid, {
-                "trigger": {"kind": "limit_reset", "window": "five_hour",
-                            "last_seen_resets_at": "2026-01-02T00:00:00Z"},
-            })
+            current = schedules.get_schedule_by_id(sid)[1]
+            trigger = dict(current["trigger"])
+            trigger["last_seen_resets_at"] = "2026-01-02T00:00:00Z"
+            schedules.update_schedule(sid, {"trigger": trigger})
             b_done.set()
 
         thread_b = threading.Thread(target=run_b)
         thread_b.start()
+
+        # With the fix, A still holds _schedules_lock here (it hasn't
+        # saved yet) - B cannot even complete its own load, so this
+        # must still be False. Against the pre-round-3 structure, A's
+        # load already released the lock before this pause, so B runs
+        # to completion right here and this assertion is what fails
+        # (proven below by mutation).
         self.assertFalse(b_done.wait(timeout=0.3))
 
-        # Thread A's own load-modify-save, done here (holding the same
-        # lock this test already acquired) rather than via a second
-        # thread, since what's being proven is serialization of the
-        # CRITICAL SECTION, not thread scheduling order.
-        raw = schedules._load_schedules_locked()
-        for entry in raw:
-            if entry["id"] == sid:
-                entry["name"] = "renamed by A"
-        schedules._save_schedules_locked(raw)
-        schedules._schedules_lock.release()
-
+        resume_a.set()
+        thread_a.join(timeout=5)
         thread_b.join(timeout=5)
         self.assertTrue(b_done.is_set())
 
         final = schedules.get_schedule_by_id(sid)[1]
-        self.assertEqual(final["name"], "renamed by A")
+        self.assertEqual(final["trigger"]["delay_minutes"], 30)
         self.assertEqual(final["trigger"]["last_seen_resets_at"], "2026-01-02T00:00:00Z")
 
     def test_cron_last_run_write_survives_a_concurrent_unrelated_edit(self):
@@ -625,58 +657,105 @@ class ConcurrentCrudRaceTest(unittest.TestCase):
         s = schedules.create_schedule({"name": "task", "cron": "0 9 * * *"})
         sid = s["id"]
 
-        schedules._schedules_lock.acquire()
+        # Thread A: add_history_entry(), paused on its FIRST
+        # datetime.now() call (building entry["timestamp"]) - squarely
+        # between its load and its save (the second datetime.now() call,
+        # for last_run, and the save itself both still come after this
+        # point). datetime.datetime itself can't be monkeypatched (it's
+        # an immutable extension type - see class docstring), so the
+        # datetime MODULE's `datetime` attribute is swapped instead.
+        import datetime as datetime_module
+        real_datetime_cls = datetime_module.datetime
+        a_paused = threading.Event()
+        resume_a = threading.Event()
+
+        class PacedDatetime:
+            _count = 0
+
+            @staticmethod
+            def now(tz=None):
+                result = real_datetime_cls.now(tz)
+                PacedDatetime._count += 1
+                if PacedDatetime._count == 1:
+                    a_paused.set()
+                    resume_a.wait(timeout=5)
+                return result
+
+            def __getattr__(self, name):
+                return getattr(real_datetime_cls, name)
+
+        def run_a():
+            datetime_module.datetime = PacedDatetime()
+            try:
+                schedules.add_history_entry(sid, "ok", "fired")
+            finally:
+                datetime_module.datetime = real_datetime_cls
+
+        thread_a = threading.Thread(target=run_a)
+        thread_a.start()
+        self.assertTrue(a_paused.wait(timeout=5))
+
+        # Thread B: an unrelated edit, attempted while A is paused
+        # between its own load and save.
         b_done = threading.Event()
 
         def run_b():
-            schedules.add_history_entry(sid, "ok", "fired")
+            schedules.update_schedule(sid, {"name": "renamed by B"})
             b_done.set()
 
         thread_b = threading.Thread(target=run_b)
         thread_b.start()
         self.assertFalse(b_done.wait(timeout=0.3))
 
-        raw = schedules._load_schedules_locked()
-        for entry in raw:
-            if entry["id"] == sid:
-                entry["name"] = "renamed by A"
-        schedules._save_schedules_locked(raw)
-        schedules._schedules_lock.release()
-
+        resume_a.set()
+        thread_a.join(timeout=5)
         thread_b.join(timeout=5)
         self.assertTrue(b_done.is_set())
 
         final = schedules.get_schedule_by_id(sid)[1]
-        self.assertEqual(final["name"], "renamed by A")
+        self.assertEqual(final["name"], "renamed by B")
         self.assertIsNotNone(final["last_run"])
         self.assertEqual(len(final["history"]), 1)
 
-    def test_new_schedule_is_not_lost_to_a_concurrent_unrelated_update(self):
-        existing = schedules.create_schedule({"name": "existing"})
 
-        schedules._schedules_lock.acquire()
-        b_done = threading.Event()
+class CrudFunctionsUseTheLockedHelpersTest(unittest.TestCase):
+    """Structural companion to ConcurrentCrudRaceTest, covering the two
+    CRUD functions (create_schedule, delete_schedule) that have no
+    intermediate function call between their own load and save to hook
+    a dynamic pause on. The invariant fix round 3 establishes - acquire
+    _schedules_lock once, never call the public load_schedules()/
+    save_schedules() internally - is checked directly at the source
+    level for all four CRUD functions, which is what would catch a
+    regression in create_schedule/delete_schedule specifically."""
 
-        def run_b():
-            schedules.create_schedule({"name": "new task"})
-            b_done.set()
-
-        thread_b = threading.Thread(target=run_b)
-        thread_b.start()
-        self.assertFalse(b_done.wait(timeout=0.3))
-
-        raw = schedules._load_schedules_locked()
-        for entry in raw:
-            if entry["id"] == existing["id"]:
-                entry["name"] = "renamed by A"
-        schedules._save_schedules_locked(raw)
-        schedules._schedules_lock.release()
-
-        thread_b.join(timeout=5)
-        self.assertTrue(b_done.is_set())
-
-        names = {e["name"] for e in schedules.load_schedules()}
-        self.assertEqual(names, {"renamed by A", "new task"})
+    def test_crud_functions_never_call_the_public_wrappers_internally(self):
+        # AST-based, not substring matching: several of these functions'
+        # own docstrings mention "save_schedules()"/"load_schedules()" in
+        # prose (explaining the fix), which would false-positive a naive
+        # text search - only actual Call nodes count.
+        import ast
+        import inspect
+        for fn in (schedules.create_schedule, schedules.update_schedule,
+                   schedules.delete_schedule, schedules.add_history_entry):
+            tree = ast.parse(inspect.getsource(fn))
+            called_names = {
+                node.func.id for node in ast.walk(tree)
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+            }
+            self.assertNotIn("load_schedules", called_names,
+                              f"{fn.__name__} must call _load_schedules_locked(), "
+                              "not the public load_schedules()")
+            self.assertNotIn("save_schedules", called_names,
+                              f"{fn.__name__} must call _save_schedules_locked(), "
+                              "not the public save_schedules()")
+            with_lock_count = sum(
+                1 for node in ast.walk(tree)
+                if isinstance(node, ast.With) and any(
+                    isinstance(item.context_expr, ast.Name)
+                    and item.context_expr.id == "_schedules_lock"
+                    for item in node.items))
+            self.assertEqual(with_lock_count, 1,
+                              f"{fn.__name__} must acquire _schedules_lock exactly once")
 
 
 if __name__ == "__main__":
