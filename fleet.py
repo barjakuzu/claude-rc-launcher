@@ -36,6 +36,46 @@ USAGE_DAILY_MAX_DAYS = usage.DEFAULT_DAYS
 
 _last_prune_at = None
 
+# Task L5 (live bug): the account-limits endpoint describes the ACCOUNT,
+# not the machine. Before this, every device called it independently
+# from inside build_fleet() every poll -- three devices sharing one
+# account made three calls a minute for one number, on top of each
+# device's own Claude Code status line polling the same endpoint
+# independently. Only the fleet's elected single fetcher calls it now;
+# see is_limits_hub() and its use below.
+RC_FETCH_LIMITS_ENV = "RC_FETCH_LIMITS"
+_FETCH_LIMITS_OFF_VALUES = frozenset(("0", "false", "no", "off"))
+
+
+def is_limits_hub(env=None):
+    """Whether THIS device is elected to call limits.get_limits() at all
+    this poll (Task L5: "a device only calls the API when it is acting
+    as the hub"). The explicit, operator-visible signal is the
+    RC_FETCH_LIMITS environment variable (same convention as RC_ROLE in
+    config.py; documented in docs/DEVICES.md): unset, or anything other
+    than one of _FETCH_LIMITS_OFF_VALUES, means "fetch" -- which is
+    exactly today's behaviour, so the overwhelmingly common single-device
+    install needs zero new configuration and keeps working unchanged.
+    A multi-device fleet's operator sets RC_FETCH_LIMITS=0 in every
+    device's ~/.claude-rc/env EXCEPT the one they want to be the
+    account's single fetcher.
+
+    Deliberately NOT: (a) inferred from devices.json's own contents --
+    non-empty there says "I poll other devices", which is true of a
+    fleet's coordinating hub, but a lone single-device install (by far
+    the common case) has an empty devices.json too and must keep
+    fetching regardless, so devices.json alone cannot carry this
+    decision; (b) inferred from hostname -- the task brief for this fix
+    rules that out explicitly, since it is invisible to the operator and
+    fragile the moment a machine is renamed or cloned.
+
+    `env` is an injection seam for tests (defaults to os.environ) so
+    every branch here can be driven without mutating the real process
+    environment."""
+    env = os.environ if env is None else env
+    raw = (env.get(RC_FETCH_LIMITS_ENV) or "").strip().lower()
+    return raw not in _FETCH_LIMITS_OFF_VALUES
+
 
 def _events_root():
     return os.path.join(config.RC_HOME, "events")
@@ -281,31 +321,41 @@ def build_fleet(since=None, role=None, events_root=None, now_fn=time.time):
         usage_daily_by_project_full = []
         usage_meta = _failed_usage_meta(now)
 
-    # CONTRACT.md section 2/3: account-level rate limits and spend.
-    # limits.get_limits() is documented to never raise on its own (every
-    # failure inside it -- no credentials, network error, malformed
-    # response -- already comes back as an available=False dict), but
-    # this is wrapped anyway, same as sessions/events/usage above, so a
-    # future bug inside limits.py can never be the reason build_fleet
-    # itself raises. now_fn is pinned to this snapshot's own `now`, same
-    # pattern as the usage block above, so limits.fetched_at (on a fresh
-    # fetch) lines up with the rest of this payload's timestamps.
-    try:
-        limits_result = limits.get_limits(now_fn=lambda: now)
-        if not isinstance(limits_result, dict):
-            raise TypeError(
-                f"limits.get_limits returned {type(limits_result).__name__}, expected dict")
-    except Exception as e:
-        errors_raw = errors_raw + [("limits", e)]
-        # SECURITY (CONTRACT.md section 2): unlike every other error
-        # source above, `limits`' own exceptions must NEVER reach the
-        # errors list as str(e) -- not even under "full" role, further
-        # down -- because an exception raised this close to the OAuth
-        # token read/HTTPS call can embed the request (headers included)
-        # in its string form. unavailable_result() + type(e).__name__
-        # here is the same shape limits.get_limits() itself would have
-        # returned had this exception happened one frame further in.
-        limits_result = limits.unavailable_result(now, error=type(e).__name__)
+    # CONTRACT.md section 2/3 + Task L5: account-level rate limits and
+    # spend, fetched only when is_limits_hub() elects this device as the
+    # fleet's single fetcher for it -- see that function's docstring
+    # above. limits_result stays None (key omitted below, never sent as
+    # available=False) when this device is not the fetcher: absent means
+    # "not my job", available=False means "I tried and failed", and
+    # those are different facts a caller must not conflate.
+    #
+    # When this device IS the fetcher: limits.get_limits() is documented
+    # to never raise on its own (every failure inside it -- no
+    # credentials, network error, malformed response -- already comes
+    # back as an available=False dict), but this is wrapped anyway, same
+    # as sessions/events/usage above, so a future bug inside limits.py
+    # can never be the reason build_fleet itself raises. now_fn is
+    # pinned to this snapshot's own `now`, same pattern as the usage
+    # block above, so limits.fetched_at (on a fresh fetch) lines up with
+    # the rest of this payload's timestamps.
+    limits_result = None
+    if is_limits_hub():
+        try:
+            limits_result = limits.get_limits(now_fn=lambda: now)
+            if not isinstance(limits_result, dict):
+                raise TypeError(
+                    f"limits.get_limits returned {type(limits_result).__name__}, expected dict")
+        except Exception as e:
+            errors_raw = errors_raw + [("limits", e)]
+            # SECURITY (CONTRACT.md section 2): unlike every other error
+            # source above, `limits`' own exceptions must NEVER reach the
+            # errors list as str(e) -- not even under "full" role, further
+            # down -- because an exception raised this close to the OAuth
+            # token read/HTTPS call can embed the request (headers included)
+            # in its string form. unavailable_result() + type(e).__name__
+            # here is the same shape limits.get_limits() itself would have
+            # returned had this exception happened one frame further in.
+            limits_result = limits.unavailable_result(now, error=type(e).__name__)
 
     caps = compat.get_caps()
     salt = getattr(config, "RC_HASH_SALT", "") or os.environ.get("RC_HASH_SALT", "")
@@ -346,14 +396,18 @@ def build_fleet(since=None, role=None, events_root=None, now_fn=time.time):
         "generated_at": now,
         "usage_daily": usage_daily,
         "usage_meta": usage_meta,
-        # CONTRACT.md section 3: sent unchanged under EVERY role,
-        # including metadata -- "it describes the account, not the
-        # machine, and contains no project, path or identity data", so
-        # unlike sessions/events/usage_daily above it needs no
-        # role-gated reshaping.
-        "limits": limits_result,
         "errors": errors,
     }
+    # CONTRACT.md section 3: when present, sent unchanged under EVERY
+    # role, including metadata -- "it describes the account, not the
+    # machine, and contains no project, path or identity data", so
+    # unlike sessions/events/usage_daily above it needs no role-gated
+    # reshaping. Task L5: present at all only when is_limits_hub() elected
+    # this device to fetch (limits_result is not None) -- a non-fetching
+    # device's payload has no "limits" key under any role, matching
+    # fleetpoll._ingest's existing "absent means nothing to store" handling.
+    if limits_result is not None:
+        result["limits"] = limits_result
     # A project name is the cwd by another name, so under metadata role
     # it is dropped entirely (key absent), not merely reduced the way
     # usage/usage_daily are above: there is no aggregate-only shape of

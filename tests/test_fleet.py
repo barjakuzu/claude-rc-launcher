@@ -1,5 +1,6 @@
 import datetime
 import json
+import os
 import time
 import unittest
 from unittest.mock import patch
@@ -855,6 +856,144 @@ class BuildFleetLimitsTest(unittest.TestCase):
         self.assertFalse(result["limits"]["available"])
         self.assertEqual(result["limits"]["error"], "TypeError")
         self.assertEqual(result["errors"], ["limits: TypeError"])
+
+
+class IsLimitsHubTest(unittest.TestCase):
+    """Task L5: is_limits_hub() is the explicit, operator-visible signal
+    deciding whether THIS device calls the account limits endpoint at
+    all. `env` is always passed explicitly here -- never the real
+    os.environ -- so these tests can't be polluted by (or leak into) the
+    actual process environment."""
+
+    def test_unset_defaults_to_fetch(self):
+        self.assertTrue(fleet.is_limits_hub(env={}))
+
+    def test_explicit_off_values_disable_fetching(self):
+        for value in ("0", "false", "False", "NO", "off", "Off"):
+            self.assertFalse(
+                fleet.is_limits_hub(env={"RC_FETCH_LIMITS": value}),
+                f"{value!r} should disable fetching")
+
+    def test_any_other_value_still_fetches(self):
+        for value in ("1", "true", "yes", "on", "hub"):
+            self.assertTrue(
+                fleet.is_limits_hub(env={"RC_FETCH_LIMITS": value}),
+                f"{value!r} should not disable fetching")
+
+    def test_whitespace_around_off_value_is_tolerated(self):
+        self.assertFalse(fleet.is_limits_hub(env={"RC_FETCH_LIMITS": "  0  "}))
+
+
+class BuildFleetLimitsHubGatingTest(unittest.TestCase):
+    """Task L5: 'A device only calls the API when it is acting as the
+    hub' + 'A non-fetching device omits the limits key from its payload
+    entirely, rather than sending available: false.'"""
+
+    def setUp(self):
+        fleet._cache.clear()
+        fleet._last_prune_at = None
+
+    @patch("fleet.is_limits_hub")
+    @patch("fleet.limits.get_limits")
+    @patch("fleet.usage.rollup")
+    @patch("fleet.events.prune")
+    @patch("fleet.events.read_events")
+    @patch("fleet.sessions.list_rc_sessions")
+    @patch("fleet.compat.get_caps")
+    @patch("fleet.devices.get_local_name")
+    def test_non_hub_device_omits_limits_key_and_never_calls_get_limits(
+            self, get_name, get_caps, list_sess, read_ev, prune, rollup,
+            get_limits, is_hub):
+        get_name.return_value = "satellite"
+        get_caps.return_value = {}
+        list_sess.return_value = []
+        read_ev.return_value = ([], None)
+        rollup.return_value = _empty_rollup(5000.0)
+        is_hub.return_value = False
+
+        result = fleet.build_fleet(role="full", now_fn=lambda: 5000.0)
+
+        self.assertNotIn("limits", result)
+        get_limits.assert_not_called()
+
+    @patch("fleet.is_limits_hub")
+    @patch("fleet.limits.get_limits")
+    @patch("fleet.usage.rollup")
+    @patch("fleet.events.prune")
+    @patch("fleet.events.read_events")
+    @patch("fleet.sessions.list_rc_sessions")
+    @patch("fleet.compat.get_caps")
+    @patch("fleet.devices.get_local_name")
+    def test_non_hub_device_omits_limits_key_under_metadata_role_too(
+            self, get_name, get_caps, list_sess, read_ev, prune, rollup,
+            get_limits, is_hub):
+        get_name.return_value = "satellite"
+        get_caps.return_value = {}
+        list_sess.return_value = []
+        read_ev.return_value = ([], None)
+        rollup.return_value = _empty_rollup(5000.0)
+        is_hub.return_value = False
+
+        result = fleet.build_fleet(role="metadata", now_fn=lambda: 5000.0)
+
+        self.assertNotIn("limits", result)
+        get_limits.assert_not_called()
+
+    @patch("fleet.is_limits_hub")
+    @patch("fleet.limits.get_limits")
+    @patch("fleet.usage.rollup")
+    @patch("fleet.events.prune")
+    @patch("fleet.events.read_events")
+    @patch("fleet.sessions.list_rc_sessions")
+    @patch("fleet.compat.get_caps")
+    @patch("fleet.devices.get_local_name")
+    def test_hub_device_still_fetches_and_carries_limits_key(
+            self, get_name, get_caps, list_sess, read_ev, prune, rollup,
+            get_limits, is_hub):
+        get_name.return_value = "hub"
+        get_caps.return_value = {}
+        list_sess.return_value = []
+        read_ev.return_value = ([], None)
+        rollup.return_value = _empty_rollup(5000.0)
+        is_hub.return_value = True
+        available_limits = dict(_EMPTY_LIMITS, available=True, fetched_at=5000.0)
+        get_limits.return_value = available_limits
+
+        result = fleet.build_fleet(role="full", now_fn=lambda: 5000.0)
+
+        self.assertEqual(result["limits"], available_limits)
+        get_limits.assert_called_once()
+
+    @patch("fleet.limits.get_limits")
+    @patch("fleet.usage.rollup")
+    @patch("fleet.events.prune")
+    @patch("fleet.events.read_events")
+    @patch("fleet.sessions.list_rc_sessions")
+    @patch("fleet.compat.get_caps")
+    @patch("fleet.devices.get_local_name")
+    def test_default_env_still_fetches_zero_config(
+            self, get_name, get_caps, list_sess, read_ev, prune, rollup, get_limits):
+        # fleet.is_limits_hub is deliberately NOT patched here: with
+        # RC_FETCH_LIMITS unset in the real process environment (the
+        # normal case for every single-device install, and for CI),
+        # build_fleet must keep fetching exactly as it always has -- zero
+        # new configuration required. patch.dict restores whatever the
+        # real environment had afterwards; the pop only affects this
+        # block.
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("RC_FETCH_LIMITS", None)
+            get_name.return_value = "hub"
+            get_caps.return_value = {}
+            list_sess.return_value = []
+            read_ev.return_value = ([], None)
+            rollup.return_value = _empty_rollup(5000.0)
+            available_limits = dict(_EMPTY_LIMITS, available=True, fetched_at=5000.0)
+            get_limits.return_value = available_limits
+
+            result = fleet.build_fleet(role="full", now_fn=lambda: 5000.0)
+
+            self.assertEqual(result["limits"], available_limits)
+            get_limits.assert_called_once()
 
 
 if __name__ == "__main__":

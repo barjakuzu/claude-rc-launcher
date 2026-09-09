@@ -64,6 +64,34 @@ the *same* value, or a metadata device's sessions won't hash
 consistently between `/fleet`'s session list and its hook-derived event
 stream).
 
+## Account limits: RC_FETCH_LIMITS, the single fetcher
+
+The account limits endpoint (`GET /api/limits` on the hub) describes the
+Anthropic account, not the machine, so every device on the same account
+calling it independently is pure waste, and can rate limit the account.
+Only one device should ever call it. That device is decided by
+`RC_FETCH_LIMITS` in the device's environment (same file, same
+convention as `RC_ROLE` above), read by `fleet.is_limits_hub()`:
+
+- unset (default): this device fetches. Every existing single-device
+  install keeps working unchanged, with no new configuration.
+- `0` / `false` / `no` / `off` (case insensitive): this device never
+  calls the account limits endpoint at all. Its fleet payload omits the
+  `limits` key entirely rather than reporting `available: false`, and
+  its own `/api/limits` shows no reading of its own.
+
+To check which device is actually fetching, look at that device's own
+`GET /fleet` response: the fetcher's payload has a `limits` key, a
+non-fetching device's does not (the key is absent, not present with
+`available: false`).
+
+When you add a second (or third) device on the same account, set
+`RC_FETCH_LIMITS=0` on every device except the one you want to be the
+single fetcher. This is independent of `RC_ROLE` and of which device
+carries `devices.json`: nothing requires the fetcher to also be the
+device that polls the others, though in practice it usually is the same
+machine.
+
 ## Tailscale ACL note
 
 Devices should bind their listener to a Tailscale IP, not `0.0.0.0`
