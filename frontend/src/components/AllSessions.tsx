@@ -15,7 +15,7 @@ import { MobileHeader } from './MobileHeader';
 import { mobileActionBtn } from './mobileActionBtn';
 import { useFleet } from '../hooks/useFleet';
 import type { FleetDevice, FleetSession } from '../hooks/useFleet';
-import { api } from '../api';
+import { api, isFailureEnvelope } from '../api';
 import { formatRelativeTime } from '../relativeTime';
 import { PreviewModal } from './PreviewModal';
 import { fixedMenuPos } from './menuPos';
@@ -32,6 +32,7 @@ export function AllSessions({ onOpenDevice }: AllSessionsProps) {
   const [preview, setPreview] = useState<PreviewState | null>(null);
   const [rcUrls, setRcUrls] = useState<Record<string, string>>({});
   const [rcErrors, setRcErrors] = useState<Record<string, string>>({});
+  const [stopErrors, setStopErrors] = useState<Record<string, string>>({});
 
   const guard = async (key: string, fn: () => Promise<unknown>) => {
     if (pending[key]) return;
@@ -40,6 +41,39 @@ export function AllSessions({ onOpenDevice }: AllSessionsProps) {
       setPending((p) => ({ ...p, [key]: false }));
     }
   };
+
+  // Stop gets its own handler rather than guard() above: a stop that
+  // could not be performed (external session with a stale/dead pid, or
+  // one that failed the claude-process guard) must say why in the row,
+  // not disappear silently. That silent nothing is the actual bug this
+  // handler exists to fix (the user clicks Stop and nothing happens).
+  const handleStop = async (
+    key: string, deviceId: string, name: string,
+    opts?: { external: true; pid?: number },
+  ) => {
+    const pendingKey = `stop-${key}`;
+    if (pending[pendingKey]) return;
+    setPending((p) => ({ ...p, [pendingKey]: true }));
+    setStopErrors((e) => { const { [key]: _drop, ...rest } = e; return rest; });
+    try {
+      const result = await api.stop(deviceId, name, opts);
+      if (isFailureEnvelope(result)) {
+        setStopErrors((e) => ({ ...e, [key]: result.message || 'Failed to stop session' }));
+      }
+    } catch (err) {
+      setStopErrors((e) => ({ ...e, [key]: err instanceof Error ? err.message : 'Failed to stop session' }));
+    } finally {
+      setPending((p) => ({ ...p, [pendingKey]: false }));
+    }
+  };
+
+  // Auto-clear a stop error a few seconds after it lands, same as rcErrors.
+  useEffect(() => {
+    const keys = Object.keys(stopErrors);
+    if (keys.length === 0) return;
+    const t = setTimeout(() => setStopErrors({}), 6000);
+    return () => clearTimeout(t);
+  }, [stopErrors]);
 
   const handleEnableRc = async (key: string, deviceId: string, tmuxSessionName: string) => {
     if (pending[`rc-${key}`]) return;
@@ -305,7 +339,7 @@ export function AllSessions({ onOpenDevice }: AllSessionsProps) {
                   <button
                     style={{ background: RT.panel, border: `1px solid ${RT.border}`, borderRadius: 7, width: 44, height: 44, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', marginLeft: 'auto' }}
                     disabled={!!pending[`stop-${key}`] || offline}
-                    onClick={() => guard(`stop-${key}`, () => api.stop(s.device_id, name, isExternal ? { external: true, pid: s.pid ?? undefined } : undefined))}
+                    onClick={() => handleStop(key, s.device_id, name, isExternal ? { external: true, pid: s.pid ?? undefined } : undefined)}
                     title="Stop this session"
                   >
                     <Icons.stop size={12} stroke={RT.red} />
@@ -315,6 +349,11 @@ export function AllSessions({ onOpenDevice }: AllSessionsProps) {
               {rcErrors[key] && (
                 <div style={{ fontFamily: FONT_MONO, fontSize: 10.5, color: RT.red }}>
                   {rcErrors[key]}
+                </div>
+              )}
+              {stopErrors[key] && (
+                <div style={{ fontFamily: FONT_MONO, fontSize: 10.5, color: RT.red }}>
+                  Stop failed: {stopErrors[key]}
                 </div>
               )}
             </div>

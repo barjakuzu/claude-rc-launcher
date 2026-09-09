@@ -5,7 +5,7 @@ import { Icons, CapBar, Dot, ExternalBadge } from './primitives';
 import { V5IconButton } from './V5IconButton';
 import { fixedMenuPos } from './menuPos';
 import type { Session } from '../types';
-import { api } from '../api';
+import { api, isFailureEnvelope } from '../api';
 
 export interface SessionRowProps {
   s: Session;
@@ -52,6 +52,7 @@ function V5StatusPill({ status }: { status: string }) {
 
 export function SessionRow({ s, hue, deviceId, mobile = false, onChanged, onPreview }: SessionRowProps) {
   const [pending, setPending] = useState(false);
+  const [stopError, setStopError] = useState<string | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
   const [menuPos, setMenuPos] = useState<React.CSSProperties | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -156,16 +157,36 @@ export function SessionRow({ s, hue, deviceId, mobile = false, onChanged, onPrev
     return () => clearTimeout(t);
   }, [rcError]);
 
+  useEffect(() => {
+    if (!stopError) return;
+    const t = setTimeout(() => setStopError(null), 6000);
+    return () => clearTimeout(t);
+  }, [stopError]);
+
   const handleOpenRcUrl = () => {
     if (rcUrl) window.open(rcUrl, '_blank', 'noopener,noreferrer');
   };
 
   const handleStop = async () => {
     setPending(true);
+    setStopError(null);
     try {
-      await api.stop(deviceId, s.name, isExternal ? { external: true, pid: s.pid } : undefined);
-    } catch {/* ignore */}
-    finally { setPending(false); onChanged(); }
+      const result = await api.stop(
+        deviceId, s.name, isExternal ? { external: true, pid: s.pid } : undefined);
+      // A stop that could not be performed (e.g. an external session with
+      // no pid to signal, a stale/dead pid, or a pid that failed the
+      // claude-process guard) must say so. A silent no-op here is
+      // exactly the bug this row exists to fix: the user clicks Stop and
+      // nothing visibly happens.
+      if (isFailureEnvelope(result)) {
+        setStopError(result.message || 'Failed to stop session');
+      }
+    } catch (err) {
+      setStopError(err instanceof Error ? err.message : 'Failed to stop session');
+    } finally {
+      setPending(false);
+      onChanged();
+    }
   };
 
   const handleUnstick = async () => {
@@ -375,6 +396,14 @@ export function SessionRow({ s, hue, deviceId, mobile = false, onChanged, onPrev
         padding: '2px 4px', textAlign: mobile ? 'left' : 'right',
       }}>
         {rcError}
+      </div>
+    )}
+    {stopError && (
+      <div style={{
+        fontFamily: FONT_MONO, fontSize: 11, color: RT.red,
+        padding: '2px 4px', textAlign: mobile ? 'left' : 'right',
+      }}>
+        Stop failed: {stopError}
       </div>
     )}
     </div>
