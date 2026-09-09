@@ -32,6 +32,7 @@ export function DeviceDetail({ device, cards, tab, setTab, onClose, layout, usag
   const {
     sessions, scheduled,
     hasLoadedSessions, hasLoadedScheduled,
+    sessionsUnreachable,
     reloadSessions, reloadSchedules,
   } = usePanelData(device.id, tab);
 
@@ -90,8 +91,17 @@ export function DeviceDetail({ device, cards, tab, setTab, onClose, layout, usag
             {sessions.length === 0 ? (
               <V5Empty text={
                 !hasLoadedSessions ? 'Loading sessions…'
-                : device.online ? `No active sessions on ${device.name}. Launch one above.`
-                : 'Device offline.'
+                // Round 4: this used to defer to device.online, from the
+                // separate, staler /rc/overview poll. usePanelData's own
+                // direct /rc/sessions probe is fresher and more
+                // authoritative for this exact question, and a successful
+                // fetch (hasLoadedSessions true, sessionsUnreachable
+                // false) already proves the device answered, so it wins
+                // outright rather than being cross-checked against a
+                // second opinion that can lag behind it in either
+                // direction.
+                : sessionsUnreachable ? 'Device offline.'
+                : `No active sessions on ${device.name}. Launch one above.`
               } />
             ) : (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>

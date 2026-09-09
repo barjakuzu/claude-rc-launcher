@@ -11,6 +11,20 @@ interface BrowseResult {
   dirs: string[];
 }
 
+// server.py's own /browse handler answers a bad path (outside the
+// allowed roots, not a directory, unreadable) with its own 403/400 error
+// body, e.g. {"error": "Access denied"} -- a real response from the
+// device, relayed through as-is, not the synthetic "device unreachable"
+// 502 api.ts's req() already distinguishes. Without this guard that body
+// got stored into `result` as if it were a real BrowseResult, and
+// result.dirs.length below threw on the missing `dirs` field: reachable
+// by simply typing a bogus path into the launcher combobox and clicking
+// Browse, and with only the root ErrorBoundary between that typo and a
+// blanked app.
+function isBrowseResult(v: unknown): v is BrowseResult {
+  return !!v && typeof v === 'object' && Array.isArray((v as BrowseResult).dirs);
+}
+
 export interface DirBrowserProps {
   deviceId: string;
   initialPath: string;
@@ -31,8 +45,16 @@ export function DirBrowser({ deviceId, initialPath, onSelect, onClose }: DirBrow
     setLoading(true);
     setError(null);
     try {
-      const data = await api.browse(deviceId, path) as BrowseResult;
+      const data: unknown = await api.browse(deviceId, path);
       if (!mounted.current) return;
+      if (!isBrowseResult(data)) {
+        const message = (data && typeof data === 'object'
+          && typeof (data as { error?: unknown }).error === 'string')
+          ? (data as { error: string }).error
+          : 'Failed to list directory.';
+        setError(message);
+        return;
+      }
       setResult(data);
       setCurrentPath(data.path);
     } catch {

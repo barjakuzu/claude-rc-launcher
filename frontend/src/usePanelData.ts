@@ -1,5 +1,5 @@
 // usePanelData.ts — shared data-fetching hook for device detail views.
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { api, DeviceUnreachableError } from './api';
 import type { Session, Schedule } from './types';
 import type { PanelTab } from './components/PanelTabs';
@@ -18,6 +18,29 @@ export function usePanelData(deviceId: string, tab: PanelTab) {
   // the initial [] state, before the first fetch had a chance to resolve.
   const [hasLoadedSessions, setHasLoadedSessions] = useState(false);
   const [hasLoadedScheduled, setHasLoadedScheduled] = useState(false);
+  // Round 4: confirmed by this hook's own direct /rc/sessions probe
+  // (polls every 4s), which is fresher and more authoritative for "is
+  // this specific device reachable" than the separate /rc/overview poll
+  // (every 5s) DeviceDetail.tsx used to defer to for its "Device
+  // offline." message. Once this hook already knows, from its own most
+  // recent fetch, that the device cannot be reached, that must win over
+  // a staler second opinion, not merely coexist with it -- exposed so
+  // DeviceDetail.tsx can render "Device offline." from this signal
+  // directly. Reset to false by a successful fetch or a device switch.
+  const [sessionsUnreachable, setSessionsUnreachable] = useState(false);
+
+  // Round 4: the device this hook is currently meant to be showing,
+  // checked by every in-flight request before it commits a result to
+  // state. fetchSessions/fetchScheduled each close over the deviceId they
+  // were created for (useCallback's own dep array), but neither the 4s
+  // poll interval nor a manual reload() awaits its own promise before the
+  // component might switch devices out from under it: a request started
+  // for device A that is still in flight when the user switches to
+  // device B must not land afterward and overwrite device B's
+  // already-correct state with device A's data under device B's name.
+  // Wrong data attributed to the wrong machine is worse than no data on
+  // a hub whose entire job is saying which machine is doing what.
+  const activeDeviceRef = useRef(deviceId);
 
   // Switching to a different device (DeviceRail, or opening one device
   // detail straight from another without closing) keeps this hook
@@ -26,42 +49,50 @@ export function usePanelData(deviceId: string, tab: PanelTab) {
   // rendering - now confidently mislabeled as the new device's confirmed
   // state - until the new fetches resolve.
   useEffect(() => {
+    activeDeviceRef.current = deviceId;
     setSessions([]);
     setScheduled([]);
     setHasLoadedSessions(false);
     setHasLoadedScheduled(false);
+    setSessionsUnreachable(false);
   }, [deviceId]);
 
   const fetchSessions = useCallback(async () => {
     try {
       const data = await api.sessions(deviceId);
+      if (activeDeviceRef.current !== deviceId) return; // stale: device switched mid-flight
       const arr: Session[] = Array.isArray(data) ? data : (data?.sessions ?? []);
       setSessions(arr);
       setHasLoadedSessions(true);
+      setSessionsUnreachable(false);
     } catch (err) {
+      if (activeDeviceRef.current !== deviceId) return;
       if (err instanceof DeviceUnreachableError) {
         // A confirmed "the hub cannot reach this device" IS an answer,
         // distinct from "we haven't heard back yet" -- unlike a generic
         // network failure (below), this must flip hasLoaded so
-        // DeviceDetail.tsx's device.online branch (from the separate
-        // overview poll) becomes reachable instead of hanging on
-        // "Loading sessions…" forever. Round 3 fixed the over-correction
-        // from round 2's fifth-door fix, which had every error respond
-        // the same way this one still does for anything else: keep
-        // whatever was last known, don't claim we've loaded.
+        // DeviceDetail.tsx's offline branch becomes reachable instead of
+        // hanging on "Loading sessions…" forever, and sessionsUnreachable
+        // so that branch renders "Device offline." from this fetch's own
+        // fresher answer rather than deferring to a staler one.
         setSessions([]);
         setHasLoadedSessions(true);
+        setSessionsUnreachable(true);
       }
+      // Any other failure: keep whatever was last known, don't claim
+      // we've loaded and don't claim we've confirmed unreachable either.
     }
   }, [deviceId]);
 
   const fetchScheduled = useCallback(async () => {
     try {
       const data = await api.schedules(deviceId);
+      if (activeDeviceRef.current !== deviceId) return;
       const arr: Schedule[] = Array.isArray(data) ? data : (data?.schedules ?? []);
       setScheduled(arr);
       setHasLoadedScheduled(true);
     } catch (err) {
+      if (activeDeviceRef.current !== deviceId) return;
       if (err instanceof DeviceUnreachableError) {
         setScheduled([]);
         setHasLoadedScheduled(true);
@@ -90,6 +121,7 @@ export function usePanelData(deviceId: string, tab: PanelTab) {
   return {
     sessions, scheduled,
     hasLoadedSessions, hasLoadedScheduled,
+    sessionsUnreachable,
     reloadSessions: fetchSessions, reloadSchedules: fetchScheduled,
   };
 }
