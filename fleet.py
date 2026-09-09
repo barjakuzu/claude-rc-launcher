@@ -45,20 +45,84 @@ _last_prune_at = None
 # see is_limits_hub() and its use below.
 #
 # Fix round 1 (coordinator): the first version of this function defaulted
-# to "fetch" for every device, which meant a multi-device fleet only
-# stopped duplicate-fetching once an operator manually set
-# RC_FETCH_LIMITS=0 on every satellite -- a workaround the user has to
-# deploy, not a fix for the reported bug. The default is now auto-detected
-# from devices.json (see below): a device that has other devices
-# configured (the fleet's coordinating hub) fetches; a device that does
-# not (a satellite, or a genuinely standalone install) does not, unless
-# RC_FETCH_LIMITS overrides it explicitly in either direction.
+# to "fetch" for every device and used devices.json non-emptiness to
+# detect the hub. That correctly fixed the reported multi-device fleet,
+# but devices.json alone cannot tell a satellite (empty devices.json,
+# but polled by someone else's hub) apart from a genuinely standalone
+# single-device install (empty devices.json, no fleet at all) -- both
+# look identical from a device's own local state, and defaulting the
+# ambiguous case to "do not fetch" broke the common, zero-config
+# single-device install to fix the less common multi-device one.
+#
+# Fix round 2 (coordinator): replaced the devices.json inference with a
+# real signal instead of a better guess -- the hub already polls every
+# device on a schedule, so have it say so directly. Every outbound poll
+# from fleetpoll.py's _default_http_get now carries HUB_POLL_HEADER; a
+# device that receives it on its /fleet route (server.py) records the
+# time via note_hub_poll() below. is_limits_hub() then treats "polled by
+# a hub within HUB_POLL_STALE_SECONDS" as authoritative -- not an
+# inference from credentials or remote addresses (both rejected in round
+# 1: unreliable, and this product's own PWA/mobile remote-access feature
+# specifically defeats "reached from a non-loopback address" as a
+# satellite signal), but a positive statement from the only party that
+# actually knows the answer. The default is inverted from round 1: fetch
+# UNLESS a hub has said otherwise, so a standalone install (nobody ever
+# polls it) needs zero configuration again, and a satellite stops within
+# one poll cycle of its hub reaching it, also with zero configuration.
 RC_FETCH_LIMITS_ENV = "RC_FETCH_LIMITS"
 _FETCH_LIMITS_ON_VALUES = frozenset(("1", "true", "yes", "on"))
 _FETCH_LIMITS_OFF_VALUES = frozenset(("0", "false", "no", "off"))
 
+# Sent on every outbound poll fleetpoll.py's _default_http_get makes
+# (see there): marks the request as coming from a hub polling this
+# device as part of a fleet, as opposed to a browser, a health check, or
+# any other caller of the same authenticated /fleet route. The value
+# carries no information beyond its presence -- no device identity, no
+# credential -- so there is nothing here for a log line or an error to
+# leak even by accident.
+HUB_POLL_HEADER = "X-RC-Hub-Poll"
 
-def is_limits_hub(env=None, has_other_devices=None):
+# How long a single hub-poll marker is trusted before this device falls
+# back to fetching on its own. Generous relative to FleetPoller's default
+# 30s poll interval (fleetpoll.py) so a hub that is briefly down or
+# restarting does not make every satellite it was polling start fetching
+# within one missed cycle -- several satellites all resuming duplicate
+# fetches at once over a short hub outage is exactly the failure this
+# whole feature exists to avoid. At 10x the default interval, a hub has
+# to be unreachable for a full 5 minutes before a satellite reverts to
+# fetching on its own; it reverts to not-fetching again automatically
+# within one poll cycle of the hub coming back.
+HUB_POLL_STALE_SECONDS = 300
+
+# Advisory only, not behind a lock: the worst case of a race between two
+# concurrent /fleet requests updating this is one poll cycle's worth of
+# imprecision in is_limits_hub()'s staleness check (an extra fetch, or
+# one skipped a poll early), never a correctness or security issue --
+# nothing sensitive is gated on the exact value, only whether this
+# device independently fetches its own account's usage percentages.
+_last_hub_poll_at = None
+
+
+def note_hub_poll(now=None, now_fn=time.time):
+    """Record that a hub just polled THIS device -- called from
+    server.py's /fleet route when HUB_POLL_HEADER is present on the
+    request, nowhere else. `now`/`now_fn` are injection seams for
+    tests; real callers pass neither and get time.time()."""
+    global _last_hub_poll_at
+    _last_hub_poll_at = now if now is not None else now_fn()
+
+
+def _polled_by_hub_recently(now_fn=time.time, last_poll_at=None):
+    """True iff note_hub_poll() (or the `last_poll_at` override, for
+    tests) was called within the last HUB_POLL_STALE_SECONDS."""
+    if last_poll_at is None:
+        last_poll_at = _last_hub_poll_at
+    if last_poll_at is None:
+        return False
+    return (now_fn() - last_poll_at) < HUB_POLL_STALE_SECONDS
+
+
+def is_limits_hub(env=None, polled_by_hub_recently=None):
     """Whether THIS device is elected to call limits.get_limits() at all
     this poll (Task L5: "a device only calls the API when it is acting
     as the hub").
@@ -68,46 +132,36 @@ def is_limits_hub(env=None, has_other_devices=None):
        _FETCH_LIMITS_ON_VALUES/_FETCH_LIMITS_OFF_VALUES, wins outright --
        an explicit, operator-visible override in either direction (same
        convention as RC_ROLE in config.py; documented in docs/DEVICES.md).
-       An unset or unrecognised value falls through to auto-detect below.
-    2. Otherwise: fetch iff this device has other devices configured to
-       poll (devices.json non-empty, `devices.load_devices()`) -- the
-       fleet's coordinating hub, by construction, always has this and
-       every satellite, by construction, never does (docs/DEVICES.md:
-       "On the hub, add an entry to ~/.claude-rc/devices.json"). This
-       needs no new state and nothing for an operator to set: adding a
-       second device to a fleet already means editing devices.json on the
-       hub, and that same edit is now also what elects it as the fetcher.
+       An unset or unrecognised value falls through to the signal below.
+    2. Otherwise: fetch UNLESS a hub has told this device it is a
+       satellite recently (_polled_by_hub_recently() above, fix round 2).
+       This is the safe default direction: absent any signal at all (a
+       standalone install nobody ever polls, or a satellite whose hub
+       hasn't reached it yet -- see the rollout note below), this device
+       fetches, exactly as it always did before Task L5.
 
-    KNOWN LIMITATION, read before changing the default again: a
-    genuinely standalone single-device install (never configured any
-    other device) and a satellite device in someone else's fleet are
-    BOTH "has other devices configured == False" from this device's own
-    local state -- devices.json alone cannot tell them apart, since a
-    satellite's own devices.json is empty by design, same as a solo
-    install's. This function's default therefore does NOT fetch for
-    either case. A standalone install that wants the old always-fetch
-    behaviour back sets RC_FETCH_LIMITS=1 explicitly. Deliberately NOT
-    inferred from hostname (the task brief for this fix rules that out:
-    invisible to the operator, fragile the moment a machine is renamed or
-    cloned) and deliberately NOT inferred from whether this device has
-    ever answered a remote /fleet request (this product's own PWA/mobile
-    remote-access feature means a genuinely standalone device is
-    routinely reached from a non-loopback address by its own owner, so
-    "polled remotely" is not evidence of being someone else's satellite
-    here).
+    Rollout: a device running this code that is NOT yet reached by an
+    upgraded hub (the hub itself not yet upgraded, or simply hasn't
+    polled yet) keeps fetching -- the 429 this task fixes persists a
+    little longer in that window, which is the right trade against a
+    standalone install silently losing the feature. The moment its hub
+    (also upgraded) polls it once, it stops within HUB_POLL_STALE_SECONDS
+    of that poll going stale should the hub then disappear, and resumes
+    automatically if the hub keeps polling.
 
-    `env`/`has_other_devices` are injection seams for tests (default to
-    os.environ / devices.load_devices()) so every branch can be driven
-    without touching the real environment or a real devices.json."""
+    `env`/`polled_by_hub_recently` are injection seams for tests (default
+    to os.environ / _polled_by_hub_recently()) so every branch can be
+    driven without touching the real environment or the real module-level
+    poll-marker state."""
     env = os.environ if env is None else env
     raw = (env.get(RC_FETCH_LIMITS_ENV) or "").strip().lower()
     if raw in _FETCH_LIMITS_ON_VALUES:
         return True
     if raw in _FETCH_LIMITS_OFF_VALUES:
         return False
-    if has_other_devices is None:
-        has_other_devices = bool(devices.load_devices())
-    return has_other_devices
+    if polled_by_hub_recently is None:
+        polled_by_hub_recently = _polled_by_hub_recently()
+    return not polled_by_hub_recently
 
 
 def _events_root():
@@ -362,6 +416,14 @@ def build_fleet(since=None, role=None, events_root=None, now_fn=time.time):
     # "not my job", available=False means "I tried and failed", and
     # those are different facts a caller must not conflate.
     #
+    # polled_by_hub_recently is computed against THIS snapshot's own
+    # `now` (fix round 2), not is_limits_hub()'s own now_fn=time.time
+    # default, same reasoning as usage/limits.get_limits's now_fn just
+    # below: a caller driving build_fleet() with an injected clock (every
+    # test in this module, and any future one) gets a staleness check
+    # that actually respects it, rather than one silently falling back to
+    # the real wall clock underneath an otherwise fully-deterministic call.
+    #
     # When this device IS the fetcher: limits.get_limits() is documented
     # to never raise on its own (every failure inside it -- no
     # credentials, network error, malformed response -- already comes
@@ -372,7 +434,7 @@ def build_fleet(since=None, role=None, events_root=None, now_fn=time.time):
     # block above, so limits.fetched_at (on a fresh fetch) lines up with
     # the rest of this payload's timestamps.
     limits_result = None
-    if is_limits_hub():
+    if is_limits_hub(polled_by_hub_recently=_polled_by_hub_recently(now_fn=lambda: now)):
         try:
             limits_result = limits.get_limits(now_fn=lambda: now)
             if not isinstance(limits_result, dict):

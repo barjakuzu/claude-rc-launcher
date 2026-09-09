@@ -7,6 +7,7 @@ import unittest
 import urllib.error
 from unittest.mock import patch, MagicMock
 
+import fleet
 import fleetpoll
 import store
 
@@ -306,6 +307,68 @@ class IngestFailureDoesNotBackOffTest(unittest.TestCase):
             poller.poll_once()  # must not raise
         self.assertEqual(poller._backoff.get("dev1"), None)
         self.assertEqual(poller._next_try_at.get("dev1"), None)
+
+
+class HubPollHeaderTest(unittest.TestCase):
+    """Task L5 fix round 2: every request _default_http_get makes IS a
+    hub polling a device, so it must always carry fleet.HUB_POLL_HEADER
+    -- the receiving device's own fleet.is_limits_hub() depends on it to
+    stop fetching without any operator configuration."""
+
+    class _FakeResponse:
+        def __init__(self, body):
+            self._body = body
+
+        def read(self, n=-1):
+            return self._body[:n] if n and n > 0 else self._body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def _header_value(self, req):
+        # urllib.request.Request stores whatever add_header() was given
+        # under name.capitalize() (a quirk of the stdlib, not of this
+        # code) -- looked up case-insensitively here since HTTP header
+        # names are case-insensitive on the wire regardless.
+        for key, value in req.headers.items():
+            if key.lower() == fleet.HUB_POLL_HEADER.lower():
+                return value
+        return None
+
+    def test_marks_the_request_as_a_hub_poll(self):
+        import json as json_mod
+        body = json_mod.dumps({"ok": True}).encode()
+        captured = {}
+
+        def fake_open(req, timeout=None):
+            captured["req"] = req
+            return self._FakeResponse(body)
+
+        with patch("fleetpoll.noredirect.NO_REDIRECT_OPENER.open", side_effect=fake_open):
+            fleetpoll._default_http_get("http://example.com", "/rc/fleet")
+
+        self.assertEqual(self._header_value(captured["req"]), "1")
+
+    def test_marks_the_request_even_with_no_auth_credentials(self):
+        # The header is unconditional -- unlike Authorization, it is not
+        # gated on auth_user/auth_pass being set (a device with auth
+        # disabled must still learn it is being polled).
+        import json as json_mod
+        body = json_mod.dumps({"ok": True}).encode()
+        captured = {}
+
+        def fake_open(req, timeout=None):
+            captured["req"] = req
+            return self._FakeResponse(body)
+
+        with patch("fleetpoll.noredirect.NO_REDIRECT_OPENER.open", side_effect=fake_open):
+            fleetpoll._default_http_get("http://example.com", "/rc/sessions",
+                                         auth_user="", auth_pass="")
+
+        self.assertEqual(self._header_value(captured["req"]), "1")
 
 
 class MaxResponseSizeTest(unittest.TestCase):

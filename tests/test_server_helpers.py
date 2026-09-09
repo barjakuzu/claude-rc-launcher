@@ -1519,6 +1519,59 @@ class _ApiRouteFixture(unittest.TestCase):
         return captured["data"], captured.get("code", 200)
 
 
+class FleetRouteHubPollMarkerTest(_ApiRouteFixture):
+    """Task L5 fix round 2: GET /fleet records a hub poll when
+    fleet.HUB_POLL_HEADER is present on the request, so a satellite's
+    own fleet.is_limits_hub() can stop fetching without any operator
+    configuration. fleet.build_fleet() itself is mocked out here -- this
+    route's own header handling is what's under test, not build_fleet's
+    behavior (covered in tests/test_fleet.py)."""
+
+    def _hit_fleet_route(self, headers):
+        h = self._make_handler("/fleet")
+        h.headers = headers
+        captured = {}
+
+        def fake_json(data, code=200, _captured=captured):
+            _captured["data"] = data
+            _captured["code"] = code
+
+        h._json = fake_json
+        with mock.patch.object(server, "_check_auth", return_value=True):
+            h.do_GET()
+        return captured
+
+    @mock.patch("server.fleet.note_hub_poll")
+    @mock.patch("server.fleet.build_fleet", return_value={"device_name": "x"})
+    def test_header_present_records_the_poll(self, build_fleet, note_hub_poll):
+        self._hit_fleet_route({server.fleet.HUB_POLL_HEADER: "1"})
+        note_hub_poll.assert_called_once()
+
+    @mock.patch("server.fleet.note_hub_poll")
+    @mock.patch("server.fleet.build_fleet", return_value={"device_name": "x"})
+    def test_header_absent_does_not_record_a_poll(self, build_fleet, note_hub_poll):
+        self._hit_fleet_route({})
+        note_hub_poll.assert_not_called()
+
+    @mock.patch("server.fleet.note_hub_poll")
+    @mock.patch("server.fleet.build_fleet", return_value={"device_name": "x"})
+    def test_rc_fleet_alias_also_records_the_poll(self, build_fleet, note_hub_poll):
+        # /rc/fleet is the same route after the "/rc" prefix is stripped
+        # earlier in do_GET -- fleetpoll.py always polls this path, never
+        # bare /fleet, so this is the one that matters in production.
+        h = self._make_handler("/rc/fleet")
+        h.headers = {server.fleet.HUB_POLL_HEADER: "1"}
+        captured = {}
+
+        def fake_json(data, code=200, _captured=captured):
+            _captured["data"] = data
+
+        h._json = fake_json
+        with mock.patch.object(server, "_check_auth", return_value=True):
+            h.do_GET()
+        note_hub_poll.assert_called_once()
+
+
 class ApiRouteQueryStringToleranceTest(_ApiRouteFixture):
     """Regression test: the hub's exact-match GET routes must match on the
     query-stripped path, not on self.path verbatim. A request carrying a

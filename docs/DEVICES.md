@@ -71,28 +71,32 @@ Anthropic account, not the machine, so every device on the same account
 calling it independently is pure waste, and can rate limit the account.
 Only one device should ever call it, decided by `fleet.is_limits_hub()`:
 
-- **Auto-detected by default** (`RC_FETCH_LIMITS` unset): a device
-  fetches if it has other devices configured to poll, i.e. its own
-  `devices.json` is non-empty. That is exactly the fleet's coordinating
-  hub, since `devices.json` is edited on the hub when you add a device
-  (see above) and never on the satellite being added. No configuration
-  is needed on the hub side of a multi-device fleet: adding the second
-  device already elects the hub as the fetcher.
-- A device with no other devices configured (an empty or missing
-  `devices.json`) does not fetch by default. This covers a satellite in
-  someone else's fleet, which is the intended fix. It also, unavoidably,
-  covers a genuinely standalone single-device install: from a device's
-  own local state, "I am someone's satellite" and "I have no fleet at
-  all" look identical (both have an empty `devices.json`), and there is
-  no reliable way to tell them apart without asking the operator. A
-  standalone install that wants limits reporting sets `RC_FETCH_LIMITS=1`
-  explicitly (see below) to restore it.
+- **The hub tells every device it polls that it is a satellite.** Every
+  request `fleetpoll.py` makes to a device carries a marker header
+  (`fleet.HUB_POLL_HEADER`). A device that receives it on its `GET
+  /fleet` route remembers when, and treats "polled by a hub within the
+  last `fleet.HUB_POLL_STALE_SECONDS` (5 minutes)" as authoritative: it
+  is a satellite, so it stops fetching, with no operator configuration
+  on either side.
+- **Absent that marker, a device fetches.** This is the default:
+  standalone single-device install (nobody ever polls it) keeps fetching
+  forever, zero configuration, no regression. A satellite starts
+  fetching the moment it is upgraded, and stops again within one poll
+  cycle of its (also upgraded) hub reaching it -- during a rollout where
+  the hub isn't upgraded yet, a satellite keeps fetching a little longer
+  rather than a standalone install silently losing the feature, which is
+  the safer direction to err in. If a hub goes quiet (down, or the
+  operator removed this device from `devices.json`), the marker goes
+  stale after 5 minutes and the device resumes fetching on its own
+  rather than staying silent forever; the window is generous enough
+  (10x the default 30s poll interval) that a brief hub outage does not
+  make every satellite it was polling start fetching at once.
 - `RC_FETCH_LIMITS` in the device's environment (same file, same
-  convention as `RC_ROLE` above) overrides the auto-detect outright in
-  either direction: `1` / `true` / `yes` / `on` forces fetching on, `0` /
-  `false` / `no` / `off` forces it off, both regardless of `devices.json`
-  (case insensitive). Unset, or any other value, falls back to
-  auto-detect.
+  convention as `RC_ROLE` above) overrides this outright in either
+  direction: `1` / `true` / `yes` / `on` forces fetching on, `0` /
+  `false` / `no` / `off` forces it off, both regardless of whether a hub
+  has polled this device (case insensitive). Unset, or any other value,
+  falls back to the marker.
 
 A non-fetching device omits the `limits` key entirely from its fleet
 payload rather than reporting `available: false`. To check which device
@@ -100,9 +104,10 @@ is actually fetching, look at that device's own `GET /fleet` response:
 the fetcher's payload has a `limits` key, a non-fetching device's does
 not (the key is absent, not present with `available: false`).
 
-This is independent of `RC_ROLE` and of which device carries
-`devices.json`: nothing requires the fetcher to also be the device that
-polls the others, though in practice it usually is the same machine.
+This is independent of `RC_ROLE`: nothing requires the fetcher to also
+be the device that polls the others, though in practice it is the same
+machine, since only a device that polls others (the hub) ever sends the
+marker in the first place.
 
 ## Tailscale ACL note
 
