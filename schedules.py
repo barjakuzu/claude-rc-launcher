@@ -325,13 +325,30 @@ def update_schedule(schedule_id, updates):
     schedule ends up with a non-null trigger (whether this call set one
     or it already had one), `cron` is forced to null so cron and trigger
     can never both be live for the same task, even if a caller's payload
-    included a stale non-null cron alongside a new trigger."""
+    included a stale non-null cron alongside a new trigger.
+
+    Fix round 2 (Critical 2, task-l3-findings-r2.md): every
+    disabled -> enabled transition for a limit_reset task clears
+    last_seen_resets_at back to None, REGARDLESS of what else this call
+    changes. The marker is only ever kept current by scheduler ticks
+    while a task is enabled; a disabled task's marker can go stale in
+    ways no tick ever gets a chance to correct before this call runs -
+    a hub restart that spanned a reset, re-enabled in the window before
+    the first tick, or limits staying unavailable the whole time the
+    task was disabled, re-enabled before they recover. Either way,
+    enabling the task itself must never be what causes it to fire.
+    Reusing the existing "brand new task" guarantee (a None marker
+    always seeds silently on the next observation and only fires on the
+    reset AFTER that - see scheduler.py's _limit_reset_decision) closes
+    both paths at the transition, without needing a live limits fetch
+    synchronized with this call."""
     allowed = {"name", "cron", "prompt", "instructions_file", "workdir",
                "mode", "model", "concurrency", "enabled", "last_run", "history",
                "trigger"}
     schedules = load_schedules()
     for i, s in enumerate(schedules):
         if s.get("id") == schedule_id:
+            was_enabled = s.get("enabled", False)
             for k, v in updates.items():
                 if k not in allowed:
                     continue
@@ -341,6 +358,12 @@ def update_schedule(schedule_id, updates):
                     s[k] = v
             if isinstance(s.get("trigger"), dict):
                 s["cron"] = None
+            trigger = s.get("trigger")
+            if (not was_enabled and s.get("enabled", False)
+                    and isinstance(trigger, dict) and trigger.get("kind") == "limit_reset"):
+                trigger = dict(trigger)
+                trigger["last_seen_resets_at"] = None
+                s["trigger"] = trigger
             save_schedules(schedules)
             return s
     return None

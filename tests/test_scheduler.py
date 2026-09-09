@@ -938,9 +938,11 @@ class CheckLimitResetSchedulesTest(unittest.TestCase):
         scheduler._check_limit_reset_schedules(
             [s], now1, self._view("2026-01-02T00:00:00Z"))
         self.assertEqual(self.fired, [])
-        # Re-enabling is a purely administrative action - the SAME
-        # resets_at is still current, so the very next tick must not
-        # fire just because the task was switched back on.
+        # Re-enabling is a purely administrative action. schedules.py's
+        # own reseed-on-enable (fix round 2) clears the marker on this
+        # transition regardless of whether a tick already kept it
+        # current - either way, the very next tick must not fire just
+        # because the task was switched back on.
         schedules_module.update_schedule(s["id"], {"enabled": True})
         fresh = self._fresh(s["id"])
         now2 = now1 + 60
@@ -961,6 +963,47 @@ class CheckLimitResetSchedulesTest(unittest.TestCase):
         scheduler._check_limit_reset_schedules(
             [fresh], time.time(), self._view("2026-01-02T00:00:00Z"))
         self.assertEqual(len(self.history), 1)
+
+    # --- Critical 2, fix round 2 (task-l3-findings-r2.md): the marker is
+    # only ever kept current by ticks, and enabling never itself reseeded
+    # it - reachable when NO tick had a chance to run between the reset
+    # and the re-enable. schedules.update_schedule's reseed-on-enable
+    # closes this by clearing the marker synchronously on the
+    # disabled -> enabled transition, no tick required. ---
+
+    def test_reenable_before_first_tick_after_a_restart_spanning_reset(self):
+        # A hub restart across a reset, re-enabled inside the sub-60s
+        # window before the scheduler's first tick even runs. No tick
+        # exists in this test at all before the re-enable - proving the
+        # fix does not depend on one having run.
+        s = self._create(enabled=False)
+        self._seed_marker(s["id"], "2026-01-01T00:00:00Z")  # stale: pre-restart value
+        schedules_module.update_schedule(s["id"], {"enabled": True})  # re-enable, no tick yet
+        fresh = self._fresh(s["id"])
+        self.assertIsNone(fresh["trigger"]["last_seen_resets_at"])
+        now = schedules_module.iso_to_epoch("2026-01-02T00:00:00Z") + 3600
+        scheduler._check_limit_reset_schedules(
+            [fresh], now, self._view("2026-01-02T00:00:00Z"))
+        self.assertEqual(self.fired, [])
+
+    def test_reenable_while_limits_were_unavailable_across_a_reset(self):
+        # Disabled while limits are unavailable across a reset (ticks
+        # DO run here, unlike the restart case, but each one sees no
+        # usable resets_at, so the marker never moves), re-enabled
+        # before limits recover.
+        s = self._create(enabled=False)
+        self._seed_marker(s["id"], "2026-01-01T00:00:00Z")
+        now1 = schedules_module.iso_to_epoch("2026-01-02T00:00:00Z") + 3600
+        scheduler._check_limit_reset_schedules([s], now1, self._view(None))
+        self.assertEqual(self._fresh(s["id"])["trigger"]["last_seen_resets_at"],
+                          "2026-01-01T00:00:00Z")  # untouched - limits were unavailable
+        schedules_module.update_schedule(s["id"], {"enabled": True})  # re-enable before recovery
+        fresh = self._fresh(s["id"])
+        self.assertIsNone(fresh["trigger"]["last_seen_resets_at"])
+        now2 = now1 + 60
+        scheduler._check_limit_reset_schedules(
+            [fresh], now2, self._view("2026-01-02T00:00:00Z"))  # limits recover here
+        self.assertEqual(self.fired, [])
 
     # --- Critical 3 regression: concurrent evaluation of the SAME
     # schedule must claim the decision exactly once. ---

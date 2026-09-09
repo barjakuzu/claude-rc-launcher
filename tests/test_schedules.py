@@ -356,6 +356,84 @@ class TriggerCrudTest(unittest.TestCase):
         self.assertIsNone(updated["trigger"])
         self.assertEqual(updated["cron"], "0 9 * * *")
 
+    def test_disabled_to_enabled_transition_clears_the_marker(self):
+        # Fix round 2 (Critical 2, task-l3-findings-r2.md): re-enabling a
+        # limit_reset task must never itself be able to cause a fire,
+        # even when the marker went stale while disabled in a way no
+        # scheduler tick ever got a chance to correct (a hub restart
+        # spanning a reset, or limits staying unavailable the whole time
+        # the task was disabled). Every disabled -> enabled transition
+        # clears last_seen_resets_at, regardless of what it was.
+        s = schedules.create_schedule({
+            "name": "reset task", "enabled": False,
+            "trigger": {"kind": "limit_reset", "window": "five_hour"},
+        })
+        schedules.update_schedule(s["id"], {
+            "trigger": {"kind": "limit_reset", "window": "five_hour",
+                        "last_seen_resets_at": "2026-01-01T00:00:00Z"},
+        })
+        updated = schedules.update_schedule(s["id"], {"enabled": True})
+        self.assertTrue(updated["enabled"])
+        self.assertIsNone(updated["trigger"]["last_seen_resets_at"])
+
+    def test_staying_enabled_does_not_clear_the_marker(self):
+        # The clear is keyed on the TRANSITION (was False, now True) -
+        # an update that leaves an already-enabled task enabled (e.g.
+        # editing delay_minutes) must not disturb its marker.
+        s = schedules.create_schedule({
+            "name": "reset task",
+            "trigger": {"kind": "limit_reset", "window": "five_hour"},
+        })
+        schedules.update_schedule(s["id"], {
+            "trigger": {"kind": "limit_reset", "window": "five_hour",
+                        "last_seen_resets_at": "2026-01-01T00:00:00Z"},
+        })
+        updated = schedules.update_schedule(s["id"], {"enabled": True, "delay_minutes": 5})
+        self.assertEqual(updated["trigger"]["last_seen_resets_at"], "2026-01-01T00:00:00Z")
+
+    def test_disabling_does_not_clear_the_marker(self):
+        # Only the disabled -> enabled direction clears the marker -
+        # disabling (enabled -> False) must leave it alone, since
+        # scheduler.py's own tick-driven refresh is what keeps a
+        # disabled task's marker current while it stays disabled.
+        s = schedules.create_schedule({
+            "name": "reset task",
+            "trigger": {"kind": "limit_reset", "window": "five_hour"},
+        })
+        schedules.update_schedule(s["id"], {
+            "trigger": {"kind": "limit_reset", "window": "five_hour",
+                        "last_seen_resets_at": "2026-01-01T00:00:00Z"},
+        })
+        updated = schedules.update_schedule(s["id"], {"enabled": False})
+        self.assertEqual(updated["trigger"]["last_seen_resets_at"], "2026-01-01T00:00:00Z")
+
+    def test_reenabling_together_with_other_trigger_edits_still_clears_marker(self):
+        # Even when the SAME call both re-enables and edits the trigger
+        # (e.g. the modal saving delay_minutes changes alongside
+        # flipping Enabled back on), the transition still wins - the
+        # marker must not survive just because it also came with an
+        # unrelated field change in the same request.
+        s = schedules.create_schedule({
+            "name": "reset task", "enabled": False,
+            "trigger": {"kind": "limit_reset", "window": "five_hour"},
+        })
+        schedules.update_schedule(s["id"], {
+            "trigger": {"kind": "limit_reset", "window": "five_hour",
+                        "last_seen_resets_at": "2026-01-01T00:00:00Z"},
+        })
+        updated = schedules.update_schedule(s["id"], {
+            "enabled": True,
+            "trigger": {"kind": "limit_reset", "window": "five_hour", "delay_minutes": 15},
+        })
+        self.assertIsNone(updated["trigger"]["last_seen_resets_at"])
+        self.assertEqual(updated["trigger"]["delay_minutes"], 15)
+
+    def test_enabling_a_non_trigger_schedule_is_unaffected(self):
+        s = schedules.create_schedule({"name": "cron task", "cron": "0 9 * * *", "enabled": False})
+        updated = schedules.update_schedule(s["id"], {"enabled": True})
+        self.assertTrue(updated["enabled"])
+        self.assertIsNone(updated["trigger"])
+
 
 class TriggerLoadValidationTest(unittest.TestCase):
     def setUp(self):
