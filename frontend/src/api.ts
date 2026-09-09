@@ -648,8 +648,9 @@ async function req(method: string, path: string, device?: string, body?: unknown
 // (server.py's METADATA_ALLOWED_GET_PATHS check, not endpoint-specific)
 // with {"ok": false, "message": "This device is metadata-role only"} at
 // 403 -- reachable by GET /sessions, /schedules, /resume/sessions, and
-// others alike, and a real device in this fleet ("the work MacBook Pro")
-// runs this role. Deliberately NOT thrown from req() itself, unlike
+// others alike, and a metadata-role device is a real, reachable role
+// devices in this fleet actually run, not a hypothetical one.
+// Deliberately NOT thrown from req() itself, unlike
 // ApiError above: {"ok": false, "message": ...} is ALSO the normal,
 // expected response shape for every mutating action in this app
 // (start/stop/restart/enableRc/deviceRename/POST /update/...), whose own

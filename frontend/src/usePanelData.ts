@@ -44,11 +44,11 @@ export function usePanelData(deviceId: string, tab: PanelTab) {
   // Round 6: a reachable device can still answer /sessions or /schedules
   // with a real, non-list response: {"ok": false, "message": "..."} , most
   // commonly a metadata-role device's blanket 403 gate (server.py checks
-  // this against the whole path, not per-endpoint) -- "the work MacBook
-  // Pro" in this fleet runs this role, so this is a real, reachable shape,
-  // not a hypothetical one. Neither "unreachable" (the device answered)
-  // nor "confirmed zero" (nothing resembling a session/schedule list was
-  // ever returned): its own message, kept separate per fetch for the same
+  // this against the whole path, not per-endpoint), a real, reachable
+  // role devices in this fleet actually run, not a hypothetical one.
+  // Neither "unreachable" (the device answered) nor "confirmed zero"
+  // (nothing resembling a session/schedule list was ever returned): its
+  // own message, kept separate per fetch for the same
   // reason sessionsUnreachable/scheduledUnreachable are.
   const [sessionsError, setSessionsError] = useState<string | null>(null);
   const [scheduledError, setScheduledError] = useState<string | null>(null);

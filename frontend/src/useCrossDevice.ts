@@ -29,7 +29,7 @@
 // turns up only this definition), so deleted rather than left for a
 // future sweep to trip over.
 import { useState, useEffect, useRef } from 'react';
-import { api } from './api';
+import { api, isFailureEnvelope } from './api';
 import type { DeviceCard, Schedule } from './types';
 
 // ─── ScheduleWithDevice ────────────────────────────────────────────────────────
@@ -49,13 +49,17 @@ export interface UseAllSchedulesResult {
   hasLoaded: boolean;
   /** Round 4: true when the most recent fan-out had at least one device
    * whose /schedules call rejected (Promise.allSettled), most commonly a
-   * DeviceUnreachableError (api.ts). Those rejected results were dropped
-   * from `items` with no signal at all, so hasLoaded, which only ever
-   * meant "we heard back at least once, so 0 isn't fabricated," read
-   * exactly like "confirmed complete" even when some devices on the
-   * current `cards` list never actually got counted. `items` is still
-   * real data, just possibly missing whatever those devices would have
-   * contributed. */
+   * DeviceUnreachableError (api.ts), OR (round 7) fulfilled with a
+   * {"ok": false, "message": ...} envelope instead of a real schedule
+   * list (api.ts's isFailureEnvelope) -- a metadata-role device answers
+   * this way, and Promise.allSettled reports that as "fulfilled," not
+   * "rejected," so it slipped past the original rejected-only check
+   * entirely: dropped from `items` with no signal at all, `partial`
+   * staying false. Either way, hasLoaded, which only ever meant "we
+   * heard back at least once, so 0 isn't fabricated," read exactly like
+   * "confirmed complete" even when some devices on the current `cards`
+   * list never actually got counted. `items` is still real data, just
+   * possibly missing whatever those devices would have contributed. */
   partial: boolean;
 }
 
@@ -91,20 +95,31 @@ export function useAllSchedules(cards: DeviceCard[], active: boolean): UseAllSch
       const results = await Promise.allSettled(current.map((d) => api.schedules(d.id)));
       if (cancelled || !mounted.current) return;
       const flat: ScheduleWithDevice[] = [];
-      let anyRejected = false;
+      let anyFailed = false;
       results.forEach((r, i) => {
         if (r.status === 'fulfilled') {
+          // Round 7: a metadata-role device's /schedules answers 200...
+          // no, 403, but req() resolves it rather than rejecting (the
+          // same {"ok": false, "message": ...} envelope api.ts's req()
+          // deliberately does not throw for, round 6) -- Promise.allSettled
+          // calls that "fulfilled," so it fell straight through the old
+          // `else { anyRejected = true }` below and vanished with no
+          // signal: not counted in items, not counted as a failure either.
+          if (isFailureEnvelope(r.value)) {
+            anyFailed = true;
+            return;
+          }
           const ss = Array.isArray(r.value)
             ? r.value
             : ((r.value as { schedules?: Schedule[] })?.schedules ?? []);
           for (const s of ss) flat.push({ device: current[i], schedule: s });
         } else {
-          anyRejected = true;
+          anyFailed = true;
         }
       });
       setItems(flat);
       setHasLoaded(true);
-      setPartial(anyRejected);
+      setPartial(anyFailed);
     };
 
     fetchAll();
