@@ -581,6 +581,21 @@ export class DeviceUnreachableError extends Error {
   }
 }
 
+// Thrown by req() for any OTHER response whose entire body is just an
+// error signal ({"error": "..."}, optionally with "detail"): a device's
+// own real answer (relayed through as-is by _proxy_to_device) to a bad
+// request -- "unknown device" (404, dev_id not in the registry), "Access
+// denied"/"Not a directory"/"Permission denied" (/browse, 403/400),
+// "Session not found" (/preview, 404), and so on, none of which are the
+// "device unreachable" shape above. Distinct from DeviceUnreachableError
+// so a caller that cares about that specific distinction still can.
+export class ApiError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ApiError';
+  }
+}
+
 async function req(method: string, path: string, device?: string, body?: unknown) {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (device && device !== 'local') headers['X-RC-Device'] = device;
@@ -605,6 +620,26 @@ async function req(method: string, path: string, device?: string, body?: unknown
   // silently treated as success.
   if (r.status === 502 && data && typeof data === 'object' && data.error === 'device unreachable') {
     throw new DeviceUnreachableError(typeof data.detail === 'string' ? data.detail : undefined);
+  }
+  // Round 5: restores coverage a call-site-local isErrorResponse() check
+  // used to give usePanelData.ts before round 3 deleted it, but here in
+  // the generator so every caller gets it, not just the ones somebody
+  // remembered to check. Any status, not just 502: a device's own error
+  // response ("unknown device," "Access denied," "Session not found," ...)
+  // is exactly as much "not data" as the synthetic unreachable one above.
+  // Restricted to a body whose ONLY keys are "error"/"detail" (a real
+  // payload alongside an error, like /schedules' {"schedules": [...],
+  // "error": schedules.LAST_LOAD_ERROR} for a corrupt schedules.json,
+  // is NOT this: that's real, usable data with a caveat attached, not a
+  // failure, and req() has no per-endpoint knowledge to tell those apart
+  // any other way -- the caller reads that "error" field itself, same as
+  // it already does for the schedules case).
+  if (data && typeof data === 'object' && !Array.isArray(data)
+      && typeof (data as { error?: unknown }).error === 'string') {
+    const keys = Object.keys(data as Record<string, unknown>);
+    if (keys.every((k) => k === 'error' || k === 'detail')) {
+      throw new ApiError((data as { error: string }).error);
+    }
   }
   return data;
 }
