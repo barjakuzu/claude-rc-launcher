@@ -881,3 +881,35 @@ def estimate_window_tokens(percent, consumed):
         "remaining": int(round(remaining)),
         "approximate": True,
     }
+
+
+def estimates_are_coherent(shorter, longer):
+    """Fix round 1 (coordinator review, 2026-09-09): a live bug caught
+    exactly the failure this checks for -- the five_hour and seven_day
+    windows reported the SAME `consumed` figure, and dividing it by two
+    different percents produced a five_hour `budget` LARGER than the
+    seven_day one. Both are impossible on their face: the 5-hour
+    window's activity is a strict subset of the 7-day window's, since
+    it is the trailing slice of the same account, so a SHORTER window
+    can never show more consumed tokens, nor imply a bigger budget,
+    than a LONGER window that contains it.
+
+    `shorter`/`longer` are estimate_window_tokens() results (or None) for
+    two windows where `shorter`'s duration is contained within
+    `longer`'s (five_hour vs seven_day, here). Returns True when there
+    is nothing to compare (either is None) or the relationship holds;
+    False when it is violated -- which is proof at least one of the two
+    was computed from a contaminated measurement (the root cause found
+    here: a device's usage cache still converging after a restart,
+    whose catch-up growth looks identical to real usage in whichever
+    window happens to be sampled while it is happening, regardless of
+    that window's own length -- see store.py's any_device_usage_partial
+    and its callers for the fix at the source). This is a second,
+    independent backstop, not a substitute for that fix: it catches an
+    incoherent PAIR even if some future change introduces a different
+    way for one side to go bad on its own.
+
+    Never raises."""
+    if shorter is None or longer is None:
+        return True
+    return shorter["consumed"] <= longer["consumed"] and shorter["budget"] <= longer["budget"]

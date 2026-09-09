@@ -1175,5 +1175,45 @@ class EstimateWindowTokensTest(unittest.TestCase):
                     self.assertIsNone(result)
 
 
+class EstimatesAreCoherentTest(unittest.TestCase):
+    """Fix round 1 (coordinator review, 2026-09-09): the live bug this
+    catches was two windows reporting the SAME `consumed`, and a
+    five_hour `budget` LARGER than seven_day's -- both impossible, since
+    a 5-hour window's activity is a strict subset of a 7-day window's."""
+
+    def _est(self, consumed, budget):
+        return {"consumed": consumed, "budget": budget, "remaining": budget - consumed,
+                "approximate": True}
+
+    def test_either_side_none_is_trivially_coherent(self):
+        self.assertTrue(limits.estimates_are_coherent(None, self._est(100, 200)))
+        self.assertTrue(limits.estimates_are_coherent(self._est(100, 200), None))
+        self.assertTrue(limits.estimates_are_coherent(None, None))
+
+    def test_shorter_within_longer_is_coherent(self):
+        shorter = self._est(500, 1000)
+        longer = self._est(1000, 2000)
+        self.assertTrue(limits.estimates_are_coherent(shorter, longer))
+
+    def test_equal_is_coherent(self):
+        # Not the live bug's exact shape (that also broke on budget),
+        # but consumed alone tying is not by itself a contradiction.
+        same = self._est(500, 1000)
+        self.assertTrue(limits.estimates_are_coherent(same, same))
+
+    def test_shorter_consumed_exceeding_longer_is_incoherent(self):
+        shorter = self._est(5000, 1000)  # consumed 5000 > longer's 1000
+        longer = self._est(1000, 2000)
+        self.assertFalse(limits.estimates_are_coherent(shorter, longer))
+
+    def test_shorter_budget_exceeding_longer_is_incoherent(self):
+        # This is the exact live-bug shape: equal consumed, but a larger
+        # implied budget for the shorter window because its percent
+        # happened to be lower.
+        shorter = self._est(122_000_000, 290_000_000)
+        longer = self._est(122_000_000, 201_000_000)
+        self.assertFalse(limits.estimates_are_coherent(shorter, longer))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -929,8 +929,55 @@ class Store:
     # effective_tokens_in_window()'s own coverage check turns exactly
     # that state into None (never a guess) until enough samples have
     # accumulated to span the requested window again.
+    #
+    # Fix round 1 (coordinator review, 2026-09-09): the first shipped
+    # version sampled SUM(cost_daily.effective) unconditionally, and a
+    # cold usage.py cache (this device restarted, or the hub simply
+    # never having sampled this account before) produces exactly the
+    # same shape of growth in that total as real usage does -- a device
+    # whose usage cache is still converging discovers a backlog of
+    # ALREADY-HAPPENED usage across many polls, and every one of those
+    # polls' growth looks identical, from this total alone, to genuine
+    # new consumption. Two verified, real consequences of that: (1) two
+    # windows sampled seconds apart during a catch-up burst reported the
+    # SAME `consumed` figure, which is impossible (a 5-hour window's
+    # activity is a strict subset of a 7-day window's), and (2) the
+    # resulting `budget` was accordingly incoherent between the two
+    # (5-hour showing a LARGER implied budget than 7-day). Both
+    # record_usage_sample (below) and the read side in effective_tokens_
+    # in_window's caller (server.py) now check any_device_usage_partial()
+    # -- CONTRACT.md's existing "this device's usage cache is still
+    # converging after a restart" signal, already tracked on `devices`
+    # for exactly this situation -- and refuse to trust the total while
+    # it is true, rather than letting a catch-up burst masquerade as
+    # real-time consumption.
     USAGE_SAMPLE_MIN_INTERVAL_SECONDS = 20
     USAGE_SAMPLE_RETENTION_SECONDS = 8 * 24 * 3600  # a bit over the longest window (7 days)
+
+    def any_device_usage_partial(self):
+        """True when at least one device's latest fleet snapshot reported
+        usage_partial (CONTRACT.md section 1/3: its usage.py cache is
+        still converging after a restart, so ITS OWN effective-token
+        figures under-read and are still catching up). Task-m3 fix round
+        1: record_usage_sample uses this to skip sampling while it is
+        true (a catch-up burst must never be mistaken for a sample of
+        real-time consumption), and server.py's /api/limits route uses
+        it a second time at read time, since the account can still be
+        mid-catch-up even between two samples that were each individually
+        clean. Never raises; a failed read is treated as "assume
+        partial" (the safer direction: refusing a good estimate is a
+        smaller failure than showing a contaminated one)."""
+        try:
+            conn = self._read_conn()
+            try:
+                row = conn.execute(
+                    "SELECT COUNT(*) AS n FROM devices WHERE usage_partial = 1").fetchone()
+            finally:
+                conn.close()
+            return bool(row["n"]) if row is not None else True
+        except Exception:
+            _LOG.exception("any_device_usage_partial: failed to read devices table")
+            return True
 
     def record_usage_sample(self, now_fn=time.time):
         """Appends one (now, total_effective_across_the_whole_account)
@@ -949,6 +996,13 @@ class Store:
         motivation limits.py's own single-flight cache lock has for the
         real network fetch it guards.
 
+        Fix round 1: skips recording entirely (not even the SUM query)
+        while any_device_usage_partial() is true -- see the section
+        comment above. A gap in the series here is the same "we don't
+        know yet" state a freshly started process is in, and
+        effective_tokens_in_window's own coverage check already turns
+        that into None rather than a guess.
+
         Never raises: a failed read here must not break the request that
         triggered it. On failure, this simply records no sample this
         call, same visible effect as a slow request that happened to
@@ -958,6 +1012,8 @@ class Store:
             if self._usage_samples and now - self._usage_samples[-1][0] < self.USAGE_SAMPLE_MIN_INTERVAL_SECONDS:
                 return
         try:
+            if self.any_device_usage_partial():
+                return
             conn = self._read_conn()
             try:
                 row = conn.execute(

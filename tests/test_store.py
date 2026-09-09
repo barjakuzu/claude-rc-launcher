@@ -2138,6 +2138,78 @@ class UsageSampleWindowTest(unittest.TestCase):
         with self.store._usage_samples_lock:
             self.assertEqual(self.store._usage_samples, [])
 
+    def test_record_usage_sample_skips_while_a_device_is_usage_partial(self):
+        # Fix round 1 (coordinator review, 2026-09-09): a device whose
+        # usage cache is still converging after a restart makes
+        # SUM(cost_daily.effective) jump for reasons that have nothing
+        # to do with real-time consumption -- the live bug's root cause.
+        # No sample should be recorded at all while that's true, rather
+        # than recording a contaminated one.
+        self.store.upsert_device({"id": "local", "name": "hub", "role": "full",
+                                   "version": "1", "claude_version": "1",
+                                   "usage_partial": True})
+        self._set_cost_daily_total(1000)
+        self.store.record_usage_sample(now_fn=lambda: 1000.0)
+        with self.store._usage_samples_lock:
+            self.assertEqual(self.store._usage_samples, [])
+
+    def test_record_usage_sample_resumes_once_no_longer_partial(self):
+        self.store.upsert_device({"id": "local", "name": "hub", "role": "full",
+                                   "version": "1", "claude_version": "1",
+                                   "usage_partial": True})
+        self._set_cost_daily_total(1000)
+        self.store.record_usage_sample(now_fn=lambda: 1000.0)
+        self.store.upsert_device({"id": "local", "name": "hub", "role": "full",
+                                   "version": "1", "claude_version": "1",
+                                   "usage_partial": False})
+        self.store.record_usage_sample(now_fn=lambda: 2000.0)
+        with self.store._usage_samples_lock:
+            samples = list(self.store._usage_samples)
+        self.assertEqual(samples, [(2000.0, 1000)])
+
+
+class AnyDeviceUsagePartialTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db_path = os.path.join(self.tmp.name, "hub.db")
+        self.store = store.Store(self.db_path)
+
+    def tearDown(self):
+        self.store.close()
+        self.tmp.cleanup()
+
+    def test_false_with_no_devices(self):
+        self.assertFalse(self.store.any_device_usage_partial())
+
+    def test_false_when_every_device_is_clean(self):
+        self.store.upsert_device({"id": "local", "name": "hub", "role": "full",
+                                   "version": "1", "claude_version": "1",
+                                   "usage_partial": False})
+        self.assertFalse(self.store.any_device_usage_partial())
+
+    def test_true_when_one_of_several_devices_is_partial(self):
+        self.store.upsert_device({"id": "local", "name": "hub", "role": "full",
+                                   "version": "1", "claude_version": "1",
+                                   "usage_partial": False})
+        self.store.upsert_device({"id": "laptop", "name": "laptop", "role": "full",
+                                   "version": "1", "claude_version": "1",
+                                   "usage_partial": True})
+        self.assertTrue(self.store.any_device_usage_partial())
+
+    def test_never_raises_on_a_read_failure_and_assumes_partial(self):
+        # The safer direction on a failure: refusing a good estimate
+        # costs less than showing a contaminated one.
+        def _broken_read_conn():
+            raise sqlite3.OperationalError("simulated failure")
+
+        with mock.patch.object(self.store, "_read_conn", _broken_read_conn):
+            try:
+                result = self.store.any_device_usage_partial()
+            except Exception as e:  # pragma: no cover - failure path
+                self.fail(f"any_device_usage_partial raised {e!r}")
+            else:
+                self.assertTrue(result)
+
 
 if __name__ == "__main__":
     unittest.main()
