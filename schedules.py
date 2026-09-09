@@ -255,7 +255,18 @@ def load_schedules():
 def _save_schedules_locked(schedules):
     """The actual atomic-write logic (temp file + os.replace, rolling
     .bak). Caller MUST already hold _schedules_lock - see
-    _load_schedules_locked's docstring."""
+    _load_schedules_locked's docstring.
+
+    Fix round 4 (task-l3-findings-r4.md): the temp file is fsync'd
+    before the rename. os.replace() is atomic against a PARTIAL rename
+    (a reader never sees a half-written file), but says nothing about
+    the file's actual bytes reaching disk - without an explicit fsync,
+    the freshly-written content can still be sitting in the page cache,
+    unwritten to physical storage, at the moment the rename itself
+    commits. A power loss in that window can leave the renamed file
+    referencing data the OS never actually flushed. Given this exact
+    file was silently corrupt for three months in this project,
+    durability here is worth the extra syscall."""
     directory = os.path.dirname(SCHEDULES_FILE)
     os.makedirs(directory, exist_ok=True)
     if os.path.isfile(SCHEDULES_FILE):
@@ -272,6 +283,8 @@ def _save_schedules_locked(schedules):
     try:
         with os.fdopen(fd, "w") as f:
             json.dump(schedules, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
         os.chmod(tmp_path, 0o600)
         os.replace(tmp_path, SCHEDULES_FILE)
     except Exception:
