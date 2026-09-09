@@ -1,6 +1,6 @@
 // AllScheduled.tsx — cross-device flattened schedules list (V5AllScheduled port).
 import { useState } from 'react';
-import { RT, FONT_MONO, tintFor, hueForId, Z } from '../tokens';
+import { RT, FONT_MONO, tintFor, hueForId, Z, withAlpha } from '../tokens';
 import { Icons, Dot } from './primitives';
 import { MobileHeader } from './MobileHeader';
 import { mobileActionBtn } from './mobileActionBtn';
@@ -79,7 +79,11 @@ interface AllScheduledProps {
 type PickerEntry = { deviceId: string; schedule: Schedule; mode: 'copy' | 'move' };
 
 export function AllScheduled({ cards, hasLoadedCards }: AllScheduledProps) {
-  const { items, hasLoaded: schedulesLoaded } = useAllSchedules(cards, true);
+  // Round 7: this destructured only items/hasLoaded and never read
+  // useAllSchedules' partial, so even a device outright rejecting (a
+  // plain 502) was invisible here, though Activity.tsx (this hook's other
+  // consumer) already surfaced it. Same treatment as Activity.tsx below.
+  const { items, hasLoaded: schedulesLoaded, partial } = useAllSchedules(cards, true);
   const loaded = hasLoadedCards && schedulesLoaded;
   const [editEntry, setEditEntry] = useState<{ deviceId: string; schedule: Schedule } | null>(null);
   const [newDeviceId, setNewDeviceId] = useState<string | null>(null);
@@ -170,6 +174,24 @@ export function AllScheduled({ cards, hasLoadedCards }: AllScheduledProps) {
         }
       />
       <div style={{ padding: '12px 12px 32px', display: 'flex', flexDirection: 'column', gap: 8 }}>
+        {/* Round 7: same caveat Activity.tsx already shows for this same
+            hook. useAllSchedules' fan-out drops a device whose /schedules
+            call failed (rejected, or fulfilled with a {"ok": false, ...}
+            envelope, e.g. a metadata-role device) with no signal reaching
+            here otherwise, so a fleet where some devices didn't answer
+            read as a complete, confirmed "No scheduled tasks across
+            devices." Surfaced unconditionally rather than folded into the
+            empty-state text below, since a non-empty list can be missing
+            entries from the failed devices too. */}
+        {loaded && partial && (
+          <div style={{
+            padding: '8px 9px', borderRadius: 6,
+            background: withAlpha(RT.amber, 0.12), border: `1px solid ${withAlpha(RT.amber, 0.4)}`,
+            fontSize: 11.5, color: RT.amber, lineHeight: 1.4, fontFamily: FONT_MONO,
+          }}>
+            Some devices didn't answer. This list may be incomplete.
+          </div>
+        )}
         {items.length === 0 && (
           <div style={{ padding: 32, textAlign: 'center', color: RT.textLow, fontFamily: FONT_MONO, fontSize: 13, border: `1px dashed ${RT.border}`, borderRadius: 10 }}>
             {loaded ? 'No scheduled tasks across devices.' : 'Loading tasks…'}

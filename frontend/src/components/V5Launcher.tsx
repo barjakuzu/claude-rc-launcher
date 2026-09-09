@@ -28,6 +28,18 @@ interface BrowseResult {
   dirs: string[];
 }
 
+// Same guard as DirBrowser.tsx's isBrowseResult: server.py's /browse can
+// answer a bad path (outside the allowed roots, not a directory,
+// unreadable) with its own {"error": "..."} body (403/400), a real
+// response from the device, not the "device unreachable" shape api.ts's
+// req() already throws for. Without this, that body got stored into
+// dirData as if it were a real BrowseResult, and dirEntries (dirData?.dirs
+// ?? []) below silently read as an empty listing: "no matching
+// subfolders" on a device 403, the same false claim DirBrowser.tsx had.
+function isBrowseResult(v: unknown): v is BrowseResult {
+  return !!v && typeof v === 'object' && Array.isArray((v as BrowseResult).dirs);
+}
+
 export interface V5LauncherProps {
   deviceId: string;
   deviceName: string;
@@ -63,8 +75,14 @@ export function V5Launcher({ deviceId, deviceName, mobile = false, onLaunched }:
   const loadDirs = useCallback(async (base: string) => {
     lastBase.current = base;
     try {
-      const d = await api.browse(deviceId, base || '/') as BrowseResult;
-      if (mounted.current && lastBase.current === base) setDirData(d);
+      const d: unknown = await api.browse(deviceId, base || '/');
+      if (!mounted.current || lastBase.current !== base) return;
+      if (isBrowseResult(d)) setDirData(d);
+      // A non-conforming response (a device's own /browse error, or
+      // anything else malformed) is not stored: dirData is left at
+      // whatever it was (null on a first load), so the dropdown shows
+      // nothing rather than a false "no matching subfolders" for a
+      // listing that never actually loaded.
     } catch {/* ignore */}
   }, [deviceId]);
 
@@ -125,7 +143,7 @@ export function V5Launcher({ deviceId, deviceName, mobile = false, onLaunched }:
       }
     } catch {
       if (!mounted.current) return;
-      setError('Network error — could not reach device.');
+      setError('Network error: could not reach device.');
     } finally {
       if (mounted.current) setPending(false);
     }

@@ -1,8 +1,8 @@
 // useCrossDevice.ts — cross-device data aggregation hooks.
-// Each hook polls every 5s (sessions) or 8s (schedules) while active === true.
-// Uses Promise.allSettled so one slow/offline device never blocks the rest.
+// Polls every 8s while active === true. Uses Promise.allSettled so one
+// slow/offline device never blocks the rest.
 //
-// Round 5: found and fixed a real bug in both hooks' `mounted` ref while
+// Round 5: found and fixed a real bug in this hook's `mounted` ref while
 // verifying useAllSchedules's new hasLoaded flag in dev. `useRef(true)`
 // only sets the initial value once; the mount-tracking effect's body did
 // nothing to reset it back to true on mount, only its cleanup set it to
@@ -19,55 +19,18 @@
 // "stuck loading", which is exactly the failure mode this lane exists to
 // remove. Fixed by setting mounted.current = true in the effect body
 // itself, not just relying on the ref's one-time initializer.
+//
+// useAllSessions (the per-device sessions.py fan-out this file used to
+// also export) was removed here: useFleet.ts replaced it as the Sessions
+// tab's data source, and it had been left with zero importers ever since,
+// still carrying its own unswept copy of the fabricated-zero pattern
+// (returning `items` with no hasLoaded at all). Same judgment as deleting
+// Grid.tsx: confirmed dead (grep for `useAllSessions` across frontend/src
+// turns up only this definition), so deleted rather than left for a
+// future sweep to trip over.
 import { useState, useEffect, useRef } from 'react';
-import { api } from './api';
-import type { DeviceCard, Session, Schedule } from './types';
-
-// ─── SessionWithDevice ─────────────────────────────────────────────────────────
-export interface SessionWithDevice {
-  device: DeviceCard;
-  session: Session;
-}
-
-export function useAllSessions(cards: DeviceCard[], active: boolean): SessionWithDevice[] {
-  const [items, setItems] = useState<SessionWithDevice[]>([]);
-  const mounted = useRef(true);
-  useEffect(() => {
-    mounted.current = true;
-    return () => { mounted.current = false; };
-  }, []);
-
-  const cardsRef = useRef(cards);
-  cardsRef.current = cards;
-  const key = cards.map((c) => c.id + ':' + (c.online ? 1 : 0)).join(',');
-
-  useEffect(() => {
-    if (!active) return;
-    let cancelled = false;
-
-    const fetchAll = async () => {
-      const online = cardsRef.current.filter((c) => c.online);
-      const results = await Promise.allSettled(online.map((d) => api.sessions(d.id)));
-      if (cancelled || !mounted.current) return;
-      const flat: SessionWithDevice[] = [];
-      results.forEach((r, i) => {
-        if (r.status === 'fulfilled') {
-          const sessions = Array.isArray(r.value)
-            ? r.value
-            : ((r.value as { sessions?: Session[] })?.sessions ?? []);
-          for (const s of sessions) flat.push({ device: online[i], session: s });
-        }
-      });
-      setItems(flat);
-    };
-
-    fetchAll();
-    const id = setInterval(fetchAll, 5000);
-    return () => { cancelled = true; clearInterval(id); };
-  }, [active, key]);
-
-  return items;
-}
+import { api, isFailureEnvelope } from './api';
+import type { DeviceCard, Schedule } from './types';
 
 // ─── ScheduleWithDevice ────────────────────────────────────────────────────────
 export interface ScheduleWithDevice {
@@ -84,11 +47,26 @@ export interface UseAllSchedulesResult {
    * hasLoadedCards) before trusting a 0 here as "confirmed none" rather
    * than "cards was still empty when this last resolved". */
   hasLoaded: boolean;
+  /** Round 4: true when the most recent fan-out had at least one device
+   * whose /schedules call rejected (Promise.allSettled), most commonly a
+   * DeviceUnreachableError (api.ts), OR (round 7) fulfilled with a
+   * {"ok": false, "message": ...} envelope instead of a real schedule
+   * list (api.ts's isFailureEnvelope) -- a metadata-role device answers
+   * this way, and Promise.allSettled reports that as "fulfilled," not
+   * "rejected," so it slipped past the original rejected-only check
+   * entirely: dropped from `items` with no signal at all, `partial`
+   * staying false. Either way, hasLoaded, which only ever meant "we
+   * heard back at least once, so 0 isn't fabricated," read exactly like
+   * "confirmed complete" even when some devices on the current `cards`
+   * list never actually got counted. `items` is still real data, just
+   * possibly missing whatever those devices would have contributed. */
+  partial: boolean;
 }
 
 export function useAllSchedules(cards: DeviceCard[], active: boolean): UseAllSchedulesResult {
   const [items, setItems] = useState<ScheduleWithDevice[]>([]);
   const [hasLoaded, setHasLoaded] = useState(false);
+  const [partial, setPartial] = useState(false);
   const mounted = useRef(true);
   useEffect(() => {
     mounted.current = true;
@@ -100,6 +78,15 @@ export function useAllSchedules(cards: DeviceCard[], active: boolean): UseAllSch
   const key = cards.map((c) => c.id + ':' + (c.online ? 1 : 0)).join(',');
 
   useEffect(() => {
+    // The device-list identity changed (a device added/removed, or one's
+    // online status flipped) since the last time this fan-out completed:
+    // that completed run only ever queried the previous set of devices,
+    // so a stale hasLoaded=true must not keep asserting a "confirmed"
+    // schedule count that never included whatever changed. Reset until
+    // the new fetchAll below (once active) lands a fresh answer for the
+    // current key.
+    setHasLoaded(false);
+    setPartial(false);
     if (!active) return;
     let cancelled = false;
 
@@ -108,16 +95,31 @@ export function useAllSchedules(cards: DeviceCard[], active: boolean): UseAllSch
       const results = await Promise.allSettled(current.map((d) => api.schedules(d.id)));
       if (cancelled || !mounted.current) return;
       const flat: ScheduleWithDevice[] = [];
+      let anyFailed = false;
       results.forEach((r, i) => {
         if (r.status === 'fulfilled') {
+          // Round 7: a metadata-role device's /schedules answers 200...
+          // no, 403, but req() resolves it rather than rejecting (the
+          // same {"ok": false, "message": ...} envelope api.ts's req()
+          // deliberately does not throw for, round 6) -- Promise.allSettled
+          // calls that "fulfilled," so it fell straight through the old
+          // `else { anyRejected = true }` below and vanished with no
+          // signal: not counted in items, not counted as a failure either.
+          if (isFailureEnvelope(r.value)) {
+            anyFailed = true;
+            return;
+          }
           const ss = Array.isArray(r.value)
             ? r.value
             : ((r.value as { schedules?: Schedule[] })?.schedules ?? []);
           for (const s of ss) flat.push({ device: current[i], schedule: s });
+        } else {
+          anyFailed = true;
         }
       });
       setItems(flat);
       setHasLoaded(true);
+      setPartial(anyFailed);
     };
 
     fetchAll();
@@ -125,5 +127,5 @@ export function useAllSchedules(cards: DeviceCard[], active: boolean): UseAllSch
     return () => { cancelled = true; clearInterval(id); };
   }, [active, key]);
 
-  return { items, hasLoaded };
+  return { items, hasLoaded, partial };
 }

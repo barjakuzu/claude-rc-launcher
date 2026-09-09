@@ -33,8 +33,18 @@ def card_from_parts(device, sessions, stats, online=None):
     return {
         "id": device["id"], "name": device.get("name", device["id"]),
         "online": online, "hostname": host,
-        "sessions": len(launcher_sess), "tokens": tokens,
-        "loadPct": load_pct, "os": os_name, "spark": spark,
+        # An unreachable device (online=False) reports null, not 0, for a
+        # session count or CPU reading it cannot actually know: 0 reads to
+        # the UI as "confirmed none"/"confirmed idle", which is a false
+        # claim about a device we simply never heard back from. When
+        # online is True (including the "sessions fetched fine but the
+        # stats scrape failed" case, which keeps its pre-existing 0
+        # default), both stay real numbers as before. tokens is left
+        # alone: it is already a separate, previously-flagged stale field
+        # (frontend/src/types.ts's DeviceUsage comment), not part of this
+        # fix.
+        "sessions": (len(launcher_sess) if online else None), "tokens": tokens,
+        "loadPct": (load_pct if online else None), "os": os_name, "spark": spark,
         "user": user, "home_dir": home_dir,
         "claude_version": (stats or {}).get("claude_version"),
         "version": (stats or {}).get("version"),

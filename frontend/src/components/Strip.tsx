@@ -10,7 +10,7 @@
 // LimitsSummary takes the remaining space, since it has two numbers (plus
 // their countdowns) to show rather than one.
 import type { DeviceCard } from '../types';
-import { RT, FONT_MONO, fmtK } from '../tokens';
+import { RT, FONT_MONO, fmtK, totalKnownSessions } from '../tokens';
 import { Dot } from './primitives';
 import { LimitsSummary } from './LimitsSummary';
 
@@ -35,7 +35,11 @@ interface StripProps {
 export function Strip({ cards, totalTokens, hasLoadedCards }: StripProps) {
   const onlineCount = cards.filter((c) => c.online).length;
   const offlineCount = cards.length - onlineCount;
-  const totalSessions = cards.reduce((s, c) => s + c.sessions, 0);
+  // null (not 0) when cards has loaded but not a single device on it has
+  // a known session count (every device unreachable): overview.py now
+  // reports sessions: null, never a fabricated 0, for a device it can't
+  // reach. See tokens.ts's totalKnownSessions.
+  const totalSessions = totalKnownSessions(cards);
 
   type Cell = { label: string; value: string; sub?: string; dot?: string };
   const cells: Cell[] = [
@@ -47,8 +51,8 @@ export function Strip({ cards, totalTokens, hasLoadedCards }: StripProps) {
     },
     {
       label: 'Sessions',
-      value: hasLoadedCards ? String(totalSessions) : '—',
-      sub: hasLoadedCards ? 'running' : undefined,
+      value: hasLoadedCards && totalSessions != null ? String(totalSessions) : '—',
+      sub: hasLoadedCards && totalSessions != null ? 'running' : undefined,
     },
     { label: 'Effective', value: totalTokens != null ? fmtK(totalTokens) : '—', sub: 'tokens' },
   ];

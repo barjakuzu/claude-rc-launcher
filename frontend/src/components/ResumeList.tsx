@@ -2,7 +2,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { RT, FONT_MONO, fmtDate, Z } from '../tokens';
 import { btn } from './btn';
-import { api } from '../api';
+import { api, isFailureEnvelope } from '../api';
 
 interface ResumeSession {
   id: string;
@@ -38,9 +38,20 @@ export function ResumeList({ deviceId, onClose, onResumed }: ResumeListProps) {
     let cancelled = false;
     const load = async () => {
       try {
-        const data = await api.resumeList(deviceId) as { projects: ResumeProject[] };
+        const data: unknown = await api.resumeList(deviceId);
         if (!cancelled && mounted.current) {
-          setProjects(data.projects ?? []);
+          // Round 6: a reachable device can answer this with a real,
+          // non-list response, {"ok": false, "message": "..."} -- most
+          // commonly a metadata-role device's blanket 403 gate. Without
+          // this check, data.projects was undefined, "?? []" quietly
+          // produced an empty list, and this rendered the false "No
+          // resumable sessions." below instead of the device's own
+          // message.
+          if (isFailureEnvelope(data)) {
+            setError(data.message || 'This device refused the request.');
+          } else {
+            setProjects((data as { projects: ResumeProject[] }).projects ?? []);
+          }
           setLoading(false);
         }
       } catch (err) {

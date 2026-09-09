@@ -1,5 +1,5 @@
 // Activity.tsx — timeline of schedule run history events (V5Activity port).
-import { RT, FONT_MONO, tintFor, hueForId } from '../tokens';
+import { RT, FONT_MONO, tintFor, hueForId, withAlpha } from '../tokens';
 import { Icons } from './primitives';
 import { MobileHeader } from './MobileHeader';
 import { useAllSchedules } from '../useCrossDevice';
@@ -7,6 +7,15 @@ import type { DeviceCard } from '../types';
 
 interface ActivityProps {
   cards: DeviceCard[];
+  /** False until /rc/overview has answered at least once (App.tsx). Same
+   * pairing as AllScheduled.tsx: "No recent activity." must only render
+   * once both the device list and the per-device schedule fan-out
+   * (useAllSchedules's own hasLoaded) have genuinely resolved, not merely
+   * because cards was still empty when the fan-out last ran. Previously
+   * this destructured only `items` and ignored useAllSchedules's
+   * hasLoaded entirely, so "No recent activity." rendered on mount before
+   * the first fan-out had a chance to resolve. */
+  hasLoadedCards: boolean;
 }
 
 interface ActivityEvent {
@@ -43,8 +52,9 @@ function statusColor(status: string): string {
   return RT.amber;
 }
 
-export function Activity({ cards }: ActivityProps) {
-  const { items: schedItems } = useAllSchedules(cards, true);
+export function Activity({ cards, hasLoadedCards }: ActivityProps) {
+  const { items: schedItems, hasLoaded: schedulesLoaded, partial } = useAllSchedules(cards, true);
+  const loaded = hasLoadedCards && schedulesLoaded;
 
   // Derive events from schedule history entries.
   const events: ActivityEvent[] = [];
@@ -73,15 +83,31 @@ export function Activity({ cards }: ActivityProps) {
         subtitle="last 24 hours"
         title="Activity"
         right={
-          <button style={{ background: RT.panel, border: `1px solid ${RT.border}`, borderRadius: 7, width: 34, height: 34, display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }}>
+          <button style={{ background: RT.panel, border: `1px solid ${RT.border}`, borderRadius: 7, width: 44, height: 44, display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }}>
             <Icons.filter size={14} stroke={RT.textDim} />
           </button>
         }
       />
       <div style={{ padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 0 }}>
+        {/* Round 4: useAllSchedules's per-device fan-out drops a device
+            whose /schedules call rejected (e.g. unreachable) with no
+            signal at all, so a fleet where some devices failed to answer
+            read as a complete, confirmed timeline. Surfaced
+            unconditionally rather than folded into the empty-state text
+            below, since a non-empty timeline can be missing entries from
+            the failed devices too. */}
+        {loaded && partial && (
+          <div style={{
+            padding: '8px 9px', borderRadius: 6, marginBottom: 10,
+            background: withAlpha(RT.amber, 0.12), border: `1px solid ${withAlpha(RT.amber, 0.4)}`,
+            fontSize: 11.5, color: RT.amber, lineHeight: 1.4, fontFamily: FONT_MONO,
+          }}>
+            Some devices didn't answer. This list may be incomplete.
+          </div>
+        )}
         {visible.length === 0 && (
           <div style={{ padding: 32, textAlign: 'center', color: RT.textLow, fontFamily: FONT_MONO, fontSize: 13, border: `1px dashed ${RT.border}`, borderRadius: 10 }}>
-            No recent activity.
+            {loaded ? 'No recent activity.' : 'Loading activity…'}
           </div>
         )}
         {visible.map((e, i) => {

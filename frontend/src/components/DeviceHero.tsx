@@ -85,12 +85,20 @@ export function DeviceHero({ device, cards, mobile = false, onClose, onStopAllDo
     }
   };
 
-  // lastActivity: if loadPct>0 → 'just now', sessions>0 → 'active', else 'idle'
-  const lastActivity = device.loadPct > 0 ? 'just now' : device.sessions > 0 ? 'active' : 'idle';
+  // lastActivity: if loadPct>0 → 'just now', sessions>0 → 'active', else
+  // 'idle'. An unreachable device (device.online false) has no
+  // loadPct/sessions reading to derive this from: overview.py reports
+  // both null for a device it cannot reach, never a fabricated 0/0 that
+  // would otherwise read as a confirmed "idle" here.
+  const lastActivity = !device.online ? '—'
+    : (device.loadPct ?? 0) > 0 ? 'just now'
+    : (device.sessions ?? 0) > 0 ? 'active'
+    : 'idle';
 
-  // CPU load as 0-100
+  // CPU load as 0-100. null (device unreachable) must not compute a color
+  // or feed the bar as though it were a real 0% reading.
   const cpuPct = device.loadPct;
-  const cpuBarColor = cpuPct > 85 ? RT.red : cpuPct > 60 ? RT.amber : hueColor;
+  const cpuBarColor = cpuPct != null && cpuPct > 85 ? RT.red : cpuPct != null && cpuPct > 60 ? RT.amber : hueColor;
 
   return (
     <div style={{
@@ -105,8 +113,11 @@ export function DeviceHero({ device, cards, mobile = false, onClose, onStopAllDo
           <button
             onClick={onClose}
             style={{
+              // 44px mobile floor (Apple HIG / Material): this button only
+              // ever renders on mobile (guarded above), so no desktop size
+              // to preserve.
               background: RT.panel, border: `1px solid ${RT.border}`, borderRadius: 7,
-              width: 30, height: 30, padding: 0, cursor: 'pointer',
+              width: 44, height: 44, padding: 0, cursor: 'pointer',
               display: 'flex', alignItems: 'center', justifyContent: 'center', flex: 'none',
             }}
           >
@@ -148,7 +159,7 @@ export function DeviceHero({ device, cards, mobile = false, onClose, onStopAllDo
               <Icons.globe size={11} stroke={RT.textLow} /> {device.os || 'unknown'}
             </span>
             <span style={{ color: RT.borderHi }}>·</span>
-            <span>{device.loadPct}% cpu</span>
+            <span>{device.loadPct != null ? `${device.loadPct}% cpu` : 'cpu —'}</span>
             {device.version && (() => {
               const hubLauncherVersion = cards.find((x) => x.id === 'local')?.version;
               const skewed = hubLauncherVersion && device.version !== hubLauncherVersion;
@@ -231,7 +242,7 @@ export function DeviceHero({ device, cards, mobile = false, onClose, onStopAllDo
         />
         <V5Stat
           label="Sessions"
-          value={device.sessions}
+          value={device.sessions ?? '—'}
           sub="active"
           divider={!mobile}
           mobile={mobile}
@@ -244,8 +255,8 @@ export function DeviceHero({ device, cards, mobile = false, onClose, onStopAllDo
         />
         <V5Stat
           label="CPU load"
-          value={`${device.loadPct}%`}
-          bar={cpuPct}
+          value={device.loadPct != null ? `${device.loadPct}%` : '—'}
+          bar={cpuPct ?? undefined}
           barColor={cpuBarColor}
           divider={!mobile}
           mobile={mobile}

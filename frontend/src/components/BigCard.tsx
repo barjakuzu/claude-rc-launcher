@@ -70,8 +70,15 @@ export function BigCard({ card, cards, onClick, mobile = false, usage }: BigCard
   const tokensSub = usage.partial === true ? 'effective · partial' : 'effective';
   const tokensSubColor = usage.partial === true ? RT.amber : undefined;
 
-  // lastActivity mapping
-  const lastActivity = card.loadPct > 0 ? 'just now' : card.sessions > 0 ? 'active' : 'idle';
+  // lastActivity mapping. An unreachable device (card.online false) has
+  // no loadPct/sessions reading to derive this from: overview.py reports
+  // both null for a device it cannot reach, never a fabricated 0/0 that
+  // would otherwise read as a confirmed "idle" here. Leave the sub-label
+  // off rather than asserting an activity state we don't actually know.
+  const lastActivity = !card.online ? undefined
+    : (card.loadPct ?? 0) > 0 ? 'just now'
+    : (card.sessions ?? 0) > 0 ? 'active'
+    : 'idle';
 
   return (
     <div
@@ -167,12 +174,12 @@ export function BigCard({ card, cards, onClick, mobile = false, usage }: BigCard
         />
         <V5Stat
           label="Sessions"
-          value={card.sessions}
+          value={card.sessions ?? '—'}
           sub="active"
         />
         <V5Stat
           label="CPU"
-          value={`${card.loadPct}%`}
+          value={card.loadPct != null ? `${card.loadPct}%` : '—'}
           sub={lastActivity}
         />
       </div>

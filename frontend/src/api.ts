@@ -562,6 +562,40 @@ export interface AuditEntry {
   detail: string;
 }
 
+// Thrown by req() for the one error shape server.py's _proxy_to_device
+// (the single per-device proxy path every device-scoped call below goes
+// through) produces itself: a 502 {"error": "device unreachable",
+// "detail": ...} when the hub could not reach the device at the network
+// level at all (connection refused, timeout, DNS failure...). This is
+// NEVER what a device sends back on its own -- when the device answers
+// with its own error, _proxy_to_device relays that response through
+// as-is (its own status and body), which req() still resolves normally,
+// unchanged. "Device unreachable" is itself information, distinguishable
+// from every other kind of failure, so callers that want to tell "I now
+// know this is unreachable" apart from "something else went wrong, keep
+// what I had" can catch this specifically (see usePanelData.ts, Logs.tsx).
+export class DeviceUnreachableError extends Error {
+  constructor(detail?: string) {
+    super(detail ? `device unreachable: ${detail}` : 'device unreachable');
+    this.name = 'DeviceUnreachableError';
+  }
+}
+
+// Thrown by req() for any OTHER response whose entire body is just an
+// error signal ({"error": "..."}, optionally with "detail"): a device's
+// own real answer (relayed through as-is by _proxy_to_device) to a bad
+// request -- "unknown device" (404, dev_id not in the registry), "Access
+// denied"/"Not a directory"/"Permission denied" (/browse, 403/400),
+// "Session not found" (/preview, 404), and so on, none of which are the
+// "device unreachable" shape above. Distinct from DeviceUnreachableError
+// so a caller that cares about that specific distinction still can.
+export class ApiError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ApiError';
+  }
+}
+
 async function req(method: string, path: string, device?: string, body?: unknown) {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (device && device !== 'local') headers['X-RC-Device'] = device;
@@ -569,7 +603,68 @@ async function req(method: string, path: string, device?: string, body?: unknown
   if (body) opts.body = JSON.stringify(body);
   const r = await fetch('/rc' + path, opts);
   if (r.status === 401) { window.location.href = '/login'; throw new Error('auth'); }
-  return r.json();
+  const data = await r.json();
+  // The generator fix: every call built on req() used to resolve this
+  // exact error body as if it were real data (Array.isArray false,
+  // ?.sessions/?.dirs/?.output all undefined -> most call sites' own "??
+  // []"/"?? ''" fallbacks quietly produced a plausible-looking empty
+  // result instead of ever reaching their own catch block's honest
+  // "we don't know" handling), which is how a confirmed "the hub can't
+  // reach this device" turned into a false "no sessions"/"no matching
+  // subfolders"/"live" claim at several unrelated call sites, and, for at
+  // least one caller that read a field off it with no defensive check at
+  // all (Logs.tsx's stats.loadavg[0]), a crash. Throwing here instead
+  // routes every one of those callers into whatever they already do for
+  // a failure -- most already have a working catch block for network
+  // errors and needed no other change once this one case stopped being
+  // silently treated as success.
+  if (r.status === 502 && data && typeof data === 'object' && data.error === 'device unreachable') {
+    throw new DeviceUnreachableError(typeof data.detail === 'string' ? data.detail : undefined);
+  }
+  // Round 5: restores coverage a call-site-local isErrorResponse() check
+  // used to give usePanelData.ts before round 3 deleted it, but here in
+  // the generator so every caller gets it, not just the ones somebody
+  // remembered to check. Any status, not just 502: a device's own error
+  // response ("unknown device," "Access denied," "Session not found," ...)
+  // is exactly as much "not data" as the synthetic unreachable one above.
+  // Restricted to a body whose ONLY keys are "error"/"detail" (a real
+  // payload alongside an error, like /schedules' {"schedules": [...],
+  // "error": schedules.LAST_LOAD_ERROR} for a corrupt schedules.json,
+  // is NOT this: that's real, usable data with a caveat attached, not a
+  // failure, and req() has no per-endpoint knowledge to tell those apart
+  // any other way -- the caller reads that "error" field itself, same as
+  // it already does for the schedules case).
+  if (data && typeof data === 'object' && !Array.isArray(data)
+      && typeof (data as { error?: unknown }).error === 'string') {
+    const keys = Object.keys(data as Record<string, unknown>);
+    if (keys.every((k) => k === 'error' || k === 'detail')) {
+      throw new ApiError((data as { error: string }).error);
+    }
+  }
+  return data;
+}
+
+// A metadata-role device answers ANY path outside its small allowlist
+// (server.py's METADATA_ALLOWED_GET_PATHS check, not endpoint-specific)
+// with {"ok": false, "message": "This device is metadata-role only"} at
+// 403 -- reachable by GET /sessions, /schedules, /resume/sessions, and
+// others alike, and a metadata-role device is a real, reachable role
+// devices in this fleet actually run, not a hypothetical one.
+// Deliberately NOT thrown from req() itself, unlike
+// ApiError above: {"ok": false, "message": ...} is ALSO the normal,
+// expected response shape for every mutating action in this app
+// (start/stop/restart/enableRc/deviceRename/POST /update/...), whose own
+// callers already read result.ok/result.message directly as real data,
+// not a failure (POST /update's 409 confirmation-needed response is the
+// same shape plus real extra fields, read correctly at Header.tsx's
+// runUpdateFlow). req() has no way to tell which kind of endpoint it's
+// serving, so making it throw for every {"ok": false} body would break
+// all of those. Exported for a read-only endpoint's own caller to check
+// for itself before treating the response as its expected list/array
+// shape -- the same reasoning /schedules' error-plus-data shape stays a
+// caller's job rather than the generator's (see ApiError above).
+export function isFailureEnvelope(v: unknown): v is { ok: false; message?: string } {
+  return !!v && typeof v === 'object' && (v as { ok?: unknown }).ok === false;
 }
 
 // Mirrors api.overview()'s fetch style — hub-only, never proxied to a device.

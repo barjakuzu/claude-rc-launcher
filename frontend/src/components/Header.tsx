@@ -171,7 +171,7 @@ function MachineSelector({ cards, openId, setOpenId, layout }: MachineSelectorPr
                 right={
                   <div style={{ textAlign: 'right' }}>
                     <div style={{ fontFamily: FONT_MONO, fontSize: 12 }}>{fmtK(c.tokens)}</div>
-                    <div style={{ fontFamily: FONT_MONO, fontSize: 11, color: RT.textLow }}>{c.sessions} sess</div>
+                    <div style={{ fontFamily: FONT_MONO, fontSize: 11, color: RT.textLow }}>{c.sessions ?? '—'} sess</div>
                   </div>
                 }
               />
@@ -519,9 +519,11 @@ export function Header({ cards, openId, setOpenId, layout, onRefresh }: HeaderPr
         {/* Alerts indicator: hidden entirely when clean */}
         <AlertsIndicator mobile={layout.mobile} />
 
-        {/* Share tunnel button */}
+        {/* Share tunnel button. 44px mobile floor (Apple HIG / Material),
+            same as the AllSessions.tsx/AllScheduled.tsx row of buttons this
+            was left behind at 40px against. */}
         <button
-          style={{ ...btn('icon'), width: layout.mobile ? 40 : 32, height: layout.mobile ? 40 : 32 }}
+          style={{ ...btn('icon'), width: layout.mobile ? 44 : 32, height: layout.mobile ? 44 : 32 }}
           title="Share tunnel"
           onClick={() => setShareOpen(true)}
         >

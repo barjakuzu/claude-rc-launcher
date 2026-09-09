@@ -14,7 +14,13 @@ export interface DeviceUsage {
 
 export interface DeviceCard {
   id: string; name: string; online: boolean; hostname: string;
-  sessions: number; tokens: number; loadPct: number; os: string; spark: number[];
+  /** null (never a fabricated 0) when overview.py could not reach this
+   * device at all: it genuinely does not know the session count or CPU
+   * reading, and reporting 0 would read as "confirmed none"/"confirmed
+   * idle" instead of "unknown". Present as a real number whenever
+   * `online` is true. */
+  sessions: number | null; tokens: number; loadPct: number | null;
+  os: string; spark: number[];
   /** Process user on the device, e.g. "alice" or "root". May be empty if device on older code. */
   user?: string;
   /** Home directory on the device, e.g. "/home/alice" or "/root". May be empty. */

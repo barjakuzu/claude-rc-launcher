@@ -115,8 +115,10 @@ export function AlertsIndicator({ mobile = false }: { mobile?: boolean }) {
         title={title}
         style={{
           ...btn('icon'),
-          width: mobile ? 40 : 32,
-          height: mobile ? 40 : 32,
+          // 44px mobile floor (Apple HIG / Material), same as the Share
+          // tunnel button beside this one in the header.
+          width: mobile ? 44 : 32,
+          height: mobile ? 44 : 32,
           position: 'relative',
           borderColor: (hasFindings || configError || unavailable) ? withAlpha(color, 0.4) : RT.border,
           color,

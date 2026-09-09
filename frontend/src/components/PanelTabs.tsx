@@ -7,8 +7,9 @@ export type PanelTab = 'running' | 'scheduled' | 'logs' | 'settings';
 export interface PanelTabsProps {
   tab: PanelTab;
   setTab: (t: PanelTab) => void;
-  sessionCount: number;
-  scheduledCount: number;
+  /** null means "not loaded yet" - rendered as no count, same as Logs/Settings. */
+  sessionCount: number | null;
+  scheduledCount: number | null;
   onResume?: () => void;
   mobile?: boolean;
 }

@@ -1,6 +1,6 @@
 // DeviceDetail.tsx — V5 main-area device detail (hero + launcher + tabs + body).
 import { useState } from 'react';
-import { RT, FONT_MONO, hueForId } from '../tokens';
+import { RT, FONT_MONO, hueForId, withAlpha } from '../tokens';
 import { DeviceHero } from './DeviceHero';
 import { V5Launcher } from './V5Launcher';
 import { PanelTabs } from './PanelTabs';
@@ -29,7 +29,13 @@ export interface DeviceDetailProps {
 
 export function DeviceDetail({ device, cards, tab, setTab, onClose, layout, usage }: DeviceDetailProps) {
   const hue = hueForId(device.id);
-  const { sessions, scheduled, reloadSessions, reloadSchedules } = usePanelData(device.id, tab);
+  const {
+    sessions, scheduled,
+    hasLoadedSessions, hasLoadedScheduled,
+    sessionsUnreachable, scheduledUnreachable,
+    sessionsError, scheduledError, scheduledLoadError,
+    reloadSessions, reloadSchedules,
+  } = usePanelData(device.id, tab);
 
   const [modalOpen, setModalOpen]   = useState(false);
   const [editing, setEditing]       = useState<Schedule | null>(null);
@@ -64,8 +70,8 @@ export function DeviceDetail({ device, cards, tab, setTab, onClose, layout, usag
       <PanelTabs
         tab={tab}
         setTab={setTab}
-        sessionCount={sessions.length}
-        scheduledCount={scheduled.length}
+        sessionCount={hasLoadedSessions ? sessions.length : null}
+        scheduledCount={hasLoadedScheduled ? scheduled.length : null}
         onResume={() => setResumeOpen(true)}
         mobile={mobile}
       />
@@ -84,7 +90,24 @@ export function DeviceDetail({ device, cards, tab, setTab, onClose, layout, usag
                 this device's here would mean scrolling past the same
                 rows twice on a phone screen. */}
             {sessions.length === 0 ? (
-              <V5Empty text={device.online ? `No active sessions on ${device.name}. Launch one above.` : 'Device offline.'} />
+              <V5Empty text={
+                !hasLoadedSessions ? 'Loading sessions…'
+                // Round 4: this used to defer to device.online, from the
+                // separate, staler /rc/overview poll. usePanelData's own
+                // direct probe is fresher and more authoritative for this
+                // exact question, and a successful fetch (hasLoadedSessions
+                // true, sessionsUnreachable false) already proves the
+                // device answered, so it wins outright rather than being
+                // cross-checked against a second opinion that can lag
+                // behind it in either direction.
+                : sessionsUnreachable ? 'Device offline.'
+                // Round 6: a reachable device that refused this specific
+                // request (most commonly a metadata-role device's blanket
+                // 403) is neither "offline" nor "confirmed zero sessions":
+                // its own message.
+                : sessionsError ? sessionsError
+                : `No active sessions on ${device.name}. Launch one above.`
+              } />
             ) : (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                 {sessions.map((s) => (
@@ -111,6 +134,25 @@ export function DeviceDetail({ device, cards, tab, setTab, onClose, layout, usag
 
         {tab === 'scheduled' && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {/* Round 4: GET /schedules answers 200 with an "error" field
+                (schedules.LAST_LOAD_ERROR) when this device's own
+                schedules.json failed to parse or dropped invalid entries,
+                and load_schedules() keeps whatever validated (possibly
+                non-empty), so this can't-be-fully-trusted state isn't
+                limited to the empty-list case below. Same treatment
+                AlertsIndicator.tsx's config_error banner already gives a
+                broken guard.json: surfaced unconditionally, not folded
+                into the empty-state text, since a real (but possibly
+                incomplete) list still needs the same caveat. */}
+            {scheduledLoadError && (
+              <div style={{
+                padding: '8px 9px', borderRadius: 6,
+                background: withAlpha(RT.amber, 0.12), border: `1px solid ${withAlpha(RT.amber, 0.4)}`,
+                fontSize: 11.5, color: RT.amber, lineHeight: 1.4, fontFamily: FONT_MONO,
+              }}>
+                Schedules file has a problem: {scheduledLoadError}. The list below may be incomplete.
+              </div>
+            )}
             {/* New schedule button */}
             <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 4 }}>
               <button
@@ -127,7 +169,27 @@ export function DeviceDetail({ device, cards, tab, setTab, onClose, layout, usag
             </div>
 
             {scheduled.length === 0 ? (
-              <V5Empty text="No scheduled tasks on this device." />
+              // Round 5: this used to read hasLoadedScheduled only, so an
+              // unreachable device's Scheduled tab still confidently said
+              // "No scheduled tasks on this device." (only the Sessions
+              // tab consulted its own unreachable signal). Wired to
+              // scheduledUnreachable here too -- this fetch's OWN signal,
+              // not a shared one (round 6: a shared deviceUnreachable let
+              // this fetch succeeding silently clear what the Sessions
+              // fetch separately knew; each tab reads only what its own
+              // fetch most recently confirmed). Also suppresses this
+              // empty-state claim entirely when scheduledLoadError is set:
+              // the banner above already says the file couldn't be
+              // trusted, and "No scheduled tasks" right beside it would
+              // still read as a confident count, contradicting its own
+              // caveat.
+              !hasLoadedScheduled ? <V5Empty text="Loading scheduled tasks…" />
+              : scheduledUnreachable ? <V5Empty text="Device offline." />
+              // Round 6: a reachable device that refused this specific
+              // request (metadata-role, most commonly).
+              : scheduledError ? <V5Empty text={scheduledError} />
+              : scheduledLoadError ? null
+              : <V5Empty text="No scheduled tasks on this device." />
             ) : (
               scheduled.map((s) => (
                 <ScheduledRow

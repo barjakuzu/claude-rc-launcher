@@ -25,9 +25,25 @@ class OverviewTest(unittest.TestCase):
             sessions=None, stats=None,
         )
         self.assertFalse(card["online"])
-        self.assertEqual(card["sessions"], 0)
+        # An unreachable device cannot vouch for a session count or a CPU
+        # reading: null, not a fabricated 0 that would read as "confirmed
+        # none"/"confirmed idle". tokens is untouched by this (a separate,
+        # already-flagged stale field).
+        self.assertIsNone(card["sessions"])
+        self.assertIsNone(card["loadPct"])
         self.assertEqual(card["tokens"], 0)
         self.assertEqual(card["spark"], [])
+
+    def test_unreachable_device_reports_null_not_zero(self):
+        # fetch_remote_card's except branch (the real caller for a device
+        # that couldn't be reached at all) calls exactly this shape:
+        # sessions and stats both None, online explicitly False.
+        card = overview.card_from_parts(
+            device={"id": "x", "name": "X", "base_url": "http://x:8200"},
+            sessions=None, stats=None, online=False,
+        )
+        self.assertIsNone(card["sessions"])
+        self.assertIsNone(card["loadPct"])
 
     def test_online_with_sessions_but_no_stats(self):
         card = overview.card_from_parts(
@@ -285,6 +301,8 @@ class RedirectNeverForwardsBasicAuthTest(unittest.TestCase):
                   "auth_user": "hub", "auth_pass": "super-secret-device-password"}
         card = overview.fetch_remote_card(device)
         self.assertFalse(card["online"])
+        self.assertIsNone(card["sessions"])
+        self.assertIsNone(card["loadPct"])
         self.assertEqual(_AttackerHandler.hits, [])
 
 

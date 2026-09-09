@@ -34,7 +34,7 @@ export function DeviceSettings({ device, cards, mobile = false }: DeviceSettings
         setSaved(true);
       }
     } catch {
-      setError('Network error — could not reach hub.');
+      setError('Network error: could not reach hub.');
     } finally {
       setPending(false);
     }
