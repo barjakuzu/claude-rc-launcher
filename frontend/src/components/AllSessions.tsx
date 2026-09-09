@@ -119,7 +119,10 @@ export function AllSessions({ onOpenDevice }: AllSessionsProps) {
   // the one signal that only means the server has answered at least once.
 
   return (
-    <div style={{ flex: 1, overflow: 'auto', display: 'flex', flexDirection: 'column' }}>
+    <div style={{
+      flex: 1, overflow: 'auto', display: 'flex', flexDirection: 'column',
+      WebkitOverflowScrolling: 'touch', overscrollBehavior: 'contain',
+    }}>
       <MobileHeader
         subtitle={fleetLoaded
           ? `${sessions.length} total session${sessions.length !== 1 ? 's' : ''} · across ${deviceCount} device${deviceCount !== 1 ? 's' : ''}${connectionNote}`

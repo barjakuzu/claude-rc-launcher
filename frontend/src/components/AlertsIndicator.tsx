@@ -150,6 +150,7 @@ export function AlertsIndicator({ mobile = false }: { mobile?: boolean }) {
           background: RT.panel, border: `1px solid ${RT.borderHi}`,
           borderRadius: 10, width: 340, maxWidth: 'calc(100vw - 28px)',
           maxHeight: 420, overflow: 'auto', padding: 6,
+          WebkitOverflowScrolling: 'touch', overscrollBehavior: 'contain',
           zIndex: Z.sticky, boxShadow: '0 12px 36px rgba(0,0,0,.4)',
           fontFamily: FONT_SANS,
         }}>

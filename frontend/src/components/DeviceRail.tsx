@@ -117,6 +117,7 @@ export function DeviceRail({ cards, openId, setOpenId }: DeviceRailProps) {
         flex: 1, overflow: 'auto',
         padding: '0 8px 10px',
         display: 'flex', flexDirection: 'column', gap: 4,
+        WebkitOverflowScrolling: 'touch', overscrollBehavior: 'contain',
       }}>
         {cards.map((card) => (
           <V5RailItem

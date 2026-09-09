@@ -84,7 +84,10 @@ export function ConfigMatrixView({ cards }: { cards: DeviceCard[] }) {
   });
 
   return (
-    <div style={{ flex: 1, overflow: 'auto', padding: 16 }}>
+    <div style={{
+      flex: 1, overflow: 'auto', padding: 16,
+      WebkitOverflowScrolling: 'touch', overscrollBehavior: 'contain',
+    }}>
       {matrix.hub_head && (
         <div style={{ fontSize: 10, color: RT.textLow, fontFamily: FONT_MONO, marginBottom: 10 }}>
           hub HEAD: {matrix.hub_head.slice(0, 12)}

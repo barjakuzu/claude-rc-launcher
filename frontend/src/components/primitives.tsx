@@ -18,6 +18,18 @@ export function ensureKeyframes(): void {
       0%, 100% { opacity: 0.55; }
       50%      { opacity: 1; }
     }
+    /* One authored view-transition moment (mobile shell, v4): a new mobile
+       top-level view (grid / device detail / cross-device tab) eases in
+       from a slight offset rather than snapping into place, so switching
+       feels like a push, not a repaint. Exponential ease-out from an
+       already-visible default (8px/98% -> identity), not a slide from
+       off-screen: there is no persistent adjacent view to slide against
+       here, so a full edge-to-edge slide would just be motion for its own
+       sake. */
+    @keyframes rc-push-in {
+      from { opacity: 0; transform: translateY(6px) scale(.994); }
+      to   { opacity: 1; transform: translateY(0) scale(1); }
+    }
   `;
   document.head.appendChild(s);
 }

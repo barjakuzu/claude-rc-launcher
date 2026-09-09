@@ -50,7 +50,21 @@ export function DeviceDetail({ device, cards, tab, setTab, onClose, layout, usag
   function handleSaved() { reloadSchedules(); closeModal(); }
 
   return (
-    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minHeight: 0 }}>
+    // Round 8 (mobile-shell v4): this used to be overflow:'hidden' with only
+    // the Body div below scrolling (flex:1/overflow:'auto'). On a short
+    // viewport, Hero+Launcher+Tabs alone can exceed the space available
+    // between the fixed header and bottom nav (e.g. a 390x844 phone), and
+    // since nothing above Body could scroll, the rest of the column was
+    // simply clipped and permanently unreachable -- the "cannot scroll
+    // down on device detail" regression. The whole column now scrolls as
+    // one unit between the app's fixed header/nav; PanelTabs below is
+    // sticky so it still reads as a pinned sub-nav once Hero/Launcher have
+    // scrolled past, without requiring the old fixed-height layout that
+    // broke on short screens.
+    <div style={{
+      flex: 1, display: 'flex', flexDirection: 'column', overflow: 'auto', minHeight: 0,
+      WebkitOverflowScrolling: 'touch', overscrollBehavior: 'contain',
+    }}>
       <DeviceHero
         device={device}
         cards={cards}
@@ -67,18 +81,22 @@ export function DeviceDetail({ device, cards, tab, setTab, onClose, layout, usag
         onLaunched={() => { reloadSessions(); setTab('running'); }}
       />
 
-      <PanelTabs
-        tab={tab}
-        setTab={setTab}
-        sessionCount={hasLoadedSessions ? sessions.length : null}
-        scheduledCount={hasLoadedScheduled ? scheduled.length : null}
-        onResume={() => setResumeOpen(true)}
-        mobile={mobile}
-      />
+      {/* Sticky sub-nav: stays pinned under the app header once Hero/
+          Launcher have scrolled past, instead of scrolling away with them. */}
+      <div style={{ position: 'sticky', top: 0, zIndex: 1, flex: 'none' }}>
+        <PanelTabs
+          tab={tab}
+          setTab={setTab}
+          sessionCount={hasLoadedSessions ? sessions.length : null}
+          scheduledCount={hasLoadedScheduled ? scheduled.length : null}
+          onResume={() => setResumeOpen(true)}
+          mobile={mobile}
+        />
+      </div>
 
-      {/* Body */}
+      {/* Body: no longer its own flex:1/overflow:auto region, it is now
+          just more content in the single scrolling column above. */}
       <div style={{
-        flex: 1, overflow: 'auto',
         padding: mobile ? '12px 12px 32px' : '16px 20px',
         background: RT.bg,
       }}>

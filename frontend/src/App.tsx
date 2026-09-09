@@ -166,23 +166,57 @@ export function App() {
           <DeviceRail cards={cards} openId={openId} setOpenId={handleOpen} />
         )}
 
-        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minWidth: 0 }}>
-          {layout.mobile && mTab !== 'devices' ? (
-            // Mobile cross-device tab views.
-            <>
-              {mTab === 'sessions' && (
-                <AllSessions onOpenDevice={handleOpenDevice} />
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minWidth: 0, minHeight: 0 }}>
+          {layout.mobile ? (
+            // Mobile: every top-level view (grid / device detail / cross-
+            // device tab) shares one animated slot, keyed by whichever view
+            // is currently showing. Remounting on key change gives each
+            // switch a fresh, consistent "push" entrance (see rc-push-in in
+            // primitives.tsx) instead of an instant repaint -- one authored
+            // transition reused everywhere a mobile view changes, rather
+            // than a bespoke animation per tab.
+            <div
+              key={mTab !== 'devices' ? mTab : openCard ? `device:${openCard.id}` : 'grid'}
+              style={{
+                flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0,
+                animation: 'rc-push-in 220ms cubic-bezier(.2,.7,.2,1)',
+              }}
+            >
+              {mTab !== 'devices' ? (
+                <>
+                  {mTab === 'sessions' && (
+                    <AllSessions onOpenDevice={handleOpenDevice} />
+                  )}
+                  {mTab === 'scheduled' && (
+                    <AllScheduled cards={cards} hasLoadedCards={hasLoadedCards} />
+                  )}
+                  {mTab === 'activity' && (
+                    <Activity cards={cards} hasLoadedCards={hasLoadedCards} />
+                  )}
+                  {mTab === 'cost' && (
+                    <CostView onOpenDevice={handleOpenDevice} />
+                  )}
+                </>
+              ) : openCard ? (
+                <DeviceDetail
+                  device={openCard}
+                  cards={cards}
+                  tab={tab}
+                  setTab={setTab}
+                  onClose={() => handleOpen(null)}
+                  layout={layout}
+                  usage={usageByDevice.get(openCard.id) ?? { effective: null, partial: undefined }}
+                />
+              ) : (
+                <OverviewGrid
+                  cards={cards}
+                  layout={layout}
+                  onOpen={handleOpen}
+                  usageByDevice={usageByDevice}
+                  hasLoadedCards={hasLoadedCards}
+                />
               )}
-              {mTab === 'scheduled' && (
-                <AllScheduled cards={cards} hasLoadedCards={hasLoadedCards} />
-              )}
-              {mTab === 'activity' && (
-                <Activity cards={cards} hasLoadedCards={hasLoadedCards} />
-              )}
-              {mTab === 'cost' && (
-                <CostView onOpenDevice={handleOpenDevice} />
-              )}
-            </>
+            </div>
           ) : openCard ? (
             // Device detail — full main area
             <DeviceDetail
@@ -193,15 +227,6 @@ export function App() {
               onClose={() => handleOpen(null)}
               layout={layout}
               usage={usageByDevice.get(openCard.id) ?? { effective: null, partial: undefined }}
-            />
-          ) : layout.mobile ? (
-            // Overview grid — big cards
-            <OverviewGrid
-              cards={cards}
-              layout={layout}
-              onOpen={handleOpen}
-              usageByDevice={usageByDevice}
-              hasLoadedCards={hasLoadedCards}
             />
           ) : (
             // Desktop "All devices" overview: Devices / Tasks / Sessions / Config.
@@ -299,6 +324,18 @@ import type { Layout } from './useLayout';
 // OverviewGrid. Round 3: dropped the Load cell (same reasoning as
 // Strip.tsx) and added a LimitsSummary row: account limits, not CPU load,
 // is what the user asked to have visible "like the status bar".
+//
+// Round 8 (mobile-shell v4): that limits row used to repeat LimitsSummary's
+// full two-column block (percent + bar + countdown, twice), which alone
+// ran ~80-90px tall. On a 390-wide phone the whole card came out to ~136px,
+// covering roughly a third of the screen above Sessions/Tasks/every other
+// tab -- the user's own complaint. LimitsSummary now renders a single
+// compact line on mobile (percent only, tap to expand the same detail
+// dropdown it always had), so this card drops to roughly a third of its
+// old height while staying always-visible on every tab, not just Devices:
+// findable without hunting, without displacing the tab's own content.
+// Desktop's Strip.tsx is untouched -- it has the width to spare and keeps
+// the full block.
 function MobileTopStrip({ cards, totalTokens, hasLoadedCards }: {
   cards: DeviceCard[]; totalTokens: number | null; hasLoadedCards: boolean;
 }) {
@@ -325,12 +362,12 @@ function MobileTopStrip({ cards, totalTokens, hasLoadedCards }: {
   return (
     <div style={{
       flex: 'none', margin: '10px 12px', background: RT.card,
-      border: `1px solid ${RT.border}`, borderRadius: 10, padding: 12,
+      border: `1px solid ${RT.border}`, borderRadius: 10, padding: '10px 12px',
     }}>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8 }}>
         {cells.map((c) => (
           <div key={c.label}>
-            <div style={{ fontSize: 9, color: RT.textLow, letterSpacing: '.14em', textTransform: 'uppercase', fontFamily: FONT_MONO }}>{c.label}</div>
+            <div style={{ fontSize: 10, color: RT.textLow, letterSpacing: '.12em', textTransform: 'uppercase', fontFamily: FONT_MONO }}>{c.label}</div>
             <div style={{ display: 'flex', alignItems: 'baseline', gap: 4, marginTop: 3 }}>
               {c.dot && <span style={{ width: 5, height: 5, borderRadius: 5, background: c.dot, display: 'inline-block' }} />}
               <div style={{ fontFamily: FONT_MONO, fontSize: 15, fontWeight: 500 }}>{c.value}</div>
@@ -338,7 +375,7 @@ function MobileTopStrip({ cards, totalTokens, hasLoadedCards }: {
           </div>
         ))}
       </div>
-      <div style={{ height: 1, background: RT.border, margin: '11px 0 9px' }} />
+      <div style={{ height: 1, background: RT.border, margin: '9px 0 7px' }} />
       <LimitsSummary mobile />
     </div>
   );
@@ -349,7 +386,10 @@ function OverviewGrid({ cards, layout, onOpen, usageByDevice, hasLoadedCards }: 
   const cols = layout.mobile ? 1 : layout.tablet ? Math.min(2, n) : Math.min(3, n);
 
   return (
-    <div style={{ flex: 1, overflow: 'auto', padding: layout.mobile ? 14 : 24 }}>
+    <div style={{
+      flex: 1, overflow: 'auto', padding: layout.mobile ? 14 : 24,
+      WebkitOverflowScrolling: 'touch', overscrollBehavior: 'contain',
+    }}>
       <div style={{ display: 'flex', alignItems: 'baseline', marginBottom: 16, gap: 10 }}>
         <div style={{
           fontSize: 11, color: RT.textDim, letterSpacing: '.14em',

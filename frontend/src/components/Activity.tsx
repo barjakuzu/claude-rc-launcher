@@ -78,7 +78,10 @@ export function Activity({ cards, hasLoadedCards }: ActivityProps) {
   const visible = events.slice(0, 30);
 
   return (
-    <div style={{ flex: 1, overflow: 'auto', display: 'flex', flexDirection: 'column' }}>
+    <div style={{
+      flex: 1, overflow: 'auto', display: 'flex', flexDirection: 'column',
+      WebkitOverflowScrolling: 'touch', overscrollBehavior: 'contain',
+    }}>
       <MobileHeader
         subtitle="last 24 hours"
         title="Activity"

@@ -87,9 +87,19 @@ export function ShareTunnel({ onClose }: ShareTunnelProps) {
         zIndex: Z.modal,
         background: 'rgba(0,0,0,.5)',
         display: 'flex',
+        flexDirection: 'column',
         alignItems: 'center',
-        justifyContent: 'center',
-        padding: '20px 16px',
+        // Round 8 (mobile-shell v4): top-anchored with generous top/bottom
+        // padding (not alignItems/justifyContent: 'center' on the cross
+        // axis) plus overflowY:'auto' is what lets a card taller than a
+        // short viewport (a landscape phone, a small window) still be
+        // reached by scrolling the backdrop -- true center alignment on a
+        // fixed flex container clips whatever doesn't fit, with no way to
+        // reveal it. 10vh top/bottom reads as centered for the common
+        // case and simply scrolls once content needs more than that.
+        padding: '10vh 16px',
+        overflowY: 'auto',
+        WebkitOverflowScrolling: 'touch',
       }}
     >
       {/* Card */}
@@ -98,6 +108,7 @@ export function ShareTunnel({ onClose }: ShareTunnelProps) {
         style={{
           width: '100%',
           maxWidth: 400,
+          flex: 'none',
           background: RT.panel,
           border: `1px solid ${RT.borderHi}`,
           borderRadius: 12,

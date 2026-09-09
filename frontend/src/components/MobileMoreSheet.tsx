@@ -136,6 +136,16 @@ export function MobileMoreSheet({
           borderTopLeftRadius: 16,
           borderTopRightRadius: 16,
           padding: 12,
+          paddingBottom: 'calc(12px + env(safe-area-inset-bottom))',
+          // A sheet taller than the viewport (many items, a small phone)
+          // must still scroll internally rather than push its own bottom
+          // rows off-screen with no way to reach them -- same requirement
+          // as any modal here. Capped well short of 100dvh so the backdrop
+          // above the sheet stays visible as a dismiss target.
+          maxHeight: 'calc(100dvh - env(safe-area-inset-top) - 40px)',
+          overflowY: 'auto',
+          WebkitOverflowScrolling: 'touch',
+          overscrollBehavior: 'contain',
           // Reserve space for the bottom nav above which this sheet sits.
           // The nav is ~60px; we push the sheet content up but allow it to
           // extend to the bottom edge so the backdrop fills behind the nav too.

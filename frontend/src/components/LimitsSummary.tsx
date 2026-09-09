@@ -31,6 +31,7 @@ import {
   deriveAgeSeconds, isReadingStale,
 } from '../limitsFormat';
 import { formatRelativeTime } from '../relativeTime';
+import { Icons } from './primitives';
 import type { LimitsWindow, LimitsScoped, LimitsPrimary, LimitsReport } from '../api';
 
 // ─── Compact cell: the always-visible headline reading ──────────────────
@@ -92,6 +93,33 @@ function WindowCell({ label, window, now, compact, loading, dataStale, ageSecond
         {countdown}
       </div>
     </div>
+  );
+}
+
+// Round 8 (mobile-shell v4): the mobile strip used to repeat WindowCell's
+// full two-column block (label + big percent + bar + countdown, twice),
+// which alone ran ~80-90px tall and, combined with the rest of the strip,
+// covered roughly a third of a 390-wide phone screen above every tab. On
+// a phone, the countdown and the bar are drill-down detail, not headline
+// information -- the number is. LineChip is that headline alone, sized to
+// sit on one line: label, percent, done. Everything WindowCell drew below
+// it (bar, countdown, staleness prose) still lives one tap away in the
+// unchanged LimitsDetail dropdown below.
+function LineChip({ label, window, color: colorOverride }: {
+  label: string; window: LimitsWindow | null; color?: string;
+}) {
+  const has = window != null;
+  const color = colorOverride ?? (has ? limitColor(window.percent, window.severity) : RT.textLow);
+  return (
+    <span style={{ display: 'inline-flex', alignItems: 'baseline', gap: 4, minWidth: 0 }}>
+      <span style={{
+        fontFamily: FONT_MONO, fontSize: 10, color: RT.textLow,
+        letterSpacing: '.1em', textTransform: 'uppercase',
+      }}>{label}</span>
+      <span style={{ fontFamily: FONT_MONO, fontSize: 13.5, fontWeight: 600, color }}>
+        {has ? fmtPct(window.percent) : '—'}
+      </span>
+    </span>
   );
 }
 
@@ -313,34 +341,51 @@ export function LimitsSummary({ mobile }: { mobile: boolean }) {
       <button
         onClick={() => setOpen((o) => !o)}
         title={title}
-        style={{
+        style={mobile ? {
+          background: 'transparent', border: 'none', padding: 0, margin: 0,
+          cursor: 'pointer', color: 'inherit', font: 'inherit', textAlign: 'left',
+          display: 'flex', width: '100%', alignItems: 'center', gap: 10,
+        } : {
           background: 'transparent', border: 'none', padding: 0, margin: 0,
           cursor: 'pointer', color: 'inherit', font: 'inherit', textAlign: 'left',
           display: 'flex', width: '100%', height: '100%',
-          gap: mobile ? 0 : 24, alignItems: 'flex-start', position: 'relative',
+          gap: 24, alignItems: 'flex-start', position: 'relative',
         }}
       >
         {mobile ? (
           <>
-            <WindowCell label="5H limit" window={fh} now={now} compact loading={status === 'loading'} dataStale={dataStale} ageSeconds={ageSeconds} />
-            <div style={{ width: 1, background: RT.border, margin: '0 12px', alignSelf: 'stretch' }} />
-            <WindowCell label="7D limit" window={sd} now={now} compact loading={status === 'loading'} dataStale={dataStale} ageSeconds={ageSeconds} />
+            <LineChip label="5H" window={fh} />
+            <div style={{ width: 1, height: 12, background: RT.border, flex: 'none' }} />
+            <LineChip label="7D" window={sd} />
+            {dataStale && <StaleDot ageSeconds={ageSeconds} />}
+            {divergent && (
+              <span
+                title="Devices disagree on usage. Showing the freshest reading."
+                style={{ width: 5, height: 5, borderRadius: 5, background: RT.amber, flex: 'none' }}
+              />
+            )}
+            <span style={{ flex: 1 }} />
+            {/* Visible tap-to-expand affordance -- the title attribute
+                alone is a hover tooltip, invisible and useless on touch,
+                so this is the one thing on the line that actually tells a
+                phone user there's more here. */}
+            <Icons.chevDown size={13} stroke={RT.textLow} sw={2} />
           </>
         ) : (
           <>
             <WindowCell label="5 Hour" window={fh} now={now} compact={false} loading={status === 'loading'} dataStale={dataStale} ageSeconds={ageSeconds} />
             <WindowCell label="7 Day" window={sd} now={now} compact={false} loading={status === 'loading'} dataStale={dataStale} ageSeconds={ageSeconds} />
+            {divergent && (
+              <span
+                title="Devices disagree on usage. Showing the freshest reading."
+                style={{
+                  position: 'absolute', top: -2, right: -2,
+                  width: 7, height: 7, borderRadius: 7, background: RT.amber,
+                  border: `1.5px solid ${RT.bgRaised}`,
+                }}
+              />
+            )}
           </>
-        )}
-        {divergent && (
-          <span
-            title="Devices disagree on usage. Showing the freshest reading."
-            style={{
-              position: 'absolute', top: -2, right: -2,
-              width: 7, height: 7, borderRadius: 7, background: RT.amber,
-              border: `1.5px solid ${RT.bgRaised}`,
-            }}
-          />
         )}
       </button>
 
@@ -350,6 +395,7 @@ export function LimitsSummary({ mobile }: { mobile: boolean }) {
           background: RT.panel, border: `1px solid ${RT.borderHi}`,
           borderRadius: 10, width: 300, maxWidth: 'calc(100vw - 28px)',
           maxHeight: 420, overflow: 'auto', padding: 6,
+          WebkitOverflowScrolling: 'touch', overscrollBehavior: 'contain',
           zIndex: Z.sticky, boxShadow: '0 12px 36px rgba(0,0,0,.4)',
           fontFamily: FONT_SANS,
         }}>

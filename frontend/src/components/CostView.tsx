@@ -121,7 +121,10 @@ export function CostView({ onOpenDevice }: CostViewProps) {
   const unknownPartialDevices = devicesByTotal.filter((d) => usagePartialFor(fleetDevices, d.device_id) === undefined);
 
   return (
-    <div style={{ flex: 1, overflow: 'auto', padding: 16 }}>
+    <div style={{
+      flex: 1, overflow: 'auto', padding: 16,
+      WebkitOverflowScrolling: 'touch', overscrollBehavior: 'contain',
+    }}>
       <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, marginBottom: 4, flexWrap: 'wrap' }}>
         <div style={{
           fontSize: 11, color: RT.textDim, letterSpacing: '.14em',

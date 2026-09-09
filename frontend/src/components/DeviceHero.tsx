@@ -30,7 +30,7 @@ function V5Stat({
       borderLeft: !mobile && divider ? `1px solid ${RT.border}` : 'none',
     }}>
       <div style={{
-        fontSize: 9, color: RT.textLow, letterSpacing: '.14em',
+        fontSize: 10, color: RT.textLow, letterSpacing: '.12em',
         textTransform: 'uppercase', fontFamily: FONT_MONO, marginBottom: 5,
       }}>
         {label}

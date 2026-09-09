@@ -57,7 +57,15 @@ export function DevicePicker({
       style={{
         position: 'fixed', inset: 0, zIndex: Z.picker,
         background: 'rgba(0,0,0,0.55)',
-        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        display: 'flex', flexDirection: 'column', alignItems: 'center',
+        // Round 8 (mobile-shell v4): top-anchored + overflowY:'auto', not
+        // alignItems/justifyContent:'center', so a long device list (many
+        // targets) still scrolls into view on a short viewport instead of
+        // clipping unreachably top and bottom. See ShareTunnel.tsx for the
+        // same pattern and reasoning.
+        padding: '10vh 16px',
+        overflowY: 'auto',
+        WebkitOverflowScrolling: 'touch',
       }}
       onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}
     >
@@ -65,7 +73,7 @@ export function DevicePicker({
         background: RT.panel, border: `1px solid ${RT.borderHi}`,
         borderRadius: 14, padding: 18,
         boxShadow: '0 16px 48px rgba(0,0,0,.55)',
-        minWidth: 280, width: 380,
+        minWidth: 280, width: 380, flex: 'none',
         maxWidth: 'calc(100vw - 28px)',
       }}>
         {/* Title */}
@@ -115,7 +123,11 @@ export function DevicePicker({
             No other devices available.
           </div>
         ) : (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <div style={{
+            display: 'flex', flexDirection: 'column', gap: 6,
+            maxHeight: '50vh', overflowY: 'auto',
+            WebkitOverflowScrolling: 'touch', overscrollBehavior: 'contain',
+          }}>
             {targets.map((card) => {
               const hue = hueForId(card.id);
               const chipColor = tintFor(hue, 0.70, 0.10);
