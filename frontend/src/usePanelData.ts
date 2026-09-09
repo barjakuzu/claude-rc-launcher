@@ -18,16 +18,20 @@ export function usePanelData(deviceId: string, tab: PanelTab) {
   // the initial [] state, before the first fetch had a chance to resolve.
   const [hasLoadedSessions, setHasLoadedSessions] = useState(false);
   const [hasLoadedScheduled, setHasLoadedScheduled] = useState(false);
-  // Round 4: confirmed by this hook's own direct /rc/sessions probe
-  // (polls every 4s), which is fresher and more authoritative for "is
-  // this specific device reachable" than the separate /rc/overview poll
-  // (every 5s) DeviceDetail.tsx used to defer to for its "Device
-  // offline." message. Once this hook already knows, from its own most
-  // recent fetch, that the device cannot be reached, that must win over
-  // a staler second opinion, not merely coexist with it -- exposed so
-  // DeviceDetail.tsx can render "Device offline." from this signal
-  // directly. Reset to false by a successful fetch or a device switch.
-  const [sessionsUnreachable, setSessionsUnreachable] = useState(false);
+  // Round 4: confirmed by this hook's own direct /rc/sessions or
+  // /rc/schedules probes (sessions polls every 4s, so it's normally the
+  // one that gets there first), which are fresher and more authoritative
+  // for "is this specific device reachable" than the separate
+  // /rc/overview poll (every 5s) DeviceDetail.tsx used to defer to for
+  // its "Device offline." message. Once this hook already knows, from
+  // either fetch's own most recent outcome, that the device cannot be
+  // reached, that must win over a staler second opinion, not merely
+  // coexist with it. Round 5: originally sessions-only and named
+  // sessionsUnreachable; renamed and wired into fetchScheduled too once
+  // the Scheduled tab needed the same signal the Sessions tab already
+  // had (DeviceDetail.tsx). Reset to false by either fetch succeeding, or
+  // by a device switch.
+  const [deviceUnreachable, setDeviceUnreachable] = useState(false);
   // Round 4: GET /schedules answers HTTP 200 with {"schedules": [...],
   // "error": "<schedules.LAST_LOAD_ERROR>"} when the device's own
   // schedules.json failed to parse or had invalid entries -- "schedules"
@@ -68,7 +72,7 @@ export function usePanelData(deviceId: string, tab: PanelTab) {
     setScheduled([]);
     setHasLoadedSessions(false);
     setHasLoadedScheduled(false);
-    setSessionsUnreachable(false);
+    setDeviceUnreachable(false);
     setScheduledLoadError(null);
   }, [deviceId]);
 
@@ -79,7 +83,7 @@ export function usePanelData(deviceId: string, tab: PanelTab) {
       const arr: Session[] = Array.isArray(data) ? data : (data?.sessions ?? []);
       setSessions(arr);
       setHasLoadedSessions(true);
-      setSessionsUnreachable(false);
+      setDeviceUnreachable(false);
     } catch (err) {
       if (activeDeviceRef.current !== deviceId) return;
       if (err instanceof DeviceUnreachableError) {
@@ -87,12 +91,12 @@ export function usePanelData(deviceId: string, tab: PanelTab) {
         // distinct from "we haven't heard back yet" -- unlike a generic
         // network failure (below), this must flip hasLoaded so
         // DeviceDetail.tsx's offline branch becomes reachable instead of
-        // hanging on "Loading sessions…" forever, and sessionsUnreachable
-        // so that branch renders "Device offline." from this fetch's own
+        // hanging on "Loading sessions…" forever, and deviceUnreachable
+        // so both tabs render "Device offline." from this fetch's own
         // fresher answer rather than deferring to a staler one.
         setSessions([]);
         setHasLoadedSessions(true);
-        setSessionsUnreachable(true);
+        setDeviceUnreachable(true);
       }
       // Any other failure: keep whatever was last known, don't claim
       // we've loaded and don't claim we've confirmed unreachable either.
@@ -106,6 +110,7 @@ export function usePanelData(deviceId: string, tab: PanelTab) {
       const arr: Schedule[] = Array.isArray(data) ? data : (data?.schedules ?? []);
       setScheduled(arr);
       setHasLoadedScheduled(true);
+      setDeviceUnreachable(false);
       const loadError = (!Array.isArray(data) && data && typeof data === 'object'
         && typeof (data as { error?: unknown }).error === 'string')
         ? (data as { error: string }).error
@@ -114,8 +119,11 @@ export function usePanelData(deviceId: string, tab: PanelTab) {
     } catch (err) {
       if (activeDeviceRef.current !== deviceId) return;
       if (err instanceof DeviceUnreachableError) {
+        // Same reasoning as fetchSessions above: this hook's own most
+        // recent probe (whichever one just ran) decides deviceUnreachable.
         setScheduled([]);
         setHasLoadedScheduled(true);
+        setDeviceUnreachable(true);
         setScheduledLoadError(null);
       }
     }
@@ -142,7 +150,7 @@ export function usePanelData(deviceId: string, tab: PanelTab) {
   return {
     sessions, scheduled,
     hasLoadedSessions, hasLoadedScheduled,
-    sessionsUnreachable, scheduledLoadError,
+    deviceUnreachable, scheduledLoadError,
     reloadSessions: fetchSessions, reloadSchedules: fetchScheduled,
   };
 }

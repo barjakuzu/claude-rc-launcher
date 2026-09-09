@@ -1,7 +1,7 @@
 // Logs.tsx — device health view: fetches /rc/stats and renders load, OS, token history.
 import { useState, useEffect } from 'react';
 import { RT, FONT_MONO, fmtK } from '../tokens';
-import { api, DeviceUnreachableError } from '../api';
+import { api, DeviceUnreachableError, ApiError } from '../api';
 import type { DeviceCard } from '../types';
 
 interface StatsData {
@@ -32,16 +32,26 @@ export function Logs({ device }: LogsProps) {
   // distinguishing the two, a confirmed-unreachable device would hang on
   // that text forever instead of saying so).
   const [unreachable, setUnreachable] = useState(false);
+  // Round 5: round 3's generator fix only ever threw DeviceUnreachableError
+  // for the one "device unreachable" 502 shape; a non-502 error body (e.g.
+  // {"error": "unknown device"}, 404, if this device were removed from the
+  // registry) still resolved as ordinary data until round 5 restored that
+  // coverage in the generator (api.ts's ApiError). Kept separate from
+  // `unreachable` since it's a different, less common failure with its
+  // own message rather than being folded into "device unreachable".
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     setStats(null);
     setUnreachable(false);
+    setLoadError(null);
     api.stats(device.id)
       .then((data: StatsData) => { if (!cancelled) setStats(data); })
       .catch((err) => {
         if (cancelled) return;
         if (err instanceof DeviceUnreachableError) setUnreachable(true);
+        else if (err instanceof ApiError) setLoadError(err.message);
         // Any other failure: stay on "loading stats…" below, same as
         // before -- this view has no retry/poll of its own, so a generic
         // failure here isn't distinguishable from "hasn't answered yet".
@@ -54,6 +64,8 @@ export function Logs({ device }: LogsProps) {
   let text: string;
   if (unreachable) {
     text = `[${now}] ${device.name} · device unreachable`;
+  } else if (loadError) {
+    text = `[${now}] ${device.name} · ${loadError}`;
   } else if (!stats) {
     text = `[${now}] ${device.name} · loading stats…`;
   } else {
