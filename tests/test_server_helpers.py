@@ -586,6 +586,107 @@ class ValidateStopPidTest(unittest.TestCase):
         self.assertEqual(err, "Invalid pid")
 
 
+class StopGoneFieldTest(unittest.TestCase):
+    """POST /stop's response carries "gone": true exactly when the
+    session is confirmed no longer running (a successful stop, or an
+    external pid that was already gone before we tried) -- never for a
+    real failure where the process may still be alive (guard rejection,
+    permission denied). The frontend uses this to drop a dead row
+    immediately instead of leaving it on screen until the next poll
+    notices, which is the bug this field exists to fix."""
+
+    def setUp(self):
+        self._orig_store = server.HUB_STORE
+        server.HUB_STORE = None  # _audit no-ops; irrelevant to this test
+        self._orig_role = server.config.RC_ROLE
+        server.config.RC_ROLE = "full"
+
+    def tearDown(self):
+        server.HUB_STORE = self._orig_store
+        server.config.RC_ROLE = self._orig_role
+
+    def _post(self, body_bytes):
+        h = server.Handler.__new__(server.Handler)
+        h.path = "/stop"
+        h.headers = {"Content-Length": str(len(body_bytes))}
+        h.client_address = ("127.0.0.1", 12345)
+        h.rfile = io.BytesIO(body_bytes)
+        h.wfile = io.BytesIO()
+        captured = {}
+
+        def fake_json(data, code=200, _captured=captured):
+            _captured["data"] = data
+            _captured["code"] = code
+
+        h._json = fake_json
+        with mock.patch.object(server, "_check_auth", return_value=True):
+            h.do_POST()
+        return captured
+
+    def test_external_process_already_gone_is_marked_gone(self):
+        with mock.patch.object(server, "_stop_external_pid",
+                                return_value=(False, "Process not found")):
+            result = self._post(b'{"external": true, "pid": 12345}')
+        self.assertEqual(
+            result["data"], {"ok": False, "message": "Process not found", "gone": True})
+        self.assertEqual(result["code"], 400)
+
+    def test_external_stop_success_is_marked_gone(self):
+        with mock.patch.object(server, "_stop_external_pid",
+                                return_value=(True, "Stopped")):
+            result = self._post(b'{"external": true, "pid": 12345}')
+        self.assertEqual(
+            result["data"], {"ok": True, "message": "Stopped", "gone": True})
+        self.assertEqual(result["code"], 200)
+
+    def test_external_guard_rejection_is_not_marked_gone(self):
+        # The process may well still be alive under a different name --
+        # the row must stay, with the real reason shown.
+        with mock.patch.object(server, "_stop_external_pid",
+                                return_value=(False, "Not a claude process")):
+            result = self._post(b'{"external": true, "pid": 12345}')
+        self.assertEqual(
+            result["data"], {"ok": False, "message": "Not a claude process", "gone": False})
+
+    def test_external_permission_denied_is_not_marked_gone(self):
+        with mock.patch.object(server, "_stop_external_pid",
+                                return_value=(False, "Permission denied")):
+            result = self._post(b'{"external": true, "pid": 12345}')
+        self.assertEqual(
+            result["data"], {"ok": False, "message": "Permission denied", "gone": False})
+
+    def test_invalid_pid_is_not_marked_gone(self):
+        result = self._post(b'{"external": true, "pid": "not-a-pid"}')
+        self.assertEqual(result["data"], {"ok": False, "message": "Invalid pid"})
+        self.assertNotIn("gone", result["data"])
+
+    def test_launcher_stop_is_marked_gone(self):
+        with mock.patch.object(server, "session_exists", return_value=False):
+            result = self._post(b'{"name": "rc-foo"}')
+        self.assertEqual(result["data"], {"ok": True, "message": "Stopped", "gone": True})
+
+    def test_gone_external_stop_invalidates_agents_cache(self):
+        # Targeted invalidation (agents.invalidate_cache), not a shorter
+        # CACHE_TTL_SECONDS: forces the very next claude-agents read to
+        # be fresh right when the truth just changed, at no ongoing cost
+        # to every other poll on this device.
+        with mock.patch.object(server, "_stop_external_pid",
+                                return_value=(False, "Process not found")), \
+             mock.patch.object(server.agents, "invalidate_cache") as fake_invalidate:
+            self._post(b'{"external": true, "pid": 12345}')
+        fake_invalidate.assert_called_once_with()
+
+    def test_non_gone_external_stop_does_not_invalidate_agents_cache(self):
+        # The process may still be alive under this pid -- nothing about
+        # the agents list is known to have changed, so there is nothing
+        # to invalidate.
+        with mock.patch.object(server, "_stop_external_pid",
+                                return_value=(False, "Not a claude process")), \
+             mock.patch.object(server.agents, "invalidate_cache") as fake_invalidate:
+            self._post(b'{"external": true, "pid": 12345}')
+        fake_invalidate.assert_not_called()
+
+
 class DeriveSessionStateStartingBoundaryTest(unittest.TestCase):
     def test_within_grace_window_is_starting(self):
         row = {"status": "unknown", "created_at": 1000}

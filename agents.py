@@ -9,6 +9,18 @@ import time
 import compat
 from config import CLAUDE_BIN
 
+# How long a `claude agents --json` fetch is trusted before a caller
+# forces a background refresh (see list_claude_sessions below). Tuning
+# this down was tried (5s) to shrink how long a dead EXTERNAL session
+# (no tmux pane, only known through this call) can sit in the UI looking
+# alive after its process exits -- but that lowers it for every caller,
+# on every device, permanently: at ~0.2-0.3s per real spawn, a 6x-shorter
+# window is a genuine standing CPU/battery cost paid forever to speed up
+# a rare event, which is the wrong trade for a project whose whole point
+# is not wasting compute the user didn't ask for. invalidate_cache()
+# below is the targeted alternative: callers who already know the truth
+# just changed (POST /stop confirming a pid is gone) force a fresh fetch
+# on demand, at zero ongoing cost, instead of everyone polling faster.
 CACHE_TTL_SECONDS = 30
 
 # `claude agents --json` reports startedAt in epoch MILLISECONDS (verified
@@ -181,3 +193,29 @@ def list_claude_sessions(claude_bin=None, run=subprocess.run, now_fn=time.time):
     _do_refresh(bin_path, run, now_fn)
     with _refresh_cond:
         return list(_cache["rows"])
+
+
+def invalidate_cache(claude_bin=None):
+    """Force the next list_claude_sessions() call for `claude_bin` (or
+    CLAUDE_BIN) to fetch fresh instead of serving a cached row -- the
+    targeted alternative to a shorter CACHE_TTL_SECONDS (see its comment
+    above). Call this only when the caller already knows the underlying
+    truth just changed, e.g. server.py's POST /stop confirming an
+    external pid is gone: that read is worth paying for on demand,
+    unlike polling every device faster all the time on the chance
+    something changed.
+
+    Setting `at` to 0.0 (never a real now_fn() value) rather than
+    clearing `rows`/`bin` makes the next call's `have_data` check false,
+    so it takes the true first-fetch path (block for one synchronous
+    fetch) instead of the stale-serve-and-background-refresh path --
+    that next caller gets fresh data immediately, not one more stale
+    read while a refresh happens behind it.
+
+    A no-op if nothing is cached for this bin yet (nothing to invalidate)
+    or if a different bin's rows are cached (this call isn't about
+    those)."""
+    bin_path = claude_bin or CLAUDE_BIN
+    with _refresh_cond:
+        if _cache["bin"] == bin_path:
+            _cache["at"] = 0.0

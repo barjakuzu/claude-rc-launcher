@@ -5,7 +5,7 @@ import { Icons, CapBar, Dot, ExternalBadge } from './primitives';
 import { V5IconButton } from './V5IconButton';
 import { fixedMenuPos } from './menuPos';
 import type { Session } from '../types';
-import { api } from '../api';
+import { api, isFailureEnvelope } from '../api';
 
 export interface SessionRowProps {
   s: Session;
@@ -52,6 +52,12 @@ function V5StatusPill({ status }: { status: string }) {
 
 export function SessionRow({ s, hue, deviceId, mobile = false, onChanged, onPreview }: SessionRowProps) {
   const [pending, setPending] = useState(false);
+  const [stopError, setStopError] = useState<string | null>(null);
+  // A stop that the server confirms means the session is gone (either we
+  // just stopped it, or it had already ended) drops this row immediately
+  // rather than leaving it on screen, looking alive, until the next poll.
+  const [stopNotice, setStopNotice] = useState<string | null>(null);
+  const [dismissed, setDismissed] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [menuPos, setMenuPos] = useState<React.CSSProperties | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -156,16 +162,52 @@ export function SessionRow({ s, hue, deviceId, mobile = false, onChanged, onPrev
     return () => clearTimeout(t);
   }, [rcError]);
 
+  useEffect(() => {
+    if (!stopError) return;
+    const t = setTimeout(() => setStopError(null), 6000);
+    return () => clearTimeout(t);
+  }, [stopError]);
+
   const handleOpenRcUrl = () => {
     if (rcUrl) window.open(rcUrl, '_blank', 'noopener,noreferrer');
   };
 
   const handleStop = async () => {
     setPending(true);
+    setStopError(null);
+    setStopNotice(null);
     try {
-      await api.stop(deviceId, s.name, isExternal ? { external: true, pid: s.pid } : undefined);
-    } catch {/* ignore */}
-    finally { setPending(false); onChanged(); }
+      const result = await api.stop(
+        deviceId, s.name, isExternal ? { external: true, pid: s.pid } : undefined);
+      const gone = !!(result && typeof result === 'object' && (result as { gone?: boolean }).gone);
+      if (gone) {
+        // The server confirms the session is no longer running, either
+        // because this call just stopped it or because it had already
+        // ended before this click landed (e.g. an external row whose
+        // process died on its own). Either way the row itself is stale,
+        // not just this one action, so drop it now instead of waiting
+        // for the next poll to notice -- that wait is the actual bug the
+        // user reported: a dead session sitting there looking alive.
+        if (isFailureEnvelope(result)) {
+          setStopNotice(result.message || 'Session already ended');
+          setTimeout(() => setDismissed(true), 1200);
+        } else {
+          setDismissed(true);
+        }
+      } else if (isFailureEnvelope(result)) {
+        // A real failure (guard rejection, permission denied, ...): the
+        // process may still be alive, so the row must stay and say why
+        // the stop did not go through. A silent no-op here is exactly
+        // the bug this row exists to fix: the user clicks Stop and
+        // nothing visibly happens.
+        setStopError(result.message || 'Failed to stop session');
+      }
+    } catch (err) {
+      setStopError(err instanceof Error ? err.message : 'Failed to stop session');
+    } finally {
+      setPending(false);
+      onChanged();
+    }
   };
 
   const handleUnstick = async () => {
@@ -186,6 +228,12 @@ export function SessionRow({ s, hue, deviceId, mobile = false, onChanged, onPrev
     color: RT.text, fontFamily: 'inherit', fontSize: 12,
     display: 'flex', alignItems: 'center', gap: 7, whiteSpace: 'nowrap',
   };
+
+  // The session is confirmed gone -- drop the row now rather than
+  // waiting for the parent's next poll to notice (onChanged() above
+  // already asked it to refetch, but that refetch may itself still be
+  // in flight or capped by the device's own agents.py cache).
+  if (dismissed) return null;
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
@@ -375,6 +423,22 @@ export function SessionRow({ s, hue, deviceId, mobile = false, onChanged, onPrev
         padding: '2px 4px', textAlign: mobile ? 'left' : 'right',
       }}>
         {rcError}
+      </div>
+    )}
+    {stopError && (
+      <div style={{
+        fontFamily: FONT_MONO, fontSize: 11, color: RT.red,
+        padding: '2px 4px', textAlign: mobile ? 'left' : 'right',
+      }}>
+        Stop failed: {stopError}
+      </div>
+    )}
+    {stopNotice && (
+      <div style={{
+        fontFamily: FONT_MONO, fontSize: 11, color: RT.textLow, fontStyle: 'italic',
+        padding: '2px 4px', textAlign: mobile ? 'left' : 'right',
+      }}>
+        {stopNotice}
       </div>
     )}
     </div>
