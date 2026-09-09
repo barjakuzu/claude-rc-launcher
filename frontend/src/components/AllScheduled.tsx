@@ -304,13 +304,18 @@ export function AllScheduled({ cards, hasLoadedCards }: AllScheduledProps) {
         />
       )}
 
-      {/* New schedule modal */}
+      {/* New schedule modal. `devices` lets its WHERE section offer a
+          real device picker: cards[0] below is only the INITIAL target,
+          not the only one, closing the gap where this "+" used to
+          silently create every new schedule on the first device in the
+          list with no way to choose another. */}
       {newDeviceId && (
         <ScheduleModal
           deviceId={newDeviceId}
           initial={null}
           onClose={() => setNewDeviceId(null)}
           onSaved={() => setNewDeviceId(null)}
+          devices={cards.map((c) => ({ id: c.id, name: c.name }))}
         />
       )}
 
