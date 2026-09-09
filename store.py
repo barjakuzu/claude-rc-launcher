@@ -418,6 +418,16 @@ class Store:
         self._thread = threading.Thread(target=self._writer_loop, daemon=True)
         self._thread.start()
 
+        # Task-m3: in-memory only, deliberately never persisted -- see
+        # record_usage_sample()/effective_tokens_in_window() below. A
+        # list of (ts, total_effective_across_account) pairs, ascending
+        # by ts, guarded by its own lock since it is read/written far
+        # more often (every /api/limits request) than the writer-queue
+        # pattern above is built for and never touches the SQL
+        # connection pool itself.
+        self._usage_samples = []
+        self._usage_samples_lock = threading.Lock()
+
     def _connect(self):
         conn = sqlite3.connect(self.db_path, timeout=5, check_same_thread=False)
         conn.execute("PRAGMA journal_mode=WAL")
@@ -892,6 +902,183 @@ class Store:
                 (device_id, available, fetched_at, encoded, now))
             return {"skipped": False}
         return self._write(_do)
+
+    # Task-m3 (2026-09-09-usability): the user wants the 5-hour/7-day
+    # limits shown in effective tokens, not only Anthropic's percent.
+    # Anthropic's usage endpoint never reports a token budget (limits.py's
+    # module docstring), so the only way to get one is to derive it from
+    # what this hub itself measures: `percent` tells us "consumed is this
+    # fraction of the true budget"; `consumed`, the effective tokens this
+    # hub measured happening inside that same trailing window, lets us
+    # solve for the budget (limits.estimate_window_tokens does that last
+    # step). cost_daily (already populated every poll by
+    # upsert_cost_daily above) is the natural source for `consumed` -- but
+    # its own resolution is one calendar day, far coarser than a 5-hour
+    # window and still coarse against a 7-day one. record_usage_sample()
+    # resamples cost_daily's account-wide total at whatever cadence calls
+    # it (normally every /api/limits request -- see server.py -- which
+    # naturally happens close to fleetpoll's own poll cadence while
+    # anyone has the hub open) into a plain in-memory time series, and
+    # effective_tokens_in_window() reads that series back to get a
+    # measurement at the actual window length instead of a whole day.
+    #
+    # Deliberately NOT a table: restarting the hub process loses this
+    # history, and that is the correct behavior for it, not a bug to
+    # paper over -- a freshly started process has not yet OBSERVED any
+    # usage happening, which is a real "we don't know yet" state.
+    # effective_tokens_in_window()'s own coverage check turns exactly
+    # that state into None (never a guess) until enough samples have
+    # accumulated to span the requested window again.
+    #
+    # Fix round 1 (coordinator review, 2026-09-09): the first shipped
+    # version sampled SUM(cost_daily.effective) unconditionally, and a
+    # cold usage.py cache (this device restarted, or the hub simply
+    # never having sampled this account before) produces exactly the
+    # same shape of growth in that total as real usage does -- a device
+    # whose usage cache is still converging discovers a backlog of
+    # ALREADY-HAPPENED usage across many polls, and every one of those
+    # polls' growth looks identical, from this total alone, to genuine
+    # new consumption. Two verified, real consequences of that: (1) two
+    # windows sampled seconds apart during a catch-up burst reported the
+    # SAME `consumed` figure, which is impossible (a 5-hour window's
+    # activity is a strict subset of a 7-day window's), and (2) the
+    # resulting `budget` was accordingly incoherent between the two
+    # (5-hour showing a LARGER implied budget than 7-day). Both
+    # record_usage_sample (below) and the read side in effective_tokens_
+    # in_window's caller (server.py) now check any_device_usage_partial()
+    # -- CONTRACT.md's existing "this device's usage cache is still
+    # converging after a restart" signal, already tracked on `devices`
+    # for exactly this situation -- and refuse to trust the total while
+    # it is true, rather than letting a catch-up burst masquerade as
+    # real-time consumption.
+    USAGE_SAMPLE_MIN_INTERVAL_SECONDS = 20
+    USAGE_SAMPLE_RETENTION_SECONDS = 8 * 24 * 3600  # a bit over the longest window (7 days)
+
+    def any_device_usage_partial(self):
+        """True when at least one device's latest fleet snapshot reported
+        usage_partial (CONTRACT.md section 1/3: its usage.py cache is
+        still converging after a restart, so ITS OWN effective-token
+        figures under-read and are still catching up). Task-m3 fix round
+        1: record_usage_sample uses this to skip sampling while it is
+        true (a catch-up burst must never be mistaken for a sample of
+        real-time consumption), and server.py's /api/limits route uses
+        it a second time at read time, since the account can still be
+        mid-catch-up even between two samples that were each individually
+        clean. Never raises; a failed read is treated as "assume
+        partial" (the safer direction: refusing a good estimate is a
+        smaller failure than showing a contaminated one)."""
+        try:
+            conn = self._read_conn()
+            try:
+                row = conn.execute(
+                    "SELECT COUNT(*) AS n FROM devices WHERE usage_partial = 1").fetchone()
+            finally:
+                conn.close()
+            return bool(row["n"]) if row is not None else True
+        except Exception:
+            _LOG.exception("any_device_usage_partial: failed to read devices table")
+            return True
+
+    def record_usage_sample(self, now_fn=time.time):
+        """Appends one (now, total_effective_across_the_whole_account)
+        sample to the in-memory series effective_tokens_in_window() reads
+        -- the same SUM(cost_daily.effective) /api/cost's own `totals`
+        is built from (server.py), just resampled at request cadence
+        instead of once per calendar day.
+
+        Self-throttled to at most once per USAGE_SAMPLE_MIN_INTERVAL_SECONDS
+        real seconds, regardless of how often this is called: server.py
+        calls it on every /api/limits request, and that route's own poll
+        cadence (30s, per useLimits.ts) is the common case, but nothing
+        stops several open tabs/devices from polling it in a tighter
+        cluster -- this keeps the sample series' resolution bounded and
+        the extra SUM query off the hot path when that happens, the same
+        motivation limits.py's own single-flight cache lock has for the
+        real network fetch it guards.
+
+        Fix round 1: skips recording entirely (not even the SUM query)
+        while any_device_usage_partial() is true -- see the section
+        comment above. A gap in the series here is the same "we don't
+        know yet" state a freshly started process is in, and
+        effective_tokens_in_window's own coverage check already turns
+        that into None rather than a guess.
+
+        Never raises: a failed read here must not break the request that
+        triggered it. On failure, this simply records no sample this
+        call, same visible effect as a slow request that happened to
+        land inside the throttle window."""
+        now = now_fn()
+        with self._usage_samples_lock:
+            if self._usage_samples and now - self._usage_samples[-1][0] < self.USAGE_SAMPLE_MIN_INTERVAL_SECONDS:
+                return
+        try:
+            if self.any_device_usage_partial():
+                return
+            conn = self._read_conn()
+            try:
+                row = conn.execute(
+                    "SELECT COALESCE(SUM(effective), 0) AS total FROM cost_daily").fetchone()
+            finally:
+                conn.close()
+            total = row["total"] if row is not None and row["total"] is not None else 0
+        except Exception:
+            _LOG.exception("record_usage_sample: failed to read cost_daily total")
+            return
+        with self._usage_samples_lock:
+            self._usage_samples.append((now, total))
+            cutoff = now - self.USAGE_SAMPLE_RETENTION_SECONDS
+            while self._usage_samples and self._usage_samples[0][0] < cutoff:
+                self._usage_samples.pop(0)
+
+    def effective_tokens_in_window(self, window_seconds, now_fn=time.time):
+        """Our own measurement of how many effective tokens were spent
+        in the trailing `window_seconds` -- the `consumed` half of the
+        token-budget estimate limits.estimate_window_tokens() computes
+        the other half of. Backed by record_usage_sample()'s series, not
+        cost_daily directly -- see the comment above this section for why
+        day-level resolution can't answer a 5-hour question.
+
+        Returns None -- deliberately, never 0 -- whenever this can't be
+        trusted:
+          - no samples recorded yet.
+          - the OLDEST recorded sample is younger than `window_seconds`
+            ago: the series does not yet reach back far enough to cover
+            the whole window. Reporting a partial window as though it
+            were the whole one would UNDER-count `consumed`, which then
+            OVER-states the derived budget -- exactly the "confidently
+            wrong" failure this whole feature exists to avoid, so a
+            not-yet-covered window returns nothing rather than a number
+            with a silent downward bias.
+          - the computed delta is <= 0: SUM(cost_daily.effective) is
+            monotonic only while every contributing row survives --
+            store.prune()'s cost_daily sweep (cost_days, default 35 --
+            comfortably past the 7-day window this is ever asked for)
+            could in principle still dip it, and plain scheduling jitter
+            between two close samples could too. Either way, a
+            non-positive reading is a signal the measurement is not
+            usable this call, not a genuine "zero usage" -- this is only
+            ever consulted for a window whose own percent already
+            implies real usage happened.
+
+        Never raises."""
+        now = now_fn()
+        target = now - window_seconds
+        with self._usage_samples_lock:
+            samples = list(self._usage_samples)
+        if not samples or samples[0][0] > target:
+            return None
+        baseline = None
+        for ts, total in samples:
+            if ts <= target:
+                baseline = total
+            else:
+                break
+        if baseline is None:
+            return None
+        delta = samples[-1][1] - baseline
+        if delta <= 0:
+            return None
+        return delta
 
     def replace_alerts(self, findings, now_fn=time.time):
         """Make the alerts table equal `findings` (guard.evaluate()'s

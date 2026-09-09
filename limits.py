@@ -84,6 +84,7 @@ review rounds left them.
 """
 import json
 import logging
+import math
 import os
 import socket
 import subprocess
@@ -103,6 +104,23 @@ KEYCHAIN_SERVICE_NAME = "Claude Code-credentials"
 
 CACHE_TTL_SECONDS = 60
 FETCH_TIMEOUT_SECONDS = 5
+
+# Task-m3: the two window lengths the Anthropic usage endpoint reports a
+# percent for. Used by server.py to ask store.Store.effective_tokens_in_window()
+# for the matching lookback and by estimate_window_tokens() below to turn
+# that measurement into a token budget alongside the percent.
+FIVE_HOUR_WINDOW_SECONDS = 5 * 3600
+SEVEN_DAY_WINDOW_SECONDS = 7 * 24 * 3600
+
+# Task-m3: below this percent, `budget = consumed / (percent / 100)`
+# amplifies whatever measurement noise `consumed` carries by more than
+# 10x (at percent=10, a 1-point error in `consumed` becomes a 10-point
+# error in `budget`; at percent=1 it becomes 100x). CONTRACT.md's own
+# wording for this feature is explicit that a wild guess is worse than
+# no number, so a percent this low simply does not get a derived budget
+# -- the UI keeps showing the real, Anthropic-reported percent on its
+# own, same as it always has.
+TOKEN_ESTIMATE_PERCENT_FLOOR = 10.0
 
 # Task L5: a 429 backs off far more patiently than a normal failure (the
 # brief: "a ceiling of at least 15 minutes"). 900s is the escalating
@@ -804,3 +822,94 @@ def get_limits(now_fn=time.time, timeout=FETCH_TIMEOUT_SECONDS, fetch_fn=None):
         _cache["attempted_at"] = now
         _cache["next_attempt_at"] = next_attempt_at
         return result
+
+
+def estimate_window_tokens(percent, consumed):
+    """Task-m3 (2026-09-09-usability): derives a token budget/consumed/
+    remaining reading for one usage window (five_hour or seven_day) from
+    two numbers this hub already has -- Anthropic's own utilization
+    `percent` for that window, and `consumed`, this hub's OWN measurement
+    of effective tokens spent inside that same window (see store.py's
+    record_usage_sample/effective_tokens_in_window, built on the
+    already-tracked cost_daily table).
+
+    The Anthropic usage endpoint never reports a token budget, only a
+    percentage (see this module's own module docstring) -- there is no
+    real number to fetch. This is an ESTIMATE, arrived at by treating
+    `percent` as "consumed is this fraction of the true budget" and
+    solving for the budget: budget = consumed / (percent / 100), then
+    remaining = budget - consumed. Every caller that surfaces this must
+    label it as approximate; the returned dict carries
+    "approximate": True for exactly that reason, not as a note to the
+    reader alone but as a machine-checkable flag a UI can key off of.
+
+    Returns None -- deliberately, never a fabricated dict with zeros --
+    whenever the result would not be trustworthy:
+      - `percent`/`consumed` are missing or not a real (non-bool)
+        number: nothing to compute from.
+      - `consumed` <= 0: either genuinely no usage was measured (in
+        which case there is nothing to divide by that means anything)
+        or, per effective_tokens_in_window's own contract, the caller
+        already turned an unreliable delta into None before this was
+        ever called -- either way, this function never receives a
+        reason to invent a number.
+      - `percent` is below TOKEN_ESTIMATE_PERCENT_FLOOR: dividing by a
+        small percentage amplifies noise in `consumed` into a wildly
+        swinging budget -- see that constant's own comment. This is the
+        one CONTRACT.md explicitly asks for: suppress rather than print
+        a wild guess.
+
+    Never raises."""
+    if not isinstance(percent, (int, float)) or isinstance(percent, bool):
+        return None
+    if not isinstance(consumed, (int, float)) or isinstance(consumed, bool):
+        return None
+    # NaN/inf pass the plain isinstance/type checks above (float is
+    # float), but every comparison against a NaN is False -- silently
+    # skipping the floor rejection below -- and either one turns the
+    # division into a value round() cannot convert to an int. Rejected
+    # here explicitly rather than left to raise past this function.
+    if not math.isfinite(percent) or not math.isfinite(consumed):
+        return None
+    if consumed <= 0 or percent < TOKEN_ESTIMATE_PERCENT_FLOOR:
+        return None
+    budget = consumed / (percent / 100.0)
+    remaining = max(0.0, budget - consumed)
+    return {
+        "consumed": int(round(consumed)),
+        "budget": int(round(budget)),
+        "remaining": int(round(remaining)),
+        "approximate": True,
+    }
+
+
+def estimates_are_coherent(shorter, longer):
+    """Fix round 1 (coordinator review, 2026-09-09): a live bug caught
+    exactly the failure this checks for -- the five_hour and seven_day
+    windows reported the SAME `consumed` figure, and dividing it by two
+    different percents produced a five_hour `budget` LARGER than the
+    seven_day one. Both are impossible on their face: the 5-hour
+    window's activity is a strict subset of the 7-day window's, since
+    it is the trailing slice of the same account, so a SHORTER window
+    can never show more consumed tokens, nor imply a bigger budget,
+    than a LONGER window that contains it.
+
+    `shorter`/`longer` are estimate_window_tokens() results (or None) for
+    two windows where `shorter`'s duration is contained within
+    `longer`'s (five_hour vs seven_day, here). Returns True when there
+    is nothing to compare (either is None) or the relationship holds;
+    False when it is violated -- which is proof at least one of the two
+    was computed from a contaminated measurement (the root cause found
+    here: a device's usage cache still converging after a restart,
+    whose catch-up growth looks identical to real usage in whichever
+    window happens to be sampled while it is happening, regardless of
+    that window's own length -- see store.py's any_device_usage_partial
+    and its callers for the fix at the source). This is a second,
+    independent backstop, not a substitute for that fix: it catches an
+    incoherent PAIR even if some future change introduces a different
+    way for one side to go bad on its own.
+
+    Never raises."""
+    if shorter is None or longer is None:
+        return True
+    return shorter["consumed"] <= longer["consumed"] and shorter["budget"] <= longer["budget"]

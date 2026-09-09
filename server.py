@@ -8,6 +8,7 @@ import hmac
 import http.server
 import ipaddress
 import json
+import limits
 import logging
 import math
 import os
@@ -205,6 +206,31 @@ def _parse_cost_days(qs):
     if value > COST_DAYS_MAX:
         return COST_DAYS_MAX
     return value
+
+
+def _without_estimate(window):
+    """Task-m3, fix round 1: five_hour never gets a *shown*
+    estimated_tokens (see the /api/limits route's own comment for why).
+    Returns a copy of `window` with estimated_tokens forced to None, or
+    None unchanged if `window` itself is not a dict -- never mutates the
+    dict this was handed, same principle every other /api/limits shaping
+    step in this route follows."""
+    if not isinstance(window, dict):
+        return window
+    return {**window, "estimated_tokens": None}
+
+
+def _window_percent(window):
+    """The `percent` field of a five_hour/seven_day window dict, or None
+    if `window` isn't a dict or carries no numeric percent. Small helper
+    so the five_hour coherence probe in the /api/limits route reads its
+    percent the same defensive way regardless of what shape `window`
+    happens to already be in (untouched, or already passed through
+    _without_estimate above)."""
+    if not isinstance(window, dict):
+        return None
+    percent = window.get("percent")
+    return percent if isinstance(percent, (int, float)) and not isinstance(percent, bool) else None
 
 # RC_ROLE="metadata" enforcement: a metadata device serves only fleet
 # roll-up/health data, never session control, terminal, or transcript
@@ -1511,6 +1537,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self._json({
                     "generated_at": now, "primary": None, "devices": [], "divergent": False,
                 })
+            # Task-m3: cheap (self-throttled, in-memory) side effect of
+            # serving this route -- see store.Store.record_usage_sample's
+            # own docstring for why sampling here, rather than from a
+            # poll loop, is enough to keep the token-budget estimate
+            # below fed at a useful resolution.
+            HUB_STORE.record_usage_sample(now_fn=lambda: now)
             view = HUB_STORE.limits_view()
             device_names = {
                 d["id"]: d.get("name", d["id"])
@@ -1547,6 +1579,55 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 # freshly parsed from payload_json on every call.
                 primary = dict(primary)
                 primary["device_id"] = view["primary_device_id"]
+                # Task-m3, fix round 1 (coordinator review, 2026-09-09):
+                # the first version attached an estimate to BOTH windows.
+                # A live bug showed why that's wrong for five_hour: the
+                # in-memory sample series' resolution is fine enough in
+                # principle, but a device whose usage cache is still
+                # converging after a restart (usage_partial) makes the
+                # account-wide total jump for reasons that have nothing
+                # to do with real-time consumption, and that contamination
+                # is indistinguishable from genuine usage by looking at
+                # the total alone -- it produced the same `consumed`
+                # figure for both windows, and a five_hour `budget` LARGER
+                # than seven_day's, both impossible (five_hour's activity
+                # is a subset of seven_day's). Making five_hour reliable
+                # for real would need per-message-timestamp resolution
+                # from usage.py's transcript scan, which is not reachable
+                # from here without a new field on the wire between every
+                # device and the hub -- out of scope for this fix and,
+                # per the brief, "ship nothing you don't trust" beats
+                # shipping that guess. So: seven_day is the only window
+                # that ever gets a *shown* estimate. five_hour's own
+                # estimated_tokens is always None in this response.
+                #
+                # Two guards still apply even to the one window shown:
+                # any_device_usage_partial() (checked a second time here,
+                # at READ time -- record_usage_sample already skips
+                # sampling while it's true, but the account can still be
+                # mid-catch-up between two individually-clean samples) and
+                # estimates_are_coherent() cross-checking against
+                # five_hour's own estimate, computed here ONLY for that
+                # comparison and never surfaced -- an incoherent pair
+                # means the underlying series is contaminated right now
+                # even if any_device_usage_partial() didn't happen to
+                # catch it.
+                primary["five_hour"] = _without_estimate(primary.get("five_hour"))
+                seven_day_window = primary.get("seven_day")
+                if isinstance(seven_day_window, dict):
+                    seven_day_estimate = None
+                    if not HUB_STORE.any_device_usage_partial():
+                        five_hour_probe = limits.estimate_window_tokens(
+                            _window_percent(primary.get("five_hour")),
+                            HUB_STORE.effective_tokens_in_window(
+                                limits.FIVE_HOUR_WINDOW_SECONDS, now_fn=lambda: now))
+                        candidate = limits.estimate_window_tokens(
+                            seven_day_window.get("percent"),
+                            HUB_STORE.effective_tokens_in_window(
+                                limits.SEVEN_DAY_WINDOW_SECONDS, now_fn=lambda: now))
+                        if limits.estimates_are_coherent(five_hour_probe, candidate):
+                            seven_day_estimate = candidate
+                    primary["seven_day"] = {**seven_day_window, "estimated_tokens": seven_day_estimate}
             self._json({
                 "generated_at": now,
                 "primary": primary,

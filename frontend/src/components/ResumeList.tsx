@@ -70,6 +70,25 @@ export function ResumeList({ deviceId, onClose, onResumed }: ResumeListProps) {
     p.sessions.map((s) => ({ ...s, project: p.project }))
   );
 
+  // Search: filters as-you-type across whatever identifies a session to
+  // a human: name, project/directory, and branch (branch isn't shown
+  // in the row below, but a feature-branch name is exactly the kind of
+  // thing someone remembers and types to find a session, so it still
+  // counts as an identifier). The raw id is included too, since a
+  // session with no name falls back to its id in the row itself. Query
+  // is split on whitespace and every token must match somewhere (AND,
+  // not phrase-exact), forgiving of word order, closer to how a
+  // terminal fuzzy-finder behaves than a single literal substring test.
+  const [query, setQuery] = useState('');
+  const searchTokens = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  const filteredSessions = searchTokens.length === 0 ? allSessions : allSessions.filter((sess) => {
+    const haystack = [sess.name, sess.id, sess.cwd, sess.project, sess.branch]
+      .filter(Boolean)
+      .join(' ')
+      .toLowerCase();
+    return searchTokens.every((t) => haystack.includes(t));
+  });
+
   const handleResume = async (sess: ResumeSession & { project: string }) => {
     setResuming(sess.id);
     try {
@@ -138,6 +157,61 @@ export function ResumeList({ deviceId, onClose, onResumed }: ResumeListProps) {
           <button onClick={onClose} style={{ ...btn('mini'), width: 22, height: 22, fontSize: 11 }}>✕</button>
         </div>
 
+        {/* Search: not loading/error, and only worth showing once there
+            is more than one session to filter down. Sits in its own
+            fixed (never-scrolling) row, one hand's easy tap away from
+            the header above it, with a large clear button that stays
+            reachable at the input's own edge rather than making a thumb
+            travel to a corner. */}
+        {!loading && !error && allSessions.length > 1 && (
+          <div style={{ flex: 'none', padding: '10px 12px', borderBottom: `1px solid ${RT.border}` }}>
+            <div style={{ position: 'relative' }}>
+              <input
+                autoFocus
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder="Search sessions…"
+                style={{
+                  width: '100%',
+                  boxSizing: 'border-box',
+                  background: RT.card,
+                  border: `1px solid ${RT.border}`,
+                  borderRadius: 8,
+                  padding: '11px 38px 11px 12px',
+                  color: RT.text,
+                  fontFamily: FONT_MONO,
+                  fontSize: 13,
+                  outline: 'none',
+                }}
+              />
+              {query && (
+                <button
+                  onClick={() => setQuery('')}
+                  aria-label="Clear search"
+                  title="Clear search"
+                  style={{
+                    position: 'absolute',
+                    right: 4,
+                    top: 0,
+                    bottom: 0,
+                    width: 36,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    background: 'transparent',
+                    border: 'none',
+                    cursor: 'pointer',
+                    color: RT.textLow,
+                    fontSize: 15,
+                  }}
+                >
+                  ✕
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+
         {/* Body */}
         <div style={{ flex: 1, overflow: 'auto', padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: 6 }}>
           {loading && (
@@ -154,7 +228,17 @@ export function ResumeList({ deviceId, onClose, onResumed }: ResumeListProps) {
             </div>
           )}
 
-          {!loading && allSessions.map((sess) => (
+          {/* Distinct from the empty-state above: there ARE sessions,
+              the search just doesn't match any of them. Never the same
+              message as "no resumable sessions" (that would read as if
+              the search had somehow deleted them). */}
+          {!loading && !error && allSessions.length > 0 && filteredSessions.length === 0 && (
+            <div style={{ padding: 40, textAlign: 'center', color: RT.textLow, fontSize: 12 }}>
+              No sessions match "{query.trim()}".
+            </div>
+          )}
+
+          {!loading && filteredSessions.map((sess) => (
             <div
               key={sess.id}
               style={{

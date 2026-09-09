@@ -4,6 +4,7 @@ import sqlite3
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 import store
 
@@ -2015,6 +2016,199 @@ class AccountLimitsTest(unittest.TestCase):
         self.assertEqual(result, {"skipped": False})
         view = self.store.limits_view()
         self.assertEqual(len(view["rows"]), 1)
+
+
+class UsageSampleWindowTest(unittest.TestCase):
+    """Task-m3 (2026-09-09-usability): record_usage_sample() resamples
+    cost_daily's account-wide total into an in-memory series, and
+    effective_tokens_in_window() reads that series back to answer "how
+    many effective tokens were measured in the trailing N seconds" at a
+    resolution cost_daily's own per-day rows can't offer directly."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db_path = os.path.join(self.tmp.name, "hub.db")
+        self.store = store.Store(self.db_path)
+
+    def tearDown(self):
+        self.store.close()
+        self.tmp.cleanup()
+
+    def _set_cost_daily_total(self, effective):
+        """Writes a single cost_daily row so SUM(effective) across the
+        whole table equals `effective` -- record_usage_sample() reads
+        exactly that sum, not any one device's or day's row."""
+        self.store.upsert_cost_daily("local", [
+            {"day": _day(), "project": "", "input": 0, "cache_read": 0,
+             "cache_write": 0, "output": 0, "effective": effective},
+        ])
+
+    def test_no_samples_yet_returns_none(self):
+        self.assertIsNone(self.store.effective_tokens_in_window(3600))
+
+    def test_single_sample_is_not_enough_history(self):
+        self._set_cost_daily_total(1000)
+        self.store.record_usage_sample(now_fn=lambda: 1000.0)
+        # Asking for a window that reaches earlier than the only sample
+        # taken must return None, not a delta against nothing.
+        self.assertIsNone(
+            self.store.effective_tokens_in_window(3600, now_fn=lambda: 1000.0))
+
+    def test_window_not_yet_covered_by_history_returns_none(self):
+        self._set_cost_daily_total(1000)
+        self.store.record_usage_sample(now_fn=lambda: 0.0)
+        self._set_cost_daily_total(1500)
+        self.store.record_usage_sample(now_fn=lambda: 1800.0)  # 30 min later
+        # Only 30 minutes of history exists; a 5-hour window can't be
+        # covered yet.
+        self.assertIsNone(
+            self.store.effective_tokens_in_window(5 * 3600, now_fn=lambda: 1800.0))
+
+    def test_covered_window_returns_the_measured_delta(self):
+        self._set_cost_daily_total(1000)
+        self.store.record_usage_sample(now_fn=lambda: 0.0)
+        self._set_cost_daily_total(1000)
+        self.store.record_usage_sample(now_fn=lambda: 3600.0)
+        self._set_cost_daily_total(1600)
+        self.store.record_usage_sample(now_fn=lambda: 7200.0)
+        # A window covering the whole recorded span: total delta is
+        # 1600 - 1000 = 600.
+        result = self.store.effective_tokens_in_window(7200, now_fn=lambda: 7200.0)
+        self.assertEqual(result, 600)
+
+    def test_delta_uses_baseline_at_or_before_the_window_target(self):
+        self._set_cost_daily_total(100)
+        self.store.record_usage_sample(now_fn=lambda: 0.0)
+        self._set_cost_daily_total(300)
+        self.store.record_usage_sample(now_fn=lambda: 100.0)
+        self._set_cost_daily_total(900)
+        self.store.record_usage_sample(now_fn=lambda: 200.0)
+        # Window target lands exactly on the middle sample (ts=100,
+        # total=300): consumed since then is 900 - 300 = 600.
+        result = self.store.effective_tokens_in_window(100, now_fn=lambda: 200.0)
+        self.assertEqual(result, 600)
+
+    def test_non_positive_delta_returns_none_not_zero_or_negative(self):
+        self._set_cost_daily_total(1000)
+        self.store.record_usage_sample(now_fn=lambda: 0.0)
+        # A later "total" that is lower than the baseline (e.g. a
+        # cost_daily row aged out from under the series) must not be
+        # reported as negative or zero usage.
+        self._set_cost_daily_total(400)
+        self.store.record_usage_sample(now_fn=lambda: 3600.0)
+        self.assertIsNone(
+            self.store.effective_tokens_in_window(3600, now_fn=lambda: 3600.0))
+
+    def test_samples_throttled_to_min_interval(self):
+        self._set_cost_daily_total(1000)
+        self.store.record_usage_sample(now_fn=lambda: 0.0)
+        self._set_cost_daily_total(5000)
+        # Well inside USAGE_SAMPLE_MIN_INTERVAL_SECONDS of the first
+        # sample: must not record a second one yet.
+        self.store.record_usage_sample(now_fn=lambda: 1.0)
+        with self.store._usage_samples_lock:
+            samples = list(self.store._usage_samples)
+        self.assertEqual(len(samples), 1)
+        self.assertEqual(samples[0][1], 1000)
+
+    def test_old_samples_are_trimmed_past_retention(self):
+        self._set_cost_daily_total(1000)
+        self.store.record_usage_sample(now_fn=lambda: 0.0)
+        self._set_cost_daily_total(2000)
+        far_future = self.store.USAGE_SAMPLE_RETENTION_SECONDS * 3
+        self.store.record_usage_sample(now_fn=lambda: far_future)
+        with self.store._usage_samples_lock:
+            samples = list(self.store._usage_samples)
+        # The stale first sample must be gone; only the recent one remains.
+        self.assertEqual(len(samples), 1)
+        self.assertEqual(samples[0][0], far_future)
+
+    def test_record_usage_sample_never_raises_on_a_read_failure(self):
+        # A failed read must degrade to "no sample recorded this cycle",
+        # never propagate out of the request that triggered it (server.py
+        # calls this from every /api/limits GET).
+        def _broken_read_conn():
+            raise sqlite3.OperationalError("simulated failure")
+
+        with mock.patch.object(self.store, "_read_conn", _broken_read_conn):
+            try:
+                self.store.record_usage_sample(now_fn=lambda: 1000.0)
+            except Exception as e:  # pragma: no cover - failure path
+                self.fail(f"record_usage_sample raised {e!r}")
+        with self.store._usage_samples_lock:
+            self.assertEqual(self.store._usage_samples, [])
+
+    def test_record_usage_sample_skips_while_a_device_is_usage_partial(self):
+        # Fix round 1 (coordinator review, 2026-09-09): a device whose
+        # usage cache is still converging after a restart makes
+        # SUM(cost_daily.effective) jump for reasons that have nothing
+        # to do with real-time consumption -- the live bug's root cause.
+        # No sample should be recorded at all while that's true, rather
+        # than recording a contaminated one.
+        self.store.upsert_device({"id": "local", "name": "hub", "role": "full",
+                                   "version": "1", "claude_version": "1",
+                                   "usage_partial": True})
+        self._set_cost_daily_total(1000)
+        self.store.record_usage_sample(now_fn=lambda: 1000.0)
+        with self.store._usage_samples_lock:
+            self.assertEqual(self.store._usage_samples, [])
+
+    def test_record_usage_sample_resumes_once_no_longer_partial(self):
+        self.store.upsert_device({"id": "local", "name": "hub", "role": "full",
+                                   "version": "1", "claude_version": "1",
+                                   "usage_partial": True})
+        self._set_cost_daily_total(1000)
+        self.store.record_usage_sample(now_fn=lambda: 1000.0)
+        self.store.upsert_device({"id": "local", "name": "hub", "role": "full",
+                                   "version": "1", "claude_version": "1",
+                                   "usage_partial": False})
+        self.store.record_usage_sample(now_fn=lambda: 2000.0)
+        with self.store._usage_samples_lock:
+            samples = list(self.store._usage_samples)
+        self.assertEqual(samples, [(2000.0, 1000)])
+
+
+class AnyDeviceUsagePartialTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db_path = os.path.join(self.tmp.name, "hub.db")
+        self.store = store.Store(self.db_path)
+
+    def tearDown(self):
+        self.store.close()
+        self.tmp.cleanup()
+
+    def test_false_with_no_devices(self):
+        self.assertFalse(self.store.any_device_usage_partial())
+
+    def test_false_when_every_device_is_clean(self):
+        self.store.upsert_device({"id": "local", "name": "hub", "role": "full",
+                                   "version": "1", "claude_version": "1",
+                                   "usage_partial": False})
+        self.assertFalse(self.store.any_device_usage_partial())
+
+    def test_true_when_one_of_several_devices_is_partial(self):
+        self.store.upsert_device({"id": "local", "name": "hub", "role": "full",
+                                   "version": "1", "claude_version": "1",
+                                   "usage_partial": False})
+        self.store.upsert_device({"id": "laptop", "name": "laptop", "role": "full",
+                                   "version": "1", "claude_version": "1",
+                                   "usage_partial": True})
+        self.assertTrue(self.store.any_device_usage_partial())
+
+    def test_never_raises_on_a_read_failure_and_assumes_partial(self):
+        # The safer direction on a failure: refusing a good estimate
+        # costs less than showing a contaminated one.
+        def _broken_read_conn():
+            raise sqlite3.OperationalError("simulated failure")
+
+        with mock.patch.object(self.store, "_read_conn", _broken_read_conn):
+            try:
+                result = self.store.any_device_usage_partial()
+            except Exception as e:  # pragma: no cover - failure path
+                self.fail(f"any_device_usage_partial raised {e!r}")
+            else:
+                self.assertTrue(result)
 
 
 if __name__ == "__main__":

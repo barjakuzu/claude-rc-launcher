@@ -1,4 +1,19 @@
-// ScheduleModal.tsx — create / edit a schedule.
+// ScheduleModal.tsx: create / edit a schedule.
+//
+// Redesign (2026-09-09-usability, task-m3): the previous layout led with
+// a raw cron expression, showed a red validation error before the user
+// had typed anything, and asked for a working directory and an
+// instructions file with no visible relationship between them. This
+// version is organized around what someone is actually deciding:
+//   WHEN, a preset, a manual run, or "when my limit resets" (a raw
+//         cron is one tap further in, never the first thing shown).
+//   WHAT, a typed prompt OR an instructions file, mutually exclusive
+//         (never both fields open at once).
+//   WHERE, which device and which directory, grouped together.
+// Mode/model/concurrency move into a collapsed "Advanced" disclosure so
+// a new schedule's default screen is short on a 390px phone. No branch
+// of WHEN ever starts in an invalid state, so no red text shows before
+// the user has made a choice.
 import { useState, useEffect, useRef } from 'react';
 import { RT, FONT_MONO, Z } from '../tokens';
 import { btn } from './btn';
@@ -7,14 +22,12 @@ import { DirBrowser } from './DirBrowser';
 import type { Schedule } from '../types';
 
 // ── Cron presets ──────────────────────────────────────────────────────────────
-const MANUAL_PRESET = '__manual__';
-// task-l3: fires once when a Claude usage window resets, instead of on a
-// cron schedule. Slotted into the same preset dropdown as Manual, since
-// it is a third mutually-exclusive way to decide "when does this run"
-// (matching the existing modal idiom rather than adding a parallel control).
-const LIMIT_RESET_PRESET = '__limit_reset__';
+// The custom-cron escape hatch: chosen explicitly, or landed on when
+// editing a schedule whose stored cron doesn't match any preset below.
+const CUSTOM_PRESET = '__custom__';
+const DEFAULT_PRESET_VALUE = '0 9 * * *'; // "Daily at 9 AM", filled in the instant WHEN switches to Scheduled, so that state is never blank/invalid.
 
-// A schedule must send a 5-field cron or an explicit Manual (cron: null) —
+// A schedule must send a 5-field cron or an explicit Manual (cron: null):
 // an empty/blank cron string 400s server-side. Cheap client-side check
 // (field count only; the server still validates each field's contents).
 export function isValidCronString(value: string): boolean {
@@ -22,9 +35,6 @@ export function isValidCronString(value: string): boolean {
 }
 
 const CRON_PRESETS: { label: string; value: string }[] = [
-  { label: 'Choose a preset…', value: '' },
-  { label: 'Manual (run on demand)', value: MANUAL_PRESET },
-  { label: 'When my limit resets', value: LIMIT_RESET_PRESET },
   { label: 'Every hour',          value: '0 * * * *' },
   { label: 'Every 2 hours',       value: '0 */2 * * *' },
   { label: 'Every 6 hours',       value: '0 */6 * * *' },
@@ -34,7 +44,18 @@ const CRON_PRESETS: { label: string; value: string }[] = [
   { label: 'Weekdays at 9 AM',    value: '0 9 * * 1-5' },
   { label: 'Weekly on Monday',    value: '0 9 * * 1' },
   { label: 'Monthly on the 1st',  value: '0 0 1 * *' },
+  { label: 'Custom cron…',        value: CUSTOM_PRESET },
 ];
+
+/** The dropdown value matching a stored cron string: the preset whose
+ * value equals it verbatim, CUSTOM_PRESET for any other non-empty cron
+ * (an expression typed by hand, or one this list doesn't happen to
+ * carry), or '' for an empty/missing cron. */
+function presetForCron(cron: string): string {
+  if (!cron) return '';
+  const known = CRON_PRESETS.find((p) => p.value === cron);
+  return known ? known.value : CUSTOM_PRESET;
+}
 
 // ── Mode / model maps ─────────────────────────────────────────────────────────
 type ModeKey = 'STANDARD' | 'TEAMMATE' | 'SAFE';
@@ -52,7 +73,7 @@ const fieldStyle: React.CSSProperties = {
   background: RT.panel,
   border: `1px solid ${RT.border}`,
   borderRadius: 6,
-  padding: '7px 10px',
+  padding: '9px 10px',
   color: RT.text,
   fontFamily: FONT_MONO,
   fontSize: 13,
@@ -65,6 +86,73 @@ const labelStyle: React.CSSProperties = {
   marginBottom: 4,
   display: 'block',
 };
+
+const sectionStyle: React.CSSProperties = {
+  background: RT.card,
+  border: `1px solid ${RT.border}`,
+  borderRadius: 10,
+  padding: 12,
+  display: 'flex',
+  flexDirection: 'column',
+  gap: 10,
+};
+
+const sectionHeadStyle: React.CSSProperties = {
+  fontSize: 11,
+  fontWeight: 700,
+  letterSpacing: '.08em',
+  textTransform: 'uppercase',
+  color: RT.textLow,
+};
+
+const hintStyle: React.CSSProperties = {
+  fontSize: 11.5,
+  color: RT.textLow,
+  fontFamily: FONT_MONO,
+  lineHeight: 1.5,
+};
+
+// ── Segmented control ─────────────────────────────────────────────────────────
+// A standard, familiar control for "pick exactly one of a few options",
+// used for WHEN's three trigger kinds and WHAT's prompt/file choice.
+function Segmented<T extends string>({ value, onChange, options }: {
+  value: T;
+  onChange: (v: T) => void;
+  options: { value: T; label: string }[];
+}) {
+  return (
+    <div style={{ display: 'flex', gap: 4, background: RT.bg, border: `1px solid ${RT.border}`, borderRadius: 8, padding: 3 }}>
+      {options.map((opt) => {
+        const active = opt.value === value;
+        return (
+          <button
+            key={opt.value}
+            type="button"
+            onClick={() => onChange(opt.value)}
+            style={{
+              flex: 1,
+              minWidth: 0,
+              padding: '8px 4px',
+              borderRadius: 6,
+              border: 'none',
+              background: active ? RT.cardHi : 'transparent',
+              color: active ? RT.text : RT.textDim,
+              fontFamily: FONT_MONO,
+              fontSize: 12,
+              fontWeight: active ? 600 : 500,
+              cursor: 'pointer',
+              whiteSpace: 'nowrap',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+            }}
+          >
+            {opt.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
 
 // ── limit_reset trigger (task-l3) ───────────────────────────────────────────
 // `trigger` isn't on the shared Schedule type (types.ts is owned by a
@@ -83,41 +171,46 @@ const RESET_WINDOW_LABEL: Record<'five_hour' | 'seven_day', string> = {
   seven_day: 'Weekly window',
 };
 
+type WhenMode = 'manual' | 'cron' | 'limit_reset';
+type WhatMode = 'prompt' | 'file';
+
 // ── Component ─────────────────────────────────────────────────────────────────
 export interface ScheduleModalProps {
   deviceId: string;
   initial?: ScheduleWithTrigger | null;
   onClose: () => void;
   onSaved: () => void;
+  /** Optional: lets the WHERE section offer a device picker for a NEW
+   * schedule. Omitted by DeviceDetail.tsx, whose device is already fixed
+   * by the page the user is on; AllScheduled.tsx's "+" is the one place a
+   * schedule can be created with no device already in view, and passes
+   * this so the user can actually choose one instead of always landing
+   * on whichever device happened to be first. Ignored while editing an
+   * existing schedule (`initial` set): moving one to another device is
+   * "Copy to…"/"Move to…" elsewhere, not a field in this form. */
+  devices?: { id: string; name: string }[];
 }
 
-export function ScheduleModal({ deviceId, initial, onClose, onSaved }: ScheduleModalProps) {
+export function ScheduleModal({ deviceId, initial, onClose, onSaved, devices }: ScheduleModalProps) {
   const mounted = useRef(true);
   useEffect(() => () => { mounted.current = false; }, []);
 
-  // Form state — prefilled from `initial` when editing
-  const [name,             setName]             = useState(initial?.name             ?? '');
-  const [cron,             setCron]             = useState(initial?.cron             ?? '');
-  const [prompt,           setPrompt]           = useState(initial?.prompt           ?? '');
-  const [instructionsFile, setInstructionsFile] = useState(initial?.instructions_file ?? '');
-  const [workdir,          setWorkdir]          = useState(initial?.workdir          ?? '');
-  const [mode,    setMode]    = useState<ModeKey>(
-    API_TO_MODE[initial?.mode ?? ''] ?? 'STANDARD',
-  );
-  const [model,   setModel]   = useState<ModelKey>(
-    API_TO_MODEL[initial?.model ?? ''] ?? 'DEFAULT',
-  );
-  const [enabled, setEnabled] = useState(initial?.enabled ?? true);
-  const [concurrency, setConcurrency] = useState<'skip' | 'kill'>(
-    initial?.concurrency === 'kill' ? 'kill' : 'skip',
-  );
+  // WHERE
+  const [targetDevice, setTargetDevice] = useState(deviceId);
+  const [workdir, setWorkdir] = useState(initial?.workdir ?? '');
+  const [showBrowser, setShowBrowser] = useState(false);
 
-  const [preset,       setPreset]       = useState(() => {
-    if (initial?.trigger?.kind === 'limit_reset') return LIMIT_RESET_PRESET;
-    if (initial && !initial.cron) return MANUAL_PRESET;
-    return '';
+  // WHEN
+  const [whenMode, setWhenMode] = useState<WhenMode>(() => {
+    if (initial?.trigger?.kind === 'limit_reset') return 'limit_reset';
+    if (initial && initial.cron) return 'cron';
+    return 'manual'; // also the default for a brand-new schedule, always a valid state.
   });
-  const [resetWindow,  setResetWindow]  = useState<'five_hour' | 'seven_day'>(
+  const [cron, setCron] = useState(initial?.cron ?? '');
+  const [cronPreset, setCronPreset] = useState<string>(() =>
+    (initial?.trigger?.kind !== 'limit_reset' && initial?.cron) ? presetForCron(initial.cron) : '',
+  );
+  const [resetWindow, setResetWindow] = useState<'five_hour' | 'seven_day'>(
     initial?.trigger?.window === 'seven_day' ? 'seven_day' : 'five_hour',
   );
   const [delayMinutes, setDelayMinutes] = useState<number>(
@@ -131,32 +224,70 @@ export function ScheduleModal({ deviceId, initial, onClose, onSaved }: ScheduleM
   const [catchUp, setCatchUp] = useState<'latest' | 'none'>(
     initial?.trigger?.catch_up === 'none' ? 'none' : 'latest',
   );
-  const [pending,      setPending]      = useState(false);
-  const [error,        setError]        = useState<string | null>(null);
-  const [showBrowser,  setShowBrowser]  = useState(false);
+
+  // WHAT
+  const [whatMode, setWhatMode] = useState<WhatMode>(() =>
+    (initial?.instructions_file && !initial?.prompt) ? 'file' : 'prompt',
+  );
+  const [prompt, setPrompt] = useState(initial?.prompt ?? '');
+  const [instructionsFile, setInstructionsFile] = useState(initial?.instructions_file ?? '');
+
+  // Everything else
+  const [name, setName] = useState(initial?.name ?? '');
+  const [mode, setMode] = useState<ModeKey>(API_TO_MODE[initial?.mode ?? ''] ?? 'STANDARD');
+  const [model, setModel] = useState<ModelKey>(API_TO_MODEL[initial?.model ?? ''] ?? 'DEFAULT');
+  const [enabled, setEnabled] = useState(initial?.enabled ?? true);
+  const [concurrency, setConcurrency] = useState<'skip' | 'kill'>(
+    initial?.concurrency === 'kill' ? 'kill' : 'skip',
+  );
+  // Advanced (mode/model/concurrency) starts collapsed for a fresh
+  // schedule (the defaults are already sensible), but opens by default
+  // when editing one that already deviates from them, so nothing a user
+  // set earlier is hidden from them without a tap.
+  const [advancedOpen, setAdvancedOpen] = useState<boolean>(() => {
+    if (!initial) return false;
+    const modeIsDefault = (API_TO_MODE[initial.mode ?? ''] ?? 'STANDARD') === 'STANDARD';
+    const modelIsDefault = (API_TO_MODEL[initial.model ?? ''] ?? 'DEFAULT') === 'DEFAULT';
+    const concurrencyIsDefault = (initial.concurrency ?? 'skip') !== 'kill';
+    return !(modeIsDefault && modelIsDefault && concurrencyIsDefault);
+  });
+
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   // Manual and "when my limit resets" both always send cron: null (valid).
-  // Otherwise a preset or a typed cron must resolve to a real 5-field
-  // expression before Save is allowed.
+  // Scheduled is only invalid if the preset was explicitly cleared back
+  // to nothing, or Custom was chosen without a usable 5-field expression.
+  // Neither of those is ever the state WHEN starts in (see
+  // handleWhenModeChange below), so this never shows red text before the
+  // user has made a choice.
   const cronOk =
-    preset === MANUAL_PRESET || preset === LIMIT_RESET_PRESET || isValidCronString(cron);
+    whenMode !== 'cron' ||
+    (cronPreset !== '' && (cronPreset !== CUSTOM_PRESET || isValidCronString(cron)));
 
-  // Preset -> fill cron input. Switching to Manual or "when my limit
-  // resets" deliberately does NOT blank `cron` here: only one trigger can
-  // ever drive a task, so a cron typed in stays out of the save payload
-  // either way (handleSave always sends cron: null for both), but the
-  // text itself is kept around rather than silently discarded - it
-  // reappears if the user switches back to a cron preset, and the note
-  // below makes the exclusivity visible instead of leaving it implicit.
-  function handlePreset(value: string) {
-    setPreset(value);
-    if (value && value !== MANUAL_PRESET && value !== LIMIT_RESET_PRESET) {
-      setCron(value);
+  function handleWhenModeChange(next: WhenMode) {
+    setWhenMode(next);
+    // Switching INTO Scheduled with nothing chosen yet fills in a
+    // sensible default immediately, rather than leaving the picker on
+    // its placeholder. That placeholder state is exactly what used to
+    // show a red validation error the instant this modal opened.
+    if (next === 'cron' && !cronPreset) {
+      setCronPreset(DEFAULT_PRESET_VALUE);
+      setCron(DEFAULT_PRESET_VALUE);
     }
   }
 
+  function handleCronPresetChange(value: string) {
+    setCronPreset(value);
+    if (value !== CUSTOM_PRESET) {
+      setCron(value); // the preset IS the cron string.
+    }
+    // Custom: leave `cron` as whatever raw text is already there, the
+    // user is about to type or edit it below.
+  }
+
   // Launch a live Claude session on this device using the schedule's
-  // workdir / mode / model — useful for finalizing/testing the prompt.
+  // workdir / mode / model, useful for finalizing/testing the prompt.
   const [launching, setLaunching] = useState(false);
   async function handleOpenSession() {
     if (launching) return;
@@ -171,7 +302,7 @@ export function ScheduleModal({ deviceId, initial, onClose, onSaved }: ScheduleM
       if (modelApi) body.model = modelApi;
       // Give the launched session a recognizable name tied to the schedule.
       if (name) body.name = `finalize-${name}`.slice(0, 60).replace(/[^A-Za-z0-9_-]/g, '-');
-      const res = await api.start(deviceId, body);
+      const res = await api.start(targetDevice, body);
       if (res && res.ok === false) throw new Error(res.message ?? 'launch failed');
       if (mounted.current) {
         onClose();
@@ -188,12 +319,17 @@ export function ScheduleModal({ deviceId, initial, onClose, onSaved }: ScheduleM
     setError(null);
     setPending(true);
     try {
-      const isLimitReset = preset === LIMIT_RESET_PRESET;
+      const isLimitReset = whenMode === 'limit_reset';
+      const isManual = whenMode === 'manual';
       const body = {
         name,
-        cron: (preset === MANUAL_PRESET || isLimitReset) ? null : cron,
-        prompt,
-        instructions_file: instructionsFile || undefined,
+        cron: (isManual || isLimitReset) ? null : cron,
+        // WHAT is exclusive: the inactive field is always sent explicitly
+        // cleared, never left out of the payload. An omitted key means
+        // "leave the stored value alone" server-side, which would let a
+        // stale value from before a WHAT switch survive invisibly.
+        prompt: whatMode === 'prompt' ? prompt : '',
+        instructions_file: whatMode === 'file' ? instructionsFile : '',
         workdir,
         mode:    MODE_TO_API[mode],
         model:   MODEL_TO_API[model],
@@ -206,9 +342,9 @@ export function ScheduleModal({ deviceId, initial, onClose, onSaved }: ScheduleM
 
       let result: { ok?: boolean; message?: string };
       if (initial) {
-        result = await api.schedUpdate(deviceId, { id: initial.id, ...body }) as typeof result;
+        result = await api.schedUpdate(targetDevice, { id: initial.id, ...body }) as typeof result;
       } else {
-        result = await api.schedCreate(deviceId, body) as typeof result;
+        result = await api.schedCreate(targetDevice, body) as typeof result;
       }
 
       if (!mounted.current) return;
@@ -227,6 +363,8 @@ export function ScheduleModal({ deviceId, initial, onClose, onSaved }: ScheduleM
       if (mounted.current) setPending(false);
     }
   }
+
+  const canPickDevice = !initial && devices && devices.length > 0;
 
   return (
     /* Backdrop */
@@ -295,42 +433,55 @@ export function ScheduleModal({ deviceId, initial, onClose, onSaved }: ScheduleM
             />
           </div>
 
-          {/* Cron + preset */}
-          <div>
-            <label style={labelStyle}>Cron expression</label>
-            <div style={{ display: 'flex', gap: 6 }}>
-              {preset !== MANUAL_PRESET && preset !== LIMIT_RESET_PRESET && (
-                <input
-                  value={cron}
-                  onChange={(e) => { setCron(e.target.value); setPreset(''); }}
-                  placeholder="0 9 * * *"
-                  style={{ ...fieldStyle, flex: 1 }}
-                />
-              )}
-              <select
-                value={preset}
-                onChange={(e) => handlePreset(e.target.value)}
-                style={{
-                  ...fieldStyle,
-                  width: (preset === MANUAL_PRESET || preset === LIMIT_RESET_PRESET) ? '100%' : 'auto',
-                  flex: (preset === MANUAL_PRESET || preset === LIMIT_RESET_PRESET) ? 1 : 'none',
-                  cursor: 'pointer',
-                  fontSize: 12,
-                  paddingRight: 6,
-                }}
-              >
-                {CRON_PRESETS.map((p) => (
-                  <option key={p.value || '__placeholder'} value={p.value}>{p.label}</option>
-                ))}
-              </select>
-            </div>
-            {preset === MANUAL_PRESET && (
-              <div style={{ fontSize: 11, color: RT.textLow, marginTop: 5, fontFamily: FONT_MONO }}>
-                Manual task - runs only when triggered with "Run now".
+          {/* WHEN */}
+          <div style={sectionStyle}>
+            <div style={sectionHeadStyle}>When</div>
+            <Segmented<WhenMode>
+              value={whenMode}
+              onChange={handleWhenModeChange}
+              options={[
+                { value: 'manual', label: 'Manual' },
+                { value: 'cron', label: 'Schedule' },
+                { value: 'limit_reset', label: 'On reset' },
+              ]}
+            />
+
+            {whenMode === 'manual' && (
+              <div style={hintStyle}>Runs only when you tap "Run now".</div>
+            )}
+
+            {whenMode === 'cron' && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                <select
+                  value={cronPreset}
+                  onChange={(e) => handleCronPresetChange(e.target.value)}
+                  style={{ ...fieldStyle, cursor: 'pointer' }}
+                >
+                  <option value="">Choose a preset…</option>
+                  {CRON_PRESETS.map((p) => (
+                    <option key={p.value} value={p.value}>{p.label}</option>
+                  ))}
+                </select>
+                {cronPreset === CUSTOM_PRESET && (
+                  <input
+                    value={cron}
+                    onChange={(e) => setCron(e.target.value)}
+                    placeholder="0 9 * * *"
+                    style={fieldStyle}
+                  />
+                )}
+                {!cronOk && (
+                  <div style={{ ...hintStyle, color: RT.red }}>
+                    {cronPreset === CUSTOM_PRESET
+                      ? 'Enter a 5-field cron expression (minute hour day month weekday).'
+                      : 'Choose a preset, or switch to Custom to type your own.'}
+                  </div>
+                )}
               </div>
             )}
-            {preset === LIMIT_RESET_PRESET && (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 8 }}>
+
+            {whenMode === 'limit_reset' && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                 <div style={{ display: 'flex', gap: 10 }}>
                   <div style={{ flex: 1 }}>
                     <label style={labelStyle}>Limit window</label>
@@ -369,125 +520,144 @@ export function ScheduleModal({ deviceId, initial, onClose, onSaved }: ScheduleM
                     <option value="none">Skip it - only fire for a reset seen live</option>
                   </select>
                 </div>
-                <div style={{ fontSize: 11, color: RT.textLow, fontFamily: FONT_MONO }}>
+                <div style={hintStyle}>
                   Fires once the account's {resetWindow === 'seven_day' ? 'weekly' : '5-hour'} usage
-                  limit resets{delayMinutes > 0 ? `, delayed ${delayMinutes} minute${delayMinutes === 1 ? '' : 's'}` : ''},
-                  useful for queuing work that should start the moment the window rolls over.
+                  limit resets{delayMinutes > 0 ? `, delayed ${delayMinutes} minute${delayMinutes === 1 ? '' : 's'}` : ''}.
                 </div>
               </div>
             )}
-            {(preset === MANUAL_PRESET || preset === LIMIT_RESET_PRESET) && cron.trim() !== '' && (
-              <div style={{ fontSize: 11, color: RT.amber, marginTop: 5, fontFamily: FONT_MONO }}>
-                Cron "{cron.trim()}" won't be saved or run - only one trigger can drive a task, and
-                this one is set to {preset === MANUAL_PRESET ? 'Manual' : 'When my limit resets'}.
-                Switch back to Scheduled to use it.
-              </div>
-            )}
-            {!cronOk && (
-              <div style={{ fontSize: 11, color: RT.red, marginTop: 5, fontFamily: FONT_MONO }}>
-                Pick a schedule preset, enter a 5-field cron, or choose Manual.
-              </div>
-            )}
-          </div>
 
-          {/* Prompt / task */}
-          <div>
-            <label style={labelStyle}>Task / prompt</label>
-            <textarea
-              value={prompt}
-              onChange={(e) => setPrompt(e.target.value)}
-              placeholder="Describe the task Claude should run…"
-              rows={4}
-              style={{ ...fieldStyle, resize: 'vertical', lineHeight: 1.5 }}
-            />
-            <div style={{ fontSize: 11, color: RT.textLow, marginTop: 5, fontFamily: FONT_MONO }}>
-              Task/prompt OR an instructions file path — the schedule runs whichever is set.
-            </div>
-          </div>
-
-          {/* Instructions file */}
-          <div>
-            <label style={labelStyle}>Instructions file</label>
-            <input
-              value={instructionsFile}
-              onChange={(e) => setInstructionsFile(e.target.value)}
-              placeholder="~/.claude-rc/jobs/my-task/instructions.md"
-              style={fieldStyle}
-            />
-          </div>
-
-          {/* Workdir */}
-          <div>
-            <label style={labelStyle}>Working directory</label>
-            <div style={{ display: 'flex', gap: 6 }}>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 13, color: RT.textDim }}>
               <input
-                value={workdir}
-                onChange={(e) => setWorkdir(e.target.value)}
-                placeholder="/home/user/project"
-                style={{ ...fieldStyle, flex: 1 }}
+                type="checkbox"
+                checked={enabled}
+                onChange={(e) => setEnabled(e.target.checked)}
+                style={{ width: 14, height: 14, cursor: 'pointer', accentColor: RT.green }}
               />
-              <button
-                onClick={() => setShowBrowser(true)}
-                style={{ ...btn('mini'), width: 'auto', padding: '0 8px', fontSize: 10, whiteSpace: 'nowrap' }}
-                title="Browse directories"
-              >
-                Browse…
-              </button>
-            </div>
+              Enabled
+            </label>
           </div>
 
-          {/* Mode + Model (side by side) */}
-          <div style={{ display: 'flex', gap: 10 }}>
-            <div style={{ flex: 1 }}>
-              <label style={labelStyle}>Mode</label>
-              <select
-                value={mode}
-                onChange={(e) => setMode(e.target.value as ModeKey)}
-                style={{ ...fieldStyle, cursor: 'pointer' }}
-              >
-                <option value="STANDARD">STANDARD</option>
-                <option value="TEAMMATE">TEAMMATE</option>
-                <option value="SAFE">SAFE</option>
-              </select>
-            </div>
-            <div style={{ flex: 1 }}>
-              <label style={labelStyle}>Model</label>
-              <select
-                value={model}
-                onChange={(e) => setModel(e.target.value as ModelKey)}
-                style={{ ...fieldStyle, cursor: 'pointer' }}
-              >
-                <option value="DEFAULT">Default (Opus 4.8)</option>
-                <option value="SONNET">Sonnet 5</option>
-                <option value="HAIKU">Haiku 4.5</option>
-                <option value="FABLE">Fable 5</option>
-              </select>
-            </div>
-          </div>
-
-          {/* Concurrency */}
-          <div>
-            <label style={labelStyle}>If already running</label>
-            <select
-              value={concurrency}
-              onChange={(e) => setConcurrency(e.target.value as 'skip' | 'kill')}
-              style={{ ...fieldStyle, cursor: 'pointer' }}
-            >
-              <option value="skip">Skip this run</option>
-              <option value="kill">Kill the running one, then start</option>
-            </select>
-          </div>
-
-          {/* Enabled */}
-          <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 13, color: RT.textDim }}>
-            <input
-              type="checkbox"
-              checked={enabled}
-              onChange={(e) => setEnabled(e.target.checked)}
-              style={{ width: 14, height: 14, cursor: 'pointer', accentColor: RT.green }}
+          {/* WHAT */}
+          <div style={sectionStyle}>
+            <div style={sectionHeadStyle}>What</div>
+            <Segmented<WhatMode>
+              value={whatMode}
+              onChange={setWhatMode}
+              options={[
+                { value: 'prompt', label: 'Prompt' },
+                { value: 'file', label: 'Instructions file' },
+              ]}
             />
-            Enabled
-          </label>
+            {whatMode === 'prompt' ? (
+              <textarea
+                value={prompt}
+                onChange={(e) => setPrompt(e.target.value)}
+                placeholder="Describe the task Claude should run…"
+                rows={4}
+                style={{ ...fieldStyle, resize: 'vertical', lineHeight: 1.5 }}
+              />
+            ) : (
+              <input
+                value={instructionsFile}
+                onChange={(e) => setInstructionsFile(e.target.value)}
+                placeholder="~/.claude-rc/jobs/my-task/instructions.md"
+                style={fieldStyle}
+              />
+            )}
+          </div>
+
+          {/* WHERE */}
+          <div style={sectionStyle}>
+            <div style={sectionHeadStyle}>Where</div>
+            {canPickDevice && (
+              <div>
+                <label style={labelStyle}>Device</label>
+                {devices!.length > 1 ? (
+                  <select
+                    value={targetDevice}
+                    onChange={(e) => setTargetDevice(e.target.value)}
+                    style={{ ...fieldStyle, cursor: 'pointer' }}
+                  >
+                    {devices!.map((d) => (
+                      <option key={d.id} value={d.id}>{d.name}</option>
+                    ))}
+                  </select>
+                ) : (
+                  <div style={{ ...fieldStyle, color: RT.textDim }}>{devices![0].name}</div>
+                )}
+              </div>
+            )}
+            <div>
+              <label style={labelStyle}>Working directory</label>
+              <div style={{ display: 'flex', gap: 6 }}>
+                <input
+                  value={workdir}
+                  onChange={(e) => setWorkdir(e.target.value)}
+                  placeholder="/home/user/project"
+                  style={{ ...fieldStyle, flex: 1 }}
+                />
+                <button
+                  onClick={() => setShowBrowser(true)}
+                  style={{ ...btn('mini'), width: 'auto', padding: '0 10px', fontSize: 10, whiteSpace: 'nowrap' }}
+                  title="Browse directories"
+                >
+                  Browse…
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {/* Advanced: mode / model / concurrency */}
+          <details
+            open={advancedOpen}
+            onToggle={(e) => setAdvancedOpen((e.target as HTMLDetailsElement).open)}
+            style={{ ...sectionStyle, padding: 0, border: 'none', background: 'transparent' }}
+          >
+            <summary style={{ ...sectionHeadStyle, cursor: 'pointer', listStyle: 'none', padding: '2px 0' }}>
+              Advanced
+            </summary>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginTop: 10 }}>
+              <div style={{ display: 'flex', gap: 10 }}>
+                <div style={{ flex: 1 }}>
+                  <label style={labelStyle}>Mode</label>
+                  <select
+                    value={mode}
+                    onChange={(e) => setMode(e.target.value as ModeKey)}
+                    style={{ ...fieldStyle, cursor: 'pointer' }}
+                  >
+                    <option value="STANDARD">STANDARD</option>
+                    <option value="TEAMMATE">TEAMMATE</option>
+                    <option value="SAFE">SAFE</option>
+                  </select>
+                </div>
+                <div style={{ flex: 1 }}>
+                  <label style={labelStyle}>Model</label>
+                  <select
+                    value={model}
+                    onChange={(e) => setModel(e.target.value as ModelKey)}
+                    style={{ ...fieldStyle, cursor: 'pointer' }}
+                  >
+                    <option value="DEFAULT">Default (Opus 4.8)</option>
+                    <option value="SONNET">Sonnet 5</option>
+                    <option value="HAIKU">Haiku 4.5</option>
+                    <option value="FABLE">Fable 5</option>
+                  </select>
+                </div>
+              </div>
+              <div>
+                <label style={labelStyle}>If already running</label>
+                <select
+                  value={concurrency}
+                  onChange={(e) => setConcurrency(e.target.value as 'skip' | 'kill')}
+                  style={{ ...fieldStyle, cursor: 'pointer' }}
+                >
+                  <option value="skip">Skip this run</option>
+                  <option value="kill">Kill the running one, then start</option>
+                </select>
+              </div>
+            </div>
+          </details>
 
           {/* Inline error */}
           {error && (
@@ -555,7 +725,7 @@ export function ScheduleModal({ deviceId, initial, onClose, onSaved }: ScheduleM
           <button
             onClick={handleSave}
             disabled={pending || !cronOk}
-            title={!cronOk ? 'Pick a schedule preset, enter a 5-field cron, or choose Manual' : undefined}
+            title={!cronOk ? 'Choose a schedule preset, enter a 5-field cron, or pick Manual' : undefined}
             style={{
               background: RT.text,
               border: 'none',
@@ -577,7 +747,7 @@ export function ScheduleModal({ deviceId, initial, onClose, onSaved }: ScheduleM
       {/* DirBrowser overlay */}
       {showBrowser && (
         <DirBrowser
-          deviceId={deviceId}
+          deviceId={targetDevice}
           initialPath={workdir || '/'}
           onSelect={(path) => setWorkdir(path)}
           onClose={() => setShowBrowser(false)}

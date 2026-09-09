@@ -15,6 +15,7 @@ import unittest.mock as mock
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import config
+import limits
 import schedules
 import server
 import store
@@ -2061,6 +2062,137 @@ class ApiLimitsRouteTest(_ApiRouteFixture):
         self.assertEqual(len(data["devices"]), 1)
         self.assertEqual(data["devices"][0]["device_id"], "hub")
         self.assertFalse(data["divergent"])
+
+
+class ApiLimitsEstimatedTokensTest(_ApiRouteFixture):
+    """Task-m3 (2026-09-09-usability): /api/limits attaches a derived
+    estimated_tokens reading to five_hour/seven_day, built from
+    limits.estimate_window_tokens() + store.Store.effective_tokens_in_window().
+    Seeds the in-memory sample series directly (bypassing the real
+    now()/throttle) so these tests stay fast and deterministic -- the
+    series' own mechanics are covered by tests/test_store.py."""
+
+    def _limits_payload(self, five_hour_percent=56.0, seven_day_percent=80.0):
+        return {
+            "available": True, "fetched_at": 1000.0,
+            "five_hour": {"percent": five_hour_percent, "resets_at": "r"},
+            "seven_day": {"percent": seven_day_percent, "resets_at": "r"},
+            "scoped": [], "spend": None, "extra_usage": None, "error": None,
+        }
+
+    def _seed_samples(self, samples):
+        """`samples` is [(ts, total_effective), ...] -- written straight
+        into the store's in-memory series so a test controls exactly what
+        history exists. Also stops the route's own record_usage_sample()
+        call from appending a fresh, real-clock sample on top (it would
+        read cost_daily -- empty in these tests -- and append a 0, which
+        would corrupt the delta these tests are asserting on) for the
+        rest of this test: the series' own recording mechanics are
+        covered by tests/test_store.py, not here."""
+        with server.HUB_STORE._usage_samples_lock:
+            server.HUB_STORE._usage_samples = list(samples)
+        patcher = mock.patch.object(server.HUB_STORE, "record_usage_sample")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_no_sample_history_omits_estimate_but_keeps_percent(self):
+        server.HUB_STORE.upsert_account_limits("local", self._limits_payload())
+        data, code = self._get_json("/api/limits")
+        self.assertEqual(code, 200)
+        self.assertEqual(data["primary"]["five_hour"]["percent"], 56.0)
+        self.assertIsNone(data["primary"]["five_hour"]["estimated_tokens"])
+        self.assertIsNone(data["primary"]["seven_day"]["estimated_tokens"])
+
+    def test_five_hour_never_carries_a_shown_estimate_even_with_full_coverage(self):
+        # Fix round 1 (coordinator review): five_hour's OWN estimate is
+        # never shipped, even when its inputs alone would look fine
+        # (covered history, percent above floor, no partial device) --
+        # see the /api/limits route's own comment for why. This is the
+        # one thing that must hold regardless of the other tests below.
+        server.HUB_STORE.upsert_account_limits("local", self._limits_payload(five_hour_percent=50.0))
+        now = time.time()
+        self._seed_samples([(now - 8 * 24 * 3600, 1000), (now - 6 * 3600, 1500), (now - 3600, 2000)])
+        data, code = self._get_json("/api/limits")
+        self.assertEqual(code, 200)
+        self.assertIsNone(data["primary"]["five_hour"]["estimated_tokens"])
+
+    def test_covered_history_and_percent_above_floor_yields_a_seven_day_estimate(self):
+        server.HUB_STORE.upsert_account_limits("local", self._limits_payload(seven_day_percent=50.0))
+        now = time.time()
+        # Monotonic series covering both windows: consumed_5h (500, from
+        # the last two samples) stays <= consumed_7d (1000, from the
+        # first and last), so this must NOT trip the coherence backstop.
+        self._seed_samples([(now - 8 * 24 * 3600, 1000), (now - 6 * 3600, 1500), (now - 3600, 2000)])
+        data, code = self._get_json("/api/limits")
+        self.assertEqual(code, 200)
+        est = data["primary"]["seven_day"]["estimated_tokens"]
+        self.assertIsNotNone(est)
+        self.assertTrue(est["approximate"])
+        self.assertEqual(est["consumed"], 1000)
+        self.assertEqual(est["budget"], 2000)  # 1000 / 0.50
+        self.assertEqual(est["remaining"], 1000)
+
+    def test_percent_below_floor_omits_the_seven_day_estimate(self):
+        server.HUB_STORE.upsert_account_limits(
+            "local", self._limits_payload(seven_day_percent=limits.TOKEN_ESTIMATE_PERCENT_FLOOR - 1))
+        now = time.time()
+        self._seed_samples([(now - 8 * 24 * 3600, 1000), (now - 6 * 3600, 1500), (now - 3600, 2000)])
+        data, code = self._get_json("/api/limits")
+        self.assertEqual(code, 200)
+        self.assertIsNone(data["primary"]["seven_day"]["estimated_tokens"])
+
+    def test_estimate_never_labeled_anything_but_approximate(self):
+        server.HUB_STORE.upsert_account_limits("local", self._limits_payload())
+        now = time.time()
+        self._seed_samples([(now - 8 * 24 * 3600, 1000), (now - 6 * 3600, 1500), (now - 3600, 2000)])
+        data, code = self._get_json("/api/limits")
+        est = data["primary"]["seven_day"]["estimated_tokens"]
+        self.assertIsNotNone(est)
+        self.assertIs(est["approximate"], True)
+
+    def test_usage_partial_device_suppresses_the_seven_day_estimate(self):
+        # Fix round 1: a device whose usage cache is still converging
+        # after a restart makes the account-wide total jump for reasons
+        # unrelated to real-time consumption -- the exact contamination
+        # that produced the live bug. Even with history that would
+        # otherwise yield a clean, coherent estimate, a partial device
+        # must suppress it.
+        server.HUB_STORE.upsert_device({"id": "local", "name": "Dev", "role": "full",
+                                         "version": "1", "claude_version": "1",
+                                         "usage_partial": True})
+        server.HUB_STORE.upsert_account_limits("local", self._limits_payload(seven_day_percent=50.0))
+        now = time.time()
+        self._seed_samples([(now - 8 * 24 * 3600, 1000), (now - 6 * 3600, 1500), (now - 3600, 2000)])
+        data, code = self._get_json("/api/limits")
+        self.assertEqual(code, 200)
+        self.assertIsNone(data["primary"]["seven_day"]["estimated_tokens"])
+
+    def test_incoherent_pair_suppresses_the_seven_day_estimate(self):
+        # Fix round 1: a non-monotonic series (the shape a catch-up
+        # burst produces) can make the five_hour-window baseline lower
+        # than the seven_day-window baseline, which makes the derived
+        # five_hour `consumed`/`budget` come out LARGER than seven_day's,
+        # exactly the impossible relationship the coordinator caught in
+        # the live bug. estimates_are_coherent() must catch this and
+        # suppress the SHOWN (seven_day) side rather than let it through
+        # just because five_hour itself is never displayed.
+        server.HUB_STORE.upsert_account_limits(
+            "local", self._limits_payload(five_hour_percent=50.0, seven_day_percent=90.0))
+        now = time.time()
+        # 7-day baseline (oldest sample, ts <= now-7d): 5000.
+        # 5-hour baseline (last sample with ts <= now-5h): the dip, 1000.
+        # latest (both windows): 6000.
+        # consumed_7d = 6000 - 5000 = 1000; consumed_5h = 6000 - 1000 = 5000.
+        # 5000 > 1000, and budget_5h (10000) > budget_7d (1111): incoherent.
+        self._seed_samples([
+            (now - 8 * 86400, 5000),
+            (now - 6 * 3600, 1000),
+            (now - 1000, 6000),
+        ])
+        data, code = self._get_json("/api/limits")
+        self.assertEqual(code, 200)
+        self.assertIsNone(data["primary"]["five_hour"]["estimated_tokens"])
+        self.assertIsNone(data["primary"]["seven_day"]["estimated_tokens"])
 
 
 class ShouldProxyQueryStringTest(unittest.TestCase):
