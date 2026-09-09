@@ -562,6 +562,25 @@ export interface AuditEntry {
   detail: string;
 }
 
+// Thrown by req() for the one error shape server.py's _proxy_to_device
+// (the single per-device proxy path every device-scoped call below goes
+// through) produces itself: a 502 {"error": "device unreachable",
+// "detail": ...} when the hub could not reach the device at the network
+// level at all (connection refused, timeout, DNS failure...). This is
+// NEVER what a device sends back on its own -- when the device answers
+// with its own error, _proxy_to_device relays that response through
+// as-is (its own status and body), which req() still resolves normally,
+// unchanged. "Device unreachable" is itself information, distinguishable
+// from every other kind of failure, so callers that want to tell "I now
+// know this is unreachable" apart from "something else went wrong, keep
+// what I had" can catch this specifically (see usePanelData.ts, Logs.tsx).
+export class DeviceUnreachableError extends Error {
+  constructor(detail?: string) {
+    super(detail ? `device unreachable: ${detail}` : 'device unreachable');
+    this.name = 'DeviceUnreachableError';
+  }
+}
+
 async function req(method: string, path: string, device?: string, body?: unknown) {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (device && device !== 'local') headers['X-RC-Device'] = device;
@@ -569,7 +588,25 @@ async function req(method: string, path: string, device?: string, body?: unknown
   if (body) opts.body = JSON.stringify(body);
   const r = await fetch('/rc' + path, opts);
   if (r.status === 401) { window.location.href = '/login'; throw new Error('auth'); }
-  return r.json();
+  const data = await r.json();
+  // The generator fix: every call built on req() used to resolve this
+  // exact error body as if it were real data (Array.isArray false,
+  // ?.sessions/?.dirs/?.output all undefined -> most call sites' own "??
+  // []"/"?? ''" fallbacks quietly produced a plausible-looking empty
+  // result instead of ever reaching their own catch block's honest
+  // "we don't know" handling), which is how a confirmed "the hub can't
+  // reach this device" turned into a false "no sessions"/"no matching
+  // subfolders"/"live" claim at several unrelated call sites, and, for at
+  // least one caller that read a field off it with no defensive check at
+  // all (Logs.tsx's stats.loadavg[0]), a crash. Throwing here instead
+  // routes every one of those callers into whatever they already do for
+  // a failure -- most already have a working catch block for network
+  // errors and needed no other change once this one case stopped being
+  // silently treated as success.
+  if (r.status === 502 && data && typeof data === 'object' && data.error === 'device unreachable') {
+    throw new DeviceUnreachableError(typeof data.detail === 'string' ? data.detail : undefined);
+  }
+  return data;
 }
 
 // Mirrors api.overview()'s fetch style — hub-only, never proxied to a device.

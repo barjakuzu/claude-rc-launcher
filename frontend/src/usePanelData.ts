@@ -1,23 +1,8 @@
 // usePanelData.ts — shared data-fetching hook for device detail views.
 import { useState, useEffect, useCallback } from 'react';
-import { api } from './api';
+import { api, DeviceUnreachableError } from './api';
 import type { Session, Schedule } from './types';
 import type { PanelTab } from './components/PanelTabs';
-
-// api.ts's req() only special-cases a 401 (redirects to /login); every
-// other non-2xx status, including the hub's 502 `{"error": "device
-// unreachable", "detail": ...}` when it tries to proxy /sessions or
-// /schedules to a device it can't currently reach, resolves as ordinary
-// JSON, not a thrown exception. Without this check that error body fell
-// through the same `Array.isArray(data) ? data : (data?.sessions ?? [])`
-// fallback a genuinely-empty response takes, landing on `[]` and flipping
-// hasLoaded exactly like real data: "the hub told us it couldn't reach
-// this device" rendered identically to "confirmed zero sessions" (a fifth
-// appearance of the same bug, this time via an error response mistaken
-// for data rather than an unfetched initial state).
-function isErrorResponse(v: unknown): v is { error: string } {
-  return !!v && typeof v === 'object' && 'error' in v;
-}
 
 export function usePanelData(deviceId: string, tab: PanelTab) {
   const [sessions, setSessions]   = useState<Session[]>([]);
@@ -50,24 +35,38 @@ export function usePanelData(deviceId: string, tab: PanelTab) {
   const fetchSessions = useCallback(async () => {
     try {
       const data = await api.sessions(deviceId);
-      // Same treatment as the catch block below: an error body is not
-      // real data, so keep whatever was last known and don't claim we've
-      // loaded (see isErrorResponse above).
-      if (isErrorResponse(data)) return;
       const arr: Session[] = Array.isArray(data) ? data : (data?.sessions ?? []);
       setSessions(arr);
       setHasLoadedSessions(true);
-    } catch {/* ignore */}
+    } catch (err) {
+      if (err instanceof DeviceUnreachableError) {
+        // A confirmed "the hub cannot reach this device" IS an answer,
+        // distinct from "we haven't heard back yet" -- unlike a generic
+        // network failure (below), this must flip hasLoaded so
+        // DeviceDetail.tsx's device.online branch (from the separate
+        // overview poll) becomes reachable instead of hanging on
+        // "Loading sessions…" forever. Round 3 fixed the over-correction
+        // from round 2's fifth-door fix, which had every error respond
+        // the same way this one still does for anything else: keep
+        // whatever was last known, don't claim we've loaded.
+        setSessions([]);
+        setHasLoadedSessions(true);
+      }
+    }
   }, [deviceId]);
 
   const fetchScheduled = useCallback(async () => {
     try {
       const data = await api.schedules(deviceId);
-      if (isErrorResponse(data)) return;
       const arr: Schedule[] = Array.isArray(data) ? data : (data?.schedules ?? []);
       setScheduled(arr);
       setHasLoadedScheduled(true);
-    } catch {/* ignore */}
+    } catch (err) {
+      if (err instanceof DeviceUnreachableError) {
+        setScheduled([]);
+        setHasLoadedScheduled(true);
+      }
+    }
   }, [deviceId]);
 
   // Poll sessions every 4 s.
