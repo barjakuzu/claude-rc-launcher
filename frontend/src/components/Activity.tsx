@@ -1,5 +1,5 @@
 // Activity.tsx — timeline of schedule run history events (V5Activity port).
-import { RT, FONT_MONO, tintFor, hueForId } from '../tokens';
+import { RT, FONT_MONO, tintFor, hueForId, withAlpha } from '../tokens';
 import { Icons } from './primitives';
 import { MobileHeader } from './MobileHeader';
 import { useAllSchedules } from '../useCrossDevice';
@@ -53,7 +53,7 @@ function statusColor(status: string): string {
 }
 
 export function Activity({ cards, hasLoadedCards }: ActivityProps) {
-  const { items: schedItems, hasLoaded: schedulesLoaded } = useAllSchedules(cards, true);
+  const { items: schedItems, hasLoaded: schedulesLoaded, partial } = useAllSchedules(cards, true);
   const loaded = hasLoadedCards && schedulesLoaded;
 
   // Derive events from schedule history entries.
@@ -89,6 +89,22 @@ export function Activity({ cards, hasLoadedCards }: ActivityProps) {
         }
       />
       <div style={{ padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 0 }}>
+        {/* Round 4: useAllSchedules's per-device fan-out drops a device
+            whose /schedules call rejected (e.g. unreachable) with no
+            signal at all, so a fleet where some devices failed to answer
+            read as a complete, confirmed timeline. Surfaced
+            unconditionally rather than folded into the empty-state text
+            below, since a non-empty timeline can be missing entries from
+            the failed devices too. */}
+        {loaded && partial && (
+          <div style={{
+            padding: '8px 9px', borderRadius: 6, marginBottom: 10,
+            background: withAlpha(RT.amber, 0.12), border: `1px solid ${withAlpha(RT.amber, 0.4)}`,
+            fontSize: 11.5, color: RT.amber, lineHeight: 1.4, fontFamily: FONT_MONO,
+          }}>
+            Some devices didn't answer. This list may be incomplete.
+          </div>
+        )}
         {visible.length === 0 && (
           <div style={{ padding: 32, textAlign: 'center', color: RT.textLow, fontFamily: FONT_MONO, fontSize: 13, border: `1px dashed ${RT.border}`, borderRadius: 10 }}>
             {loaded ? 'No recent activity.' : 'Loading activity…'}

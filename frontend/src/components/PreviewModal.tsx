@@ -25,6 +25,14 @@ function formatExtra(extra: Record<string, unknown> | undefined): string | null 
 function ActivitySection({ deviceId, sessionId }: { deviceId: string; sessionId: string }) {
   const [events, setEvents] = useState<SessionEvent[]>([]);
   const [loading, setLoading] = useState(true);
+  // Round 4: a failed fetch used to silently setEvents([]), which reads
+  // identically to "confirmed zero events" once loading clears -- the
+  // same fabricated-empty-state pattern as everywhere else in this task,
+  // just via a catch block instead of an unguarded initial state. Kept
+  // separate from events itself (not cleared on failure) so a refresh
+  // that fails doesn't blank an already-loaded, still-good list; the
+  // banner below only shows once there is nothing else to show instead.
+  const [error, setError] = useState(false);
   // Bumped on every load() call and on unmount/session-change cleanup, so a
   // slow response from a superseded request (previous session, or after
   // unmount) can never land on state that has moved on.
@@ -33,14 +41,16 @@ function ActivitySection({ deviceId, sessionId }: { deviceId: string; sessionId:
   const load = () => {
     const id = ++reqIdRef.current;
     setLoading(true);
+    setError(false);
     fetchSessionEvents(deviceId, sessionId, 50)
       .then((data) => { if (reqIdRef.current === id) setEvents(data.events ?? []); })
-      .catch(() => { if (reqIdRef.current === id) setEvents([]); })
+      .catch(() => { if (reqIdRef.current === id) setError(true); })
       .finally(() => { if (reqIdRef.current === id) setLoading(false); });
   };
 
   useEffect(() => {
     setEvents([]);
+    setError(false);
     setLoading(true);
     load();
     return () => { reqIdRef.current++; };
@@ -66,7 +76,10 @@ function ActivitySection({ deviceId, sessionId }: { deviceId: string; sessionId:
         {loading && events.length === 0 && (
           <div style={{ fontFamily: FONT_MONO, fontSize: 11, color: RT.textLow }}>Loading…</div>
         )}
-        {!loading && events.length === 0 && (
+        {!loading && error && events.length === 0 && (
+          <div style={{ fontFamily: FONT_MONO, fontSize: 11, color: RT.red }}>Could not load activity.</div>
+        )}
+        {!loading && !error && events.length === 0 && (
           <div style={{ fontFamily: FONT_MONO, fontSize: 11, color: RT.textLow }}>No recent events.</div>
         )}
         {events.map((e) => {

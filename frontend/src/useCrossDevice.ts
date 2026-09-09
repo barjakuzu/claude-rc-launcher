@@ -47,11 +47,22 @@ export interface UseAllSchedulesResult {
    * hasLoadedCards) before trusting a 0 here as "confirmed none" rather
    * than "cards was still empty when this last resolved". */
   hasLoaded: boolean;
+  /** Round 4: true when the most recent fan-out had at least one device
+   * whose /schedules call rejected (Promise.allSettled), most commonly a
+   * DeviceUnreachableError (api.ts). Those rejected results were dropped
+   * from `items` with no signal at all, so hasLoaded, which only ever
+   * meant "we heard back at least once, so 0 isn't fabricated," read
+   * exactly like "confirmed complete" even when some devices on the
+   * current `cards` list never actually got counted. `items` is still
+   * real data, just possibly missing whatever those devices would have
+   * contributed. */
+  partial: boolean;
 }
 
 export function useAllSchedules(cards: DeviceCard[], active: boolean): UseAllSchedulesResult {
   const [items, setItems] = useState<ScheduleWithDevice[]>([]);
   const [hasLoaded, setHasLoaded] = useState(false);
+  const [partial, setPartial] = useState(false);
   const mounted = useRef(true);
   useEffect(() => {
     mounted.current = true;
@@ -71,6 +82,7 @@ export function useAllSchedules(cards: DeviceCard[], active: boolean): UseAllSch
     // the new fetchAll below (once active) lands a fresh answer for the
     // current key.
     setHasLoaded(false);
+    setPartial(false);
     if (!active) return;
     let cancelled = false;
 
@@ -79,16 +91,20 @@ export function useAllSchedules(cards: DeviceCard[], active: boolean): UseAllSch
       const results = await Promise.allSettled(current.map((d) => api.schedules(d.id)));
       if (cancelled || !mounted.current) return;
       const flat: ScheduleWithDevice[] = [];
+      let anyRejected = false;
       results.forEach((r, i) => {
         if (r.status === 'fulfilled') {
           const ss = Array.isArray(r.value)
             ? r.value
             : ((r.value as { schedules?: Schedule[] })?.schedules ?? []);
           for (const s of ss) flat.push({ device: current[i], schedule: s });
+        } else {
+          anyRejected = true;
         }
       });
       setItems(flat);
       setHasLoaded(true);
+      setPartial(anyRejected);
     };
 
     fetchAll();
@@ -96,5 +112,5 @@ export function useAllSchedules(cards: DeviceCard[], active: boolean): UseAllSch
     return () => { cancelled = true; clearInterval(id); };
   }, [active, key]);
 
-  return { items, hasLoaded };
+  return { items, hasLoaded, partial };
 }

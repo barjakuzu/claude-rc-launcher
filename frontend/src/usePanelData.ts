@@ -28,6 +28,20 @@ export function usePanelData(deviceId: string, tab: PanelTab) {
   // DeviceDetail.tsx can render "Device offline." from this signal
   // directly. Reset to false by a successful fetch or a device switch.
   const [sessionsUnreachable, setSessionsUnreachable] = useState(false);
+  // Round 4: GET /schedules answers HTTP 200 with {"schedules": [...],
+  // "error": "<schedules.LAST_LOAD_ERROR>"} when the device's own
+  // schedules.json failed to parse or had invalid entries -- "schedules"
+  // is still whatever validated cleanly (possibly []), never absent, so
+  // this never throws and previously nothing read the "error" field at
+  // all: a broken schedules file rendered as a confident "No scheduled
+  // tasks on this device.", the same display that hid a real three-month
+  // outage once already (schedules.json silently corrupt, the scheduler
+  // a silent no-op, nobody noticed until this project's own history
+  // caught it). Reset to null by a successful clean load or a device
+  // switch; NOT cleared just because the list is non-empty, since
+  // load_schedules() keeps whatever entries validated and only drops the
+  // bad ones, so a real but incomplete list can carry this too.
+  const [scheduledLoadError, setScheduledLoadError] = useState<string | null>(null);
 
   // Round 4: the device this hook is currently meant to be showing,
   // checked by every in-flight request before it commits a result to
@@ -55,6 +69,7 @@ export function usePanelData(deviceId: string, tab: PanelTab) {
     setHasLoadedSessions(false);
     setHasLoadedScheduled(false);
     setSessionsUnreachable(false);
+    setScheduledLoadError(null);
   }, [deviceId]);
 
   const fetchSessions = useCallback(async () => {
@@ -91,11 +106,17 @@ export function usePanelData(deviceId: string, tab: PanelTab) {
       const arr: Schedule[] = Array.isArray(data) ? data : (data?.schedules ?? []);
       setScheduled(arr);
       setHasLoadedScheduled(true);
+      const loadError = (!Array.isArray(data) && data && typeof data === 'object'
+        && typeof (data as { error?: unknown }).error === 'string')
+        ? (data as { error: string }).error
+        : null;
+      setScheduledLoadError(loadError);
     } catch (err) {
       if (activeDeviceRef.current !== deviceId) return;
       if (err instanceof DeviceUnreachableError) {
         setScheduled([]);
         setHasLoadedScheduled(true);
+        setScheduledLoadError(null);
       }
     }
   }, [deviceId]);
@@ -121,7 +142,7 @@ export function usePanelData(deviceId: string, tab: PanelTab) {
   return {
     sessions, scheduled,
     hasLoadedSessions, hasLoadedScheduled,
-    sessionsUnreachable,
+    sessionsUnreachable, scheduledLoadError,
     reloadSessions: fetchSessions, reloadSchedules: fetchScheduled,
   };
 }
