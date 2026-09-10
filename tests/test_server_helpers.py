@@ -2191,13 +2191,30 @@ class ApiLimitsRouteTest(_ApiRouteFixture):
         self.assertFalse(data["divergent"])
 
 
+def _hour_str_at(epoch):
+    return time.strftime("%Y-%m-%dT%H", time.gmtime(epoch))
+
+
 class ApiLimitsEstimatedTokensTest(_ApiRouteFixture):
-    """Task-m3 (2026-09-09-usability): /api/limits attaches a derived
-    estimated_tokens reading to five_hour/seven_day, built from
-    limits.estimate_window_tokens() + store.Store.effective_tokens_in_window().
-    Seeds the in-memory sample series directly (bypassing the real
-    now()/throttle) so these tests stay fast and deterministic -- the
-    series' own mechanics are covered by tests/test_store.py."""
+    """Task-m3 (2026-09-09-usability) + task-tk: /api/limits attaches a
+    derived estimated_tokens reading to five_hour/seven_day.
+
+    seven_day is built from limits.estimate_window_tokens() +
+    store.Store.effective_tokens_in_window() (the in-memory sample
+    series), unchanged by task-tk. five_hour is now built the same way
+    but from store.Store.effective_tokens_in_hourly_window() (the
+    cost_hourly table, task-tk) instead -- real per-hour resolution
+    derived from usage.py's transcript scan, which needs no live process
+    uptime to "warm up" the way the sample series does. See that
+    function's own docstring, and store.Store.effective_tokens_in_hourly_window's,
+    for why this makes a real, shown five-hour figure possible where the
+    first attempt (see EstimatesAreCoherentTest's own docstring in
+    tests/test_limits.py) had to suppress it permanently.
+
+    Seeds both the in-memory sample series (for seven_day) and
+    cost_hourly (for five_hour) directly, bypassing the real
+    now()/throttle, so these tests stay fast and deterministic -- each
+    mechanism's own mechanics are covered by tests/test_store.py."""
 
     def _limits_payload(self, five_hour_percent=56.0, seven_day_percent=80.0):
         return {
@@ -2222,7 +2239,41 @@ class ApiLimitsEstimatedTokensTest(_ApiRouteFixture):
         patcher.start()
         self.addCleanup(patcher.stop)
 
-    def test_no_sample_history_omits_estimate_but_keeps_percent(self):
+    def _seed_hourly(self, now, per_hour_effective, hours=5, device_id="local"):
+        """Seeds `hours` full hourly buckets (h=0..hours-1 before `now`)
+        each carrying `per_hour_effective`, plus one EXTRA zero-valued
+        boundary bucket at h=hours. Written straight into cost_hourly via
+        upsert_cost_hourly (real table, no bypass needed: unlike the
+        sample series, this has no request-cadence throttle to fight).
+
+        The zero boundary bucket matters for determinism: the route's own
+        `now` is a real, uncontrolled time.time() call (server.py builds
+        it internally, not injectable), so it is essentially never
+        exactly hour-aligned. The one hourly bucket straddling a trailing
+        `hours`-hour window's start edge is weighted by
+        effective_tokens_in_hourly_window() for only the fraction of that
+        hour actually inside the window (see that function's own
+        docstring) -- a fraction that depends on exactly how far into its
+        hour `now` happens to land, which a test cannot pin down. Every
+        OTHER seeded bucket (h=0..hours-1) is always fully inside the
+        window regardless of that alignment (each hour offset by an exact
+        multiple of 3600s from `now` floors to the same relative
+        position), so keeping the boundary bucket's own value at zero
+        makes the window's total exactly `hours * per_hour_effective`,
+        deterministic however many seconds are left in the current hour
+        when a test happens to run. The exact fractional-weighting math
+        itself is covered by tests/test_store.py's own
+        EffectiveTokensInHourlyWindowTest, with an injectable clock."""
+        rows = [
+            {"hour": _hour_str_at(now - h * 3600), "input": 0, "cache_read": 0,
+             "cache_write": 0, "output": 0, "effective": per_hour_effective}
+            for h in range(hours)
+        ]
+        rows.append({"hour": _hour_str_at(now - hours * 3600), "input": 0, "cache_read": 0,
+                      "cache_write": 0, "output": 0, "effective": 0})
+        server.HUB_STORE.upsert_cost_hourly(device_id, rows)
+
+    def test_no_history_omits_both_estimates_but_keeps_percent(self):
         server.HUB_STORE.upsert_account_limits("local", self._limits_payload())
         data, code = self._get_json("/api/limits")
         self.assertEqual(code, 200)
@@ -2230,92 +2281,120 @@ class ApiLimitsEstimatedTokensTest(_ApiRouteFixture):
         self.assertIsNone(data["primary"]["five_hour"]["estimated_tokens"])
         self.assertIsNone(data["primary"]["seven_day"]["estimated_tokens"])
 
-    def test_five_hour_never_carries_a_shown_estimate_even_with_full_coverage(self):
-        # Fix round 1 (coordinator review): five_hour's OWN estimate is
-        # never shipped, even when its inputs alone would look fine
-        # (covered history, percent above floor, no partial device) --
-        # see the /api/limits route's own comment for why. This is the
-        # one thing that must hold regardless of the other tests below.
-        server.HUB_STORE.upsert_account_limits("local", self._limits_payload(five_hour_percent=50.0))
+    def test_full_coverage_yields_both_estimates(self):
+        server.HUB_STORE.upsert_account_limits(
+            "local", self._limits_payload(five_hour_percent=50.0, seven_day_percent=50.0))
         now = time.time()
-        self._seed_samples([(now - 8 * 24 * 3600, 1000), (now - 6 * 3600, 1500), (now - 3600, 2000)])
+        # cost_hourly: 5 full hours immediately before `now`, 100 each ->
+        # consumed_5h = 500 -> budget = 500 / 0.50 = 1000.
+        self._seed_hourly(now, 100)
+        # Sample series: consumed_7d = 1500 - 1000 = 500 -> budget = 1000.
+        # Equal to the five-hour side, which is coherent (a tie is not by
+        # itself a contradiction -- see EstimatesAreCoherentTest).
+        self._seed_samples([(now - 8 * 24 * 3600, 1000), (now - 3600, 1500)])
+        data, code = self._get_json("/api/limits")
+        self.assertEqual(code, 200)
+
+        five = data["primary"]["five_hour"]["estimated_tokens"]
+        self.assertIsNotNone(five)
+        self.assertIs(five["approximate"], True)
+        self.assertEqual(five["consumed"], 500)
+        self.assertEqual(five["budget"], 1000)
+        self.assertEqual(five["remaining"], 500)
+
+        seven = data["primary"]["seven_day"]["estimated_tokens"]
+        self.assertIsNotNone(seven)
+        self.assertEqual(seven["consumed"], 500)
+        self.assertEqual(seven["budget"], 1000)
+
+    def test_five_hour_percent_below_floor_omits_only_five_hour_estimate(self):
+        server.HUB_STORE.upsert_account_limits("local", self._limits_payload(
+            five_hour_percent=limits.TOKEN_ESTIMATE_PERCENT_FLOOR - 1, seven_day_percent=50.0))
+        now = time.time()
+        self._seed_hourly(now, 100)
+        self._seed_samples([(now - 8 * 24 * 3600, 1000), (now - 3600, 1500)])
         data, code = self._get_json("/api/limits")
         self.assertEqual(code, 200)
         self.assertIsNone(data["primary"]["five_hour"]["estimated_tokens"])
+        self.assertIsNotNone(data["primary"]["seven_day"]["estimated_tokens"])
 
-    def test_covered_history_and_percent_above_floor_yields_a_seven_day_estimate(self):
-        server.HUB_STORE.upsert_account_limits("local", self._limits_payload(seven_day_percent=50.0))
-        now = time.time()
-        # Monotonic series covering both windows: consumed_5h (500, from
-        # the last two samples) stays <= consumed_7d (1000, from the
-        # first and last), so this must NOT trip the coherence backstop.
-        self._seed_samples([(now - 8 * 24 * 3600, 1000), (now - 6 * 3600, 1500), (now - 3600, 2000)])
-        data, code = self._get_json("/api/limits")
-        self.assertEqual(code, 200)
-        est = data["primary"]["seven_day"]["estimated_tokens"]
-        self.assertIsNotNone(est)
-        self.assertTrue(est["approximate"])
-        self.assertEqual(est["consumed"], 1000)
-        self.assertEqual(est["budget"], 2000)  # 1000 / 0.50
-        self.assertEqual(est["remaining"], 1000)
-
-    def test_percent_below_floor_omits_the_seven_day_estimate(self):
+    def test_no_hourly_coverage_omits_only_five_hour_estimate(self):
+        # No cost_hourly rows at all -- five_hour must stay null, but
+        # seven_day (built from the unrelated sample series) is
+        # unaffected.
         server.HUB_STORE.upsert_account_limits(
-            "local", self._limits_payload(seven_day_percent=limits.TOKEN_ESTIMATE_PERCENT_FLOOR - 1))
+            "local", self._limits_payload(five_hour_percent=50.0, seven_day_percent=50.0))
         now = time.time()
-        self._seed_samples([(now - 8 * 24 * 3600, 1000), (now - 6 * 3600, 1500), (now - 3600, 2000)])
+        self._seed_samples([(now - 8 * 24 * 3600, 1000), (now - 3600, 1500)])
         data, code = self._get_json("/api/limits")
         self.assertEqual(code, 200)
+        self.assertIsNone(data["primary"]["five_hour"]["estimated_tokens"])
+        self.assertIsNotNone(data["primary"]["seven_day"]["estimated_tokens"])
+
+    def test_no_sample_history_omits_only_seven_day_estimate(self):
+        # Mirror of the above: cost_hourly covered, but no sample series
+        # history -- seven_day stays null, five_hour is unaffected.
+        server.HUB_STORE.upsert_account_limits(
+            "local", self._limits_payload(five_hour_percent=50.0, seven_day_percent=50.0))
+        now = time.time()
+        self._seed_hourly(now, 100)
+        data, code = self._get_json("/api/limits")
+        self.assertEqual(code, 200)
+        self.assertIsNotNone(data["primary"]["five_hour"]["estimated_tokens"])
         self.assertIsNone(data["primary"]["seven_day"]["estimated_tokens"])
 
     def test_estimate_never_labeled_anything_but_approximate(self):
-        server.HUB_STORE.upsert_account_limits("local", self._limits_payload())
+        # Equal percents (rather than the defaults) so both sides' equal
+        # `consumed` (500) implies equal budgets too -- coherent, not
+        # incoherent by construction (see test_incoherent_pair above for
+        # the failure shape this would otherwise trip).
+        server.HUB_STORE.upsert_account_limits(
+            "local", self._limits_payload(five_hour_percent=50.0, seven_day_percent=50.0))
         now = time.time()
-        self._seed_samples([(now - 8 * 24 * 3600, 1000), (now - 6 * 3600, 1500), (now - 3600, 2000)])
+        self._seed_hourly(now, 100)
+        self._seed_samples([(now - 8 * 24 * 3600, 1000), (now - 3600, 1500)])
         data, code = self._get_json("/api/limits")
-        est = data["primary"]["seven_day"]["estimated_tokens"]
-        self.assertIsNotNone(est)
-        self.assertIs(est["approximate"], True)
+        for window in ("five_hour", "seven_day"):
+            est = data["primary"][window]["estimated_tokens"]
+            self.assertIsNotNone(est)
+            self.assertIs(est["approximate"], True)
 
-    def test_usage_partial_device_suppresses_the_seven_day_estimate(self):
-        # Fix round 1: a device whose usage cache is still converging
-        # after a restart makes the account-wide total jump for reasons
-        # unrelated to real-time consumption -- the exact contamination
-        # that produced the live bug. Even with history that would
-        # otherwise yield a clean, coherent estimate, a partial device
-        # must suppress it.
+    def test_usage_partial_device_suppresses_both_estimates(self):
+        # A device whose usage cache is still converging after a restart
+        # under-reads for EVERY window it feeds, hourly included -- not
+        # just the account-wide daily total the original fix round 1 was
+        # about. Even with history that would otherwise yield clean,
+        # coherent estimates on both sides, a partial device must
+        # suppress both.
         server.HUB_STORE.upsert_device({"id": "local", "name": "Dev", "role": "full",
                                          "version": "1", "claude_version": "1",
                                          "usage_partial": True})
-        server.HUB_STORE.upsert_account_limits("local", self._limits_payload(seven_day_percent=50.0))
+        server.HUB_STORE.upsert_account_limits(
+            "local", self._limits_payload(five_hour_percent=50.0, seven_day_percent=50.0))
         now = time.time()
-        self._seed_samples([(now - 8 * 24 * 3600, 1000), (now - 6 * 3600, 1500), (now - 3600, 2000)])
+        self._seed_hourly(now, 100)
+        self._seed_samples([(now - 8 * 24 * 3600, 1000), (now - 3600, 1500)])
         data, code = self._get_json("/api/limits")
         self.assertEqual(code, 200)
+        self.assertIsNone(data["primary"]["five_hour"]["estimated_tokens"])
         self.assertIsNone(data["primary"]["seven_day"]["estimated_tokens"])
 
-    def test_incoherent_pair_suppresses_the_seven_day_estimate(self):
-        # Fix round 1: a non-monotonic series (the shape a catch-up
-        # burst produces) can make the five_hour-window baseline lower
-        # than the seven_day-window baseline, which makes the derived
-        # five_hour `consumed`/`budget` come out LARGER than seven_day's,
-        # exactly the impossible relationship the coordinator caught in
-        # the live bug. estimates_are_coherent() must catch this and
-        # suppress the SHOWN (seven_day) side rather than let it through
-        # just because five_hour itself is never displayed.
+    def test_incoherent_pair_suppresses_both_estimates(self):
+        # A five-hour window's activity is a strict subset of a
+        # seven-day window's, so a five_hour reading that implies MORE
+        # consumed or a bigger budget than seven_day's is proof at least
+        # one of the two measurements is contaminated right now -- the
+        # exact relationship the original fix round 1 (live bug) caught.
+        # estimates_are_coherent() must suppress BOTH sides here, not
+        # just seven_day: an incoherent five_hour reading is exactly the
+        # "not trustworthy" outcome that must stay null.
         server.HUB_STORE.upsert_account_limits(
-            "local", self._limits_payload(five_hour_percent=50.0, seven_day_percent=90.0))
+            "local", self._limits_payload(five_hour_percent=10.0, seven_day_percent=90.0))
         now = time.time()
-        # 7-day baseline (oldest sample, ts <= now-7d): 5000.
-        # 5-hour baseline (last sample with ts <= now-5h): the dip, 1000.
-        # latest (both windows): 6000.
-        # consumed_7d = 6000 - 5000 = 1000; consumed_5h = 6000 - 1000 = 5000.
-        # 5000 > 1000, and budget_5h (10000) > budget_7d (1111): incoherent.
-        self._seed_samples([
-            (now - 8 * 86400, 5000),
-            (now - 6 * 3600, 1000),
-            (now - 1000, 6000),
-        ])
+        # consumed_5h = 5000 -> budget_5h = 5000 / 0.10 = 50000.
+        self._seed_hourly(now, 1000)
+        # consumed_7d = 1100 -> budget_7d = 1100 / 0.90 ~= 1222.
+        self._seed_samples([(now - 8 * 24 * 3600, 1000), (now - 3600, 2100)])
         data, code = self._get_json("/api/limits")
         self.assertEqual(code, 200)
         self.assertIsNone(data["primary"]["five_hour"]["estimated_tokens"])

@@ -28,6 +28,7 @@ def _empty_rollup(now=_FIXED_NOW):
         "daily": {},
         "daily_by_project": [],
         "daily_by_project_capped": False,
+        "hourly": {},
         "generated_at": now,
         "files": 0,
         "bytes_read": 0,
@@ -105,6 +106,7 @@ class BuildFleetTest(unittest.TestCase):
         self.assertIsNone(result["sessions"][0]["usage"])
         self.assertEqual(result["usage_daily"], [])
         self.assertEqual(result["usage_daily_by_project"], [])
+        self.assertEqual(result["usage_hourly"], [])
         self.assertEqual(
             result["usage_meta"],
             {"files": 0, "skipped": 0, "partial": False, "generated_at": 5000.0,
@@ -277,6 +279,7 @@ class BuildFleetTest(unittest.TestCase):
             "daily": {},
             "daily_by_project": [],
             "daily_by_project_capped": False,
+            "hourly": {},
             "generated_at": 5000.0,
             "files": 1, "bytes_read": 10, "skipped": 0, "partial": False,
         }
@@ -331,6 +334,7 @@ class BuildFleetTest(unittest.TestCase):
                 },
             },
             "daily": {}, "daily_by_project": [], "daily_by_project_capped": False,
+            "hourly": {},
             "generated_at": 5000.0,
             "files": 1, "bytes_read": 1, "skipped": 0, "partial": False,
         }
@@ -359,6 +363,7 @@ class BuildFleetTest(unittest.TestCase):
             daily[day] = {"input": i, "cache_read": 0, "cache_write": 0, "output": 0, "effective": i}
         rollup.return_value = {
             "sessions": {}, "daily": daily, "daily_by_project": [], "daily_by_project_capped": False,
+            "hourly": {},
             "generated_at": 5000.0,
             "files": 35, "bytes_read": 0, "skipped": 0, "partial": False,
         }
@@ -399,6 +404,7 @@ class BuildFleetTest(unittest.TestCase):
             daily[day] = {"input": 9, "cache_read": 0, "cache_write": 0, "output": 0, "effective": 9}
         rollup.return_value = {
             "sessions": {}, "daily": daily, "daily_by_project": [], "daily_by_project_capped": False,
+            "hourly": {},
             "generated_at": 5000.0,
             "files": 35, "bytes_read": 0, "skipped": 0, "partial": False,
         }
@@ -440,6 +446,10 @@ class BuildFleetTest(unittest.TestCase):
                  "input": 1, "cache_read": 2, "cache_write": 3, "output": 4, "effective": 50},
             ],
             "daily_by_project_capped": False,
+            "hourly": {
+                "2026-09-07T12": {"input": 1, "cache_read": 2, "cache_write": 3, "output": 4,
+                                   "effective": 50},
+            },
             "generated_at": 5000.0,
             "files": 1, "bytes_read": 1, "skipped": 0, "partial": False,
         }
@@ -448,6 +458,10 @@ class BuildFleetTest(unittest.TestCase):
 
         self.assertEqual(result["sessions"][0]["usage"], {"effective": 50})
         self.assertEqual(result["usage_daily"], [{"day": "2026-09-07", "effective": 50}])
+        # usage_hourly carries no project identity either, so it is
+        # kept-but-reduced under metadata role, same as usage_daily above,
+        # not dropped outright the way usage_daily_by_project is.
+        self.assertEqual(result["usage_hourly"], [{"hour": "2026-09-07T12", "effective": 50}])
         # usage_meta is sent unchanged under metadata role (counts only).
         self.assertEqual(
             result["usage_meta"],
@@ -480,6 +494,7 @@ class BuildFleetTest(unittest.TestCase):
                  "input": 5, "cache_read": 6, "cache_write": 7, "output": 8, "effective": 90},
             ],
             "daily_by_project_capped": False,
+            "hourly": {},
             "generated_at": 5000.0, "files": 2, "bytes_read": 1, "skipped": 0, "partial": False,
         }
 
@@ -491,6 +506,45 @@ class BuildFleetTest(unittest.TestCase):
             {"day": "2026-09-06", "project": "-var-www",
              "input": 1, "cache_read": 2, "cache_write": 3, "output": 4, "effective": 43},
         ])
+
+    @patch("fleet.usage.rollup")
+    @patch("fleet.events.prune")
+    @patch("fleet.events.read_events")
+    @patch("fleet.sessions.list_rc_sessions")
+    @patch("fleet.compat.get_caps")
+    @patch("fleet.devices.get_local_name")
+    def test_usage_hourly_full_role_shape_newest_first(
+            self, get_name, get_caps, list_sess, read_ev, prune, rollup):
+        # Task-tk: usage_hourly is account-wide (no project field, unlike
+        # usage_daily_by_project) and newest-hour-first.
+        get_name.return_value = "hub"
+        get_caps.return_value = {}
+        list_sess.return_value = []
+        read_ev.return_value = ([], None)
+        rollup.return_value = {
+            "sessions": {}, "daily": {}, "daily_by_project": [], "daily_by_project_capped": False,
+            "hourly": {
+                "2026-09-07T10": {"input": 1, "cache_read": 0, "cache_write": 0, "output": 1,
+                                   "effective": 6},
+                "2026-09-07T12": {"input": 5, "cache_read": 0, "cache_write": 0, "output": 1,
+                                   "effective": 10},
+                "2026-09-07T11": {"input": 0, "cache_read": 0, "cache_write": 0, "output": 0,
+                                   "effective": 0},
+            },
+            "generated_at": 5000.0, "files": 3, "bytes_read": 1, "skipped": 0, "partial": False,
+        }
+
+        result = fleet.build_fleet(role="full", now_fn=lambda: _FIXED_NOW)
+
+        self.assertEqual(result["usage_hourly"], [
+            {"hour": "2026-09-07T12", "input": 5, "cache_read": 0, "cache_write": 0,
+             "output": 1, "effective": 10},
+            {"hour": "2026-09-07T11", "input": 0, "cache_read": 0, "cache_write": 0,
+             "output": 0, "effective": 0},
+            {"hour": "2026-09-07T10", "input": 1, "cache_read": 0, "cache_write": 0,
+             "output": 1, "effective": 6},
+        ])
+        self.assertNotIn("project", result["usage_hourly"][0])
 
     @patch("fleet.usage.rollup")
     @patch("fleet.events.prune")
@@ -511,6 +565,7 @@ class BuildFleetTest(unittest.TestCase):
         rollup.return_value = {
             "sessions": {}, "daily": {}, "daily_by_project": [],
             "daily_by_project_capped": True,
+            "hourly": {},
             "generated_at": 5000.0, "files": 1, "bytes_read": 1, "skipped": 0, "partial": False,
         }
 
@@ -651,6 +706,7 @@ class BuildFleetTest(unittest.TestCase):
         read_ev.return_value = ([], None)
         rollup.return_value = {
             "sessions": {}, "daily": {}, "daily_by_project": [], "daily_by_project_capped": False,
+            "hourly": {},
             "generated_at": 5000.0,
             "files": 10, "bytes_read": 999, "skipped": 2, "partial": True,
         }

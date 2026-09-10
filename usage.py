@@ -39,6 +39,21 @@ WEIGHTS: dict[str, float] = {
 DEFAULT_MAX_BYTES_PER_CALL = 64 * 1024 * 1024  # 64 MiB
 DEFAULT_DAYS = 30
 
+# Task-tk: how many trailing UTC hour buckets rollup() emits alongside
+# `daily`, for a hub-side rolling five-hour consumption figure that
+# day-granularity can't answer (see limits.estimate_window_tokens and
+# store.Store.effective_tokens_in_hourly_window for what consumes this).
+# 6, not 5: the hub's own windowing needs the one hour bucket straddling
+# "now - 5h" fully present so it can weight its partial overlap, plus the
+# current (still-filling) hour, which together can span just under 6
+# hours of wall clock even though only 5 of those hours are ever counted
+# -- see rollup()'s own "hourly" paragraph for the exact accounting.
+# Deliberately small and independent of `days`/DEFAULT_DAYS: bandwidth
+# for this field is bounded by row COUNT, not by a calendar window, and
+# nothing downstream ever asks for hourly data older than a handful of
+# hours (unlike `daily`, which several 30-day views genuinely need).
+HOURLY_RETENTION_HOURS = 6
+
 # A read counts as a "stall" when it was clipped by the byte budget and
 # still yielded zero complete lines (a single line longer than what this
 # attempt was allowed to read). After this many CONSECUTIVE stalls for
@@ -203,6 +218,14 @@ def _new_entry(project, inode):
         # already scrolled out of the cache's read window by the time a
         # later rollup() call re-sums across files.
         "daily": {},
+        # Task-tk: same shape and same "sparse, per-file, never pruned
+        # here" contract as `daily` above, just keyed by UTC hour
+        # ("YYYY-MM-DDTHH") instead of UTC day -- see rollup()'s "hourly"
+        # paragraph for why day granularity can't answer a five-hour
+        # question, and HOURLY_RETENTION_HOURS for why only a short
+        # trailing slice of this ever leaves rollup() despite this
+        # per-file dict itself growing unbounded, same as `daily` does.
+        "hourly": {},
         # True once at least one read of this file has completed without
         # raising. Gates whether the entry is surfaced in rollup()'s
         # output: a file that has only ever failed to open (permissions,
@@ -304,13 +327,25 @@ def _consume_line(entry, raw_line):
             entry["first_ts"] = ts
         if entry["last_ts"] is None or ts > entry["last_ts"]:
             entry["last_ts"] = ts
-        date_str = datetime.datetime.fromtimestamp(ts, datetime.timezone.utc).date().isoformat()
+        dt = datetime.datetime.fromtimestamp(ts, datetime.timezone.utc)
+        date_str = dt.date().isoformat()
         day = entry["daily"].setdefault(
             date_str, {"input": 0, "cache_read": 0, "cache_write": 0, "output": 0})
         day["input"] += input_i
         day["cache_read"] += cache_read_i
         day["cache_write"] += cache_write_i
         day["output"] += output_i
+
+        # Task-tk: same fold, keyed by UTC hour. Unbounded here (same as
+        # `daily` just above); rollup() is what trims this to a short
+        # trailing window before it ever leaves this module.
+        hour_str = dt.strftime("%Y-%m-%dT%H")
+        hour = entry["hourly"].setdefault(
+            hour_str, {"input": 0, "cache_read": 0, "cache_write": 0, "output": 0})
+        hour["input"] += input_i
+        hour["cache_read"] += cache_read_i
+        hour["cache_write"] += cache_write_i
+        hour["output"] += output_i
 
 
 def _merge_scratch(entry, scratch):
@@ -338,6 +373,13 @@ def _merge_scratch(entry, scratch):
         bucket["cache_read"] += day["cache_read"]
         bucket["cache_write"] += day["cache_write"]
         bucket["output"] += day["output"]
+    for hour_str, hour in scratch["hourly"].items():
+        bucket = entry["hourly"].setdefault(
+            hour_str, {"input": 0, "cache_read": 0, "cache_write": 0, "output": 0})
+        bucket["input"] += hour["input"]
+        bucket["cache_read"] += hour["cache_read"]
+        bucket["cache_write"] += hour["cache_write"]
+        bucket["output"] += hour["output"]
 
 
 def _update_entry(path, project, max_bytes, max_bytes_per_call):
@@ -672,6 +714,22 @@ def rollup(root=None, max_bytes_per_call=DEFAULT_MAX_BYTES_PER_CALL,
     actually truncated, so a consumer can tell "this device really only
     touched N projects" from "there's more, we cut it off" instead of a
     silently-partial list looking complete.
+
+    Also returns `hourly` (task-tk): per-UTC-hour totals, account-wide
+    (never split by project -- see MAX_DAILY_BY_PROJECT_ENTRIES's own
+    bandwidth reasoning for why a per-project breakdown at this
+    resolution isn't worth sending), covering the trailing
+    HOURLY_RETENTION_HOURS hours. Built from the same per-file `hourly`
+    dicts _consume_line already fills in alongside `daily` -- one extra
+    accumulation pass over data already being read, not a second parse.
+    Unlike every other field this function returns, `hourly` is DENSE:
+    exactly HOURLY_RETENTION_HOURS entries, always present, zero-filled
+    where no usage was observed -- see the field's own construction below
+    for why sparseness would defeat the reason it exists. This exists so
+    a caller can compute consumption inside a rolling five-hour window
+    without either day-level rounding error or needing to have been
+    running continuously for five hours first (see
+    store.Store.effective_tokens_in_hourly_window).
     """
     root = _default_root() if root is None else root
     file_entries, discover_skipped = _discover_files(root)
@@ -748,6 +806,18 @@ def rollup(root=None, max_bytes_per_call=DEFAULT_MAX_BYTES_PER_CALL,
             - datetime.timedelta(days=days)
         ).date().isoformat()
 
+        # Task-tk: the hourly counterpart of cutoff_str above, at hour
+        # rather than day granularity, and HOURLY_RETENTION_HOURS rather
+        # than `days` -- see the "hourly" paragraph below for how this is
+        # used. `now_hour_dt` is `now` truncated to its own UTC hour
+        # boundary, the anchor rollup()'s dense hourly output below counts
+        # back from.
+        now_hour_dt = datetime.datetime.fromtimestamp(
+            now, datetime.timezone.utc).replace(minute=0, second=0, microsecond=0)
+        hourly_cutoff_str = (
+            now_hour_dt - datetime.timedelta(hours=HOURLY_RETENTION_HOURS - 1)
+        ).strftime("%Y-%m-%dT%H")
+
         # Merge per-file cache entries into per-session accumulators.
         # Multiple files (a session's own transcript plus any of its
         # subagents/agent-*.jsonl files) can map to the same session id
@@ -761,6 +831,15 @@ def rollup(root=None, max_bytes_per_call=DEFAULT_MAX_BYTES_PER_CALL,
         # daily buckets (entry["daily"]), so this reuses data already
         # being read in the loop below rather than re-parsing anything.
         project_daily_accum = {}
+        # Task-tk: account-wide (not per-project, unlike project_daily_accum
+        # above) hour -> raw totals, filled from the same entry["hourly"]
+        # dicts already being read in this loop for `daily`/`daily_by_project`.
+        # Filtered to hourly_cutoff_str here (not just at output time, the
+        # way daily_accum/project_daily_accum defer their `days` filter to
+        # the block below) purely to keep this accumulator itself small --
+        # a file whose hourly history stretches back further than this
+        # rollup() call could ever emit has no reason to be summed into it.
+        hourly_accum = {}
         for path, _project, _size, _mtime, _inode in file_entries:
             entry = _cache.get(path)
             if entry is None or not entry["synced"]:
@@ -814,6 +893,15 @@ def rollup(root=None, max_bytes_per_call=DEFAULT_MAX_BYTES_PER_CALL,
                 proj_bucket["cache_read"] += day["cache_read"]
                 proj_bucket["cache_write"] += day["cache_write"]
                 proj_bucket["output"] += day["output"]
+            for hour_str, hour in entry["hourly"].items():
+                if hour_str < hourly_cutoff_str:
+                    continue
+                hr_bucket = hourly_accum.setdefault(
+                    hour_str, {"input": 0, "cache_read": 0, "cache_write": 0, "output": 0})
+                hr_bucket["input"] += hour["input"]
+                hr_bucket["cache_read"] += hour["cache_read"]
+                hr_bucket["cache_write"] += hour["cache_write"]
+                hr_bucket["output"] += hour["output"]
 
         sessions_out = {}
         daily_accum = {}
@@ -872,11 +960,35 @@ def rollup(root=None, max_bytes_per_call=DEFAULT_MAX_BYTES_PER_CALL,
             daily_by_project_out.sort(key=lambda row: row["effective"], reverse=True)
             daily_by_project_out = daily_by_project_out[:MAX_DAILY_BY_PROJECT_ENTRIES]
 
+        # Task-tk: `hourly` is DENSE, unlike every sparse dict above --
+        # exactly HOURLY_RETENTION_HOURS entries, one per trailing UTC
+        # hour counting back from now_hour_dt, present and zero-filled
+        # even when hourly_accum has no data for that hour. This is
+        # deliberate, not an oversight: a caller that only ever sees
+        # buckets with real usage in them cannot tell "this device
+        # observed zero activity this hour" apart from "this device
+        # hasn't told me about this hour at all" -- and the hub-side
+        # consumer (store.Store.effective_tokens_in_hourly_window) needs
+        # exactly that distinction to know whether its window is fully
+        # covered or merely mostly-empty. A sparse encoding would save at
+        # most a few dozen bytes here (the cap is already
+        # HOURLY_RETENTION_HOURS rows, never more) at the cost of
+        # reintroducing the exact ambiguity that sank the first five-hour
+        # attempt (see limits.estimates_are_coherent's own docstring).
+        hourly_out = {}
+        for i in range(HOURLY_RETENTION_HOURS):
+            bucket_dt = now_hour_dt - datetime.timedelta(hours=i)
+            hour_str = bucket_dt.strftime("%Y-%m-%dT%H")
+            raw = hourly_accum.get(
+                hour_str, {"input": 0, "cache_read": 0, "cache_write": 0, "output": 0})
+            hourly_out[hour_str] = dict(raw, effective=effective(**raw))
+
         return {
             "sessions": sessions_out,
             "daily": daily_out,
             "daily_by_project": daily_by_project_out,
             "daily_by_project_capped": daily_by_project_capped,
+            "hourly": hourly_out,
             "generated_at": now,
             "files": len(file_entries) + discover_skipped,
             "bytes_read": total_bytes_read,

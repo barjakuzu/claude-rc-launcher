@@ -809,6 +809,86 @@ class UsageCostIngestTest(unittest.TestCase):
     @patch("fleetpoll.fleet.build_fleet")
     @patch("fleetpoll.devices.load_devices")
     @patch("fleetpoll.devices.get_local_name")
+    def test_full_role_payload_persists_cost_hourly(
+            self, get_name, load_devices, build_fleet):
+        # Task-tk: usage_hourly ingests into cost_hourly the same way
+        # usage_daily_by_project ingests into cost_daily. A recent (real)
+        # hour, not a fixed historical one: poll_once() also runs
+        # store.prune() on its first call, which sweeps cost_hourly rows
+        # older than its own real-clock cutoff, and a stale fixture hour
+        # would be pruned again inside the same poll_once() call.
+        get_name.return_value = "hub"
+        load_devices.return_value = []
+        current_hour = time.strftime("%Y-%m-%dT%H", time.gmtime())
+        build_fleet.return_value = {
+            "device_name": "hub", "role": "full", "version": "1", "claude_version": "1",
+            "sessions": [], "events": [], "cursor": None, "generated_at": 1000.0, "errors": [],
+            "usage_daily": [], "usage_daily_by_project": [],
+            "usage_hourly": [
+                {"hour": current_hour, "input": 1, "cache_read": 2, "cache_write": 3,
+                 "output": 4, "effective": 900},
+            ],
+            "usage_meta": {"files": 1, "skipped": 0, "partial": False, "generated_at": 1000.0},
+        }
+        poller = fleetpoll.FleetPoller(self.store, http_get=MagicMock())
+        poller.poll_once()
+
+        conn = self.store._read_conn()
+        try:
+            row = conn.execute(
+                "SELECT effective FROM cost_hourly WHERE device_id=? AND hour=?",
+                ("local", current_hour)).fetchone()
+        finally:
+            conn.close()
+        self.assertIsNotNone(row)
+        self.assertEqual(row["effective"], 900)
+
+    @patch("fleetpoll.fleet.build_fleet")
+    @patch("fleetpoll.devices.load_devices")
+    @patch("fleetpoll.devices.get_local_name")
+    def test_missing_usage_hourly_key_never_raises(self, get_name, load_devices, build_fleet):
+        # A legacy pre-fleet device's synthesized snapshot has no
+        # "usage_hourly" key at all -- must be a no-op, not an error.
+        get_name.return_value = "hub"
+        load_devices.return_value = []
+        build_fleet.return_value = {
+            "device_name": "hub", "role": "full", "version": "1", "claude_version": "1",
+            "sessions": [], "events": [], "cursor": None, "generated_at": 1000.0, "errors": [],
+            "usage_daily": [], "usage_daily_by_project": [],
+            "usage_meta": {"files": 0, "skipped": 0, "partial": False, "generated_at": 1000.0},
+        }
+        poller = fleetpoll.FleetPoller(self.store, http_get=MagicMock())
+        try:
+            poller.poll_once()
+        except Exception as e:  # pragma: no cover - failure path
+            self.fail(f"poll_once raised {e!r}")
+
+    @patch("fleetpoll.fleet.build_fleet")
+    @patch("fleetpoll.devices.load_devices")
+    @patch("fleetpoll.devices.get_local_name")
+    def test_malformed_usage_hourly_from_one_device_does_not_stop_others(
+            self, get_name, load_devices, build_fleet):
+        get_name.return_value = "hub"
+        load_devices.return_value = []
+        build_fleet.return_value = {
+            "device_name": "hub", "role": "full", "version": "1", "claude_version": "1",
+            "sessions": [], "events": [], "cursor": None, "generated_at": 1000.0, "errors": [],
+            "usage_daily": [], "usage_daily_by_project": [],
+            "usage_hourly": "not-a-list",
+            "usage_meta": {"files": 0, "skipped": 0, "partial": False, "generated_at": 1000.0},
+        }
+        poller = fleetpoll.FleetPoller(self.store, http_get=MagicMock())
+        try:
+            poller.poll_once()
+        except Exception as e:  # pragma: no cover - failure path
+            self.fail(f"poll_once raised {e!r}")
+        # The rest of ingest must still have gone through.
+        view = self.store.fleet_view()
+        self.assertIsNotNone(view)
+
+    @patch("fleetpoll.fleet.build_fleet")
+    @patch("fleetpoll.devices.load_devices")
+    @patch("fleetpoll.devices.get_local_name")
     def test_metadata_payload_falls_back_to_project_empty_string(
             self, get_name, load_devices, build_fleet):
         get_name.return_value = "hub"

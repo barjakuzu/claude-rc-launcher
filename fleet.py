@@ -34,6 +34,14 @@ EVENTS_LIMIT = 500
 # on that default never changing underneath it).
 USAGE_DAILY_MAX_DAYS = usage.DEFAULT_DAYS
 
+# Task-tk: same cap-enforced-here-too reasoning as USAGE_DAILY_MAX_DAYS
+# above, for usage_hourly. usage.rollup()['hourly'] is already bounded to
+# HOURLY_RETENTION_HOURS entries (a handful), so this is a small,
+# constant-size addition to every poll's payload regardless of a
+# device's history -- nothing like the per-project daily breakdown this
+# module already takes care to cap by row count, not just by days.
+USAGE_HOURLY_MAX_HOURS = usage.HOURLY_RETENTION_HOURS
+
 _last_prune_at = None
 
 # Task L5 (live bug): the account-limits endpoint describes the ACCOUNT,
@@ -299,6 +307,38 @@ def _usage_daily_rows(usage_result, today_str):
     return rows[:USAGE_DAILY_MAX_DAYS]
 
 
+def _usage_hourly_rows(usage_result):
+    """usage.rollup()['hourly'], eagerly reshaped to a list, newest hour
+    first, capped at USAGE_HOURLY_MAX_HOURS. No future-date guard like
+    _usage_daily_rows above needs: unlike `daily` (a `days`-wide window
+    whose membership a stray future-dated record could otherwise distort),
+    usage.rollup() builds `hourly` by counting HOURLY_RETENTION_HOURS
+    buckets BACK from its own `now`, so nothing in it can already be in
+    the future relative to that same `now` -- there is no clock-skew case
+    for this cap to guard against the way there is for daily's.
+
+    Account-wide, never split by project (there is no project field to
+    validate here, unlike _usage_daily_by_project_rows below) -- see
+    usage.rollup()'s own "hourly" docstring paragraph for why."""
+    hourly_in = usage_result["hourly"]
+    if not isinstance(hourly_in, dict):
+        raise TypeError("usage.rollup()['hourly'] is not a dict")
+    rows = []
+    for hour, bucket in hourly_in.items():
+        if not isinstance(hour, str):
+            continue
+        rows.append({
+            "hour": hour,
+            "input": bucket["input"],
+            "cache_read": bucket["cache_read"],
+            "cache_write": bucket["cache_write"],
+            "output": bucket["output"],
+            "effective": bucket["effective"],
+        })
+    rows.sort(key=lambda row: row["hour"], reverse=True)
+    return rows[:USAGE_HOURLY_MAX_HOURS]
+
+
 def _usage_daily_by_project_rows(usage_result, today_str):
     """usage.rollup()['daily_by_project'], eagerly reshaped and validated
     the same way as _usage_daily_rows, including the same future-date
@@ -451,12 +491,14 @@ def build_fleet(since=None, role=None, events_root=None, now_fn=time.time):
         usage_by_session = _usage_by_session(usage_result)
         usage_daily_full = _usage_daily_rows(usage_result, today_str)
         usage_daily_by_project_full = _usage_daily_by_project_rows(usage_result, today_str)
+        usage_hourly_full = _usage_hourly_rows(usage_result)
         usage_meta = _usage_meta(usage_result)
     except Exception as e:
         errors_raw = errors_raw + [("usage", e)]
         usage_by_session = {}
         usage_daily_full = []
         usage_daily_by_project_full = []
+        usage_hourly_full = []
         usage_meta = _failed_usage_meta(now)
 
     # CONTRACT.md section 2/3 + Task L5: account-level rate limits and
@@ -513,6 +555,11 @@ def build_fleet(since=None, role=None, events_root=None, now_fn=time.time):
         ]
         out_events = [_redact_event(e) for e in raw_events]
         usage_daily = [{"day": d["day"], "effective": d["effective"]} for d in usage_daily_full]
+        # Task-tk: same reduction as usage_daily above -- usage_hourly
+        # carries no project/cwd identity either (see _usage_hourly_rows),
+        # so it is kept-but-reduced under metadata role, not dropped
+        # outright the way usage_daily_by_project is below.
+        usage_hourly = [{"hour": h["hour"], "effective": h["effective"]} for h in usage_hourly_full]
         # Never leak raw exception text (e.g. an OSError embedding the
         # home path/username) once role gates cwd/session identity too.
         errors = [f"{label}: {type(e).__name__}" for label, e in errors_raw]
@@ -520,6 +567,7 @@ def build_fleet(since=None, role=None, events_root=None, now_fn=time.time):
         out_sessions = [dict(s, usage=usage_by_session.get(s.get("session_id"))) for s in raw_sessions]
         out_events = raw_events
         usage_daily = usage_daily_full
+        usage_hourly = usage_hourly_full
         # SECURITY (CONTRACT.md section 2): every OTHER error source here
         # is allowed a real message under full role, but "limits" is
         # exceptional -- see the try/except above -- so it is forced to
@@ -541,6 +589,7 @@ def build_fleet(since=None, role=None, events_root=None, now_fn=time.time):
         "cursor": cursor,
         "generated_at": now,
         "usage_daily": usage_daily,
+        "usage_hourly": usage_hourly,
         "usage_meta": usage_meta,
         "errors": errors,
     }
