@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import type { CSSProperties } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
@@ -132,6 +133,21 @@ const SPECIAL_KEY_MAP: Record<string, string> = {
   'Delete': 'DC',
 };
 
+// Whitespace-delimited "word" under a long-press, for touch text selection.
+// Terminal output has no real word-break API, so this mirrors what a
+// long-press-to-select gesture means in practice: the run of non-space
+// characters the finger landed on. A press on blank space just selects
+// that one cell so the gesture always produces *something*.
+function wordRangeAt(text: string, col: number): { start: number; end: number } {
+  const isWordChar = (i: number) => i >= 0 && i < text.length && text[i] !== ' ';
+  if (!isWordChar(col)) return { start: col, end: col + 1 };
+  let start = col;
+  let end = col;
+  while (isWordChar(start - 1)) start--;
+  while (isWordChar(end + 1)) end++;
+  return { start, end: end + 1 };
+}
+
 export function PreviewModal({ deviceId, name, mode, sessionId, onClose }: PreviewModalProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
@@ -176,11 +192,76 @@ export function PreviewModal({ deviceId, name, mode, sessionId, onClose }: Previ
   const keyBufRef = useRef('');
   const keyTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
+  // Touch text selection (long-press a word, drag to extend). While a
+  // selection is live, incoming output must not touch the pane: an
+  // alt-screen redraw resets the whole buffer and a live redraw would
+  // either wipe the highlight or shift the very text the user is trying to
+  // grab. Renders are buffered here and flushed once the selection ends.
+  const [selecting, setSelecting] = useState(false);
+  const selectingRef = useRef(false);
+  const selAnchorRef = useRef<{ row: number; col: number } | null>(null);
+  const pendingWsDataRef = useRef('');
+  const pendingPollRef = useRef<{ output: string; cursor: { x: number; y: number; visible: boolean } | null } | null>(null);
+  const [copyFlash, setCopyFlash] = useState<'ok' | 'err' | null>(null);
+
+  // Applies one poll snapshot to the pane (reset + write + place cursor).
+  // Shared by the live poll path and the deferred flush after a selection
+  // ends, so the two can never drift into different rendering logic.
+  const renderPaneOutput = (output: string, cursor: { x: number; y: number; visible: boolean } | null) => {
+    const term = termRef.current;
+    if (!term) return;
+    lastContentRef.current = output;
+    term.reset();
+    // capture-pane terminates the last row with \n — writing it as-is
+    // creates a phantom empty line that shifts the screen (and our
+    // cursor placement) up by one row.
+    term.write(output.endsWith('\n') ? output.slice(0, -1) : output);
+    term.scrollToBottom();
+    if (cursor?.visible) {
+      term.write(`\x1b[${cursor.y + 1};${cursor.x + 1}H\x1b[?25h`);
+    } else {
+      term.write('\x1b[?25l');
+    }
+  };
+
+  const endSelection = () => {
+    selectingRef.current = false;
+    selAnchorRef.current = null;
+    setSelecting(false);
+    termRef.current?.clearSelection();
+    if (pendingWsDataRef.current) {
+      termRef.current?.write(pendingWsDataRef.current);
+      pendingWsDataRef.current = '';
+    }
+    if (pendingPollRef.current) {
+      renderPaneOutput(pendingPollRef.current.output, pendingPollRef.current.cursor);
+      pendingPollRef.current = null;
+    }
+  };
+
+  const copySelection = async () => {
+    const text = termRef.current?.getSelection() ?? '';
+    if (!text) { endSelection(); return; }
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopyFlash('ok');
+    } catch {
+      setCopyFlash('err');
+    }
+    endSelection();
+    setTimeout(() => setCopyFlash(null), 1200);
+  };
+
   useEffect(() => () => { mounted.current = false; }, []);
 
   // Initialize xterm
   useEffect(() => {
     if (!containerRef.current) return;
+    selectingRef.current = false;
+    selAnchorRef.current = null;
+    pendingWsDataRef.current = '';
+    pendingPollRef.current = null;
+    setSelecting(false);
     const term = new Terminal({
       cursorBlink: false,
       fontFamily: '"Geist Mono", ui-monospace, SFMono-Regular, monospace',
@@ -297,11 +378,92 @@ export function PreviewModal({ deviceId, name, mode, sessionId, onClose }: Previ
     let lastY = 0;
     let active = false;
     let accumulator = 0;
+    // Momentum: a short ring of recent (time, dy-in-lines) samples, used to
+    // compute release velocity and coast the scroll the way a native list
+    // does instead of stopping dead the instant the finger lifts.
+    let velocitySamples: { t: number; lines: number }[] = [];
+    let inertiaRAF: number | undefined;
+    const stopInertia = () => { if (inertiaRAF !== undefined) { cancelAnimationFrame(inertiaRAF); inertiaRAF = undefined; } };
+    const runInertia = (linesPerMs: number) => {
+      let v = linesPerMs;
+      let last = performance.now();
+      const FRICTION = 0.0035; // lines/ms^2-ish decay, tuned to feel like a phone list
+      const step = (now: number) => {
+        const dt = now - last;
+        last = now;
+        if (!termRef.current || Math.abs(v) < 0.02) { inertiaRAF = undefined; return; }
+        scrollIntentRef.current = Date.now();
+        const whole = Math.trunc(v * dt);
+        if (whole !== 0) termRef.current.scrollLines(whole);
+        const decay = Math.max(0, 1 - FRICTION * dt);
+        v *= decay;
+        inertiaRAF = requestAnimationFrame(step);
+      };
+      inertiaRAF = requestAnimationFrame(step);
+    };
+
+    // Long-press-to-select: a hold under LONG_PRESS_MS with under
+    // MOVE_CANCEL_PX of drift starts a word selection at the touch point.
+    // Moving further first is treated as the start of an ordinary scroll
+    // gesture instead — the two must never both fire for one touch.
+    const LONG_PRESS_MS = 480;
+    const MOVE_CANCEL_PX = 12;
+    let longPressTimer: ReturnType<typeof setTimeout> | undefined;
+    let touchStartX = 0, touchStartY = 0;
+    const clearLongPress = () => { clearTimeout(longPressTimer); longPressTimer = undefined; };
+
+    const cellAt = (clientX: number, clientY: number) => {
+      const term = termRef.current;
+      if (!term || !term.element) return null;
+      const rect = term.element.getBoundingClientRect();
+      if (rect.width === 0 || rect.height === 0) return null;
+      const cw = rect.width / term.cols;
+      const ch = rect.height / term.rows;
+      const col = Math.min(term.cols - 1, Math.max(0, Math.floor((clientX - rect.left) / cw)));
+      const row = Math.min(term.rows - 1, Math.max(0, Math.floor((clientY - rect.top) / ch)));
+      return { col, row: term.buffer.active.viewportY + row };
+    };
+
+    const startSelection = (clientX: number, clientY: number) => {
+      const term = termRef.current;
+      const cell = cellAt(clientX, clientY);
+      if (!term || !cell) return;
+      const line = term.buffer.active.getLine(cell.row);
+      const text = line ? line.translateToString(true) : '';
+      const { start, end } = wordRangeAt(text, cell.col);
+      selAnchorRef.current = { row: cell.row, col: start };
+      selectingRef.current = true;
+      setSelecting(true);
+      try { term.select(start, cell.row, Math.max(1, end - start)); } catch { /* ignore */ }
+      if (typeof navigator.vibrate === 'function') { try { navigator.vibrate(10); } catch { /* ignore */ } }
+    };
+
+    const extendSelection = (clientX: number, clientY: number) => {
+      const term = termRef.current;
+      const anchor = selAnchorRef.current;
+      const cell = cellAt(clientX, clientY);
+      if (!term || !anchor || !cell) return;
+      const cols = term.cols;
+      const anchorIdx = anchor.row * cols + anchor.col;
+      const curIdx = cell.row * cols + cell.col;
+      try {
+        if (curIdx >= anchorIdx) term.select(anchor.col, anchor.row, curIdx - anchorIdx + 1);
+        else term.select(cell.col, cell.row, anchorIdx - curIdx + 1);
+      } catch { /* ignore */ }
+    };
+
     const onTouchStart = (e: TouchEvent) => {
-      if (e.touches.length !== 1) return;
+      if (e.touches.length !== 1) { clearLongPress(); return; }
+      stopInertia();
       active = true;
       lastY = e.touches[0].clientY;
       accumulator = 0;
+      velocitySamples = [{ t: performance.now(), lines: 0 }];
+      if (selectingRef.current) return; // finger lifted from a drag; this new touch is a tap, handled on touchend
+      touchStartX = e.touches[0].clientX;
+      touchStartY = e.touches[0].clientY;
+      clearLongPress();
+      longPressTimer = setTimeout(() => { longPressTimer = undefined; startSelection(touchStartX, touchStartY); }, LONG_PRESS_MS);
     };
     // Scroll forwarding. Claude Code lives in the alternate screen with no
     // tmux history — the transcript can only be scrolled by the app itself,
@@ -335,8 +497,21 @@ export function PreviewModal({ deviceId, name, mode, sessionId, onClose }: Previ
     el.addEventListener('wheel', onWheel, { passive: true });
 
     const onTouchMove = (e: TouchEvent) => {
-      if (!active || e.touches.length !== 1 || !termRef.current) return;
-      const y = e.touches[0].clientY;
+      if (!active || e.touches.length !== 1) return;
+      const touch = e.touches[0];
+      if (longPressTimer) {
+        // A real scroll/drag started before the hold fired — this touch is
+        // not a selection gesture, don't let it start one later.
+        const drift = Math.hypot(touch.clientX - touchStartX, touch.clientY - touchStartY);
+        if (drift > MOVE_CANCEL_PX) clearLongPress();
+      }
+      if (selectingRef.current) {
+        extendSelection(touch.clientX, touch.clientY);
+        if (e.cancelable) e.preventDefault();
+        return;
+      }
+      if (!termRef.current) return;
+      const y = touch.clientY;
       const dy = lastY - y;        // positive: finger moved up → scroll down
       lastY = y;
       if (altRef.current) {
@@ -347,6 +522,10 @@ export function PreviewModal({ deviceId, name, mode, sessionId, onClose }: Previ
       scrollIntentRef.current = Date.now();
       const rows = Math.max(1, termRef.current.rows);
       const lineHeight = el!.clientHeight / rows;
+      const now = performance.now();
+      velocitySamples.push({ t: now, lines: dy / lineHeight });
+      // Keep ~80ms of history for the release-velocity estimate below.
+      while (velocitySamples.length > 2 && now - velocitySamples[0].t > 80) velocitySamples.shift();
       accumulator += dy / lineHeight;
       const whole = Math.trunc(accumulator);
       if (whole !== 0) {
@@ -355,7 +534,29 @@ export function PreviewModal({ deviceId, name, mode, sessionId, onClose }: Previ
         if (e.cancelable) e.preventDefault();
       }
     };
-    const onTouchEnd = () => { active = false; };
+    const onTouchEnd = (e: TouchEvent) => {
+      active = false;
+      const wasSelecting = selectingRef.current;
+      if (longPressTimer) {
+        // Timer never fired — this was a genuine tap. If it landed while a
+        // previous selection was still showing its toolbar, treat the tap
+        // as "dismiss" rather than letting it fall through to anything else.
+        clearLongPress();
+        if (wasSelecting) endSelection();
+        return;
+      }
+      if (wasSelecting) return; // drag-to-extend ended; selection + toolbar stay up
+      if (altRef.current || e.changedTouches.length !== 1) return;
+      const span = velocitySamples;
+      if (span.length >= 2) {
+        const first = span[0], last = span[span.length - 1];
+        const dt = last.t - first.t;
+        if (dt > 4) {
+          const linesPerMs = (span.reduce((s, v) => s + v.lines, 0)) / dt;
+          if (Math.abs(linesPerMs) > 0.02) runInertia(linesPerMs);
+        }
+      }
+    };
     el.addEventListener('touchstart', onTouchStart, { passive: true });
     el.addEventListener('touchmove',  onTouchMove,  { passive: false });
     el.addEventListener('touchend',   onTouchEnd,   { passive: true });
@@ -364,6 +565,8 @@ export function PreviewModal({ deviceId, name, mode, sessionId, onClose }: Previ
     return () => {
       window.removeEventListener('resize', onResize);
       clearTimeout(resizeTimer);
+      clearLongPress();
+      stopInertia();
       el.removeEventListener('wheel', onWheel);
       el.removeEventListener('touchstart', onTouchStart);
       el.removeEventListener('touchmove',  onTouchMove);
@@ -411,7 +614,11 @@ export function PreviewModal({ deviceId, name, mode, sessionId, onClose }: Previ
     ws.onmessage = (ev) => {
       try {
         const m = JSON.parse(ev.data as string);
-        if (m.type === 'data' && termRef.current) termRef.current.write(m.data);
+        if (m.type !== 'data') return;
+        // A live selection must not be disturbed by incoming stream data —
+        // buffer it and flush once the user is done (see endSelection).
+        if (selectingRef.current) { pendingWsDataRef.current += m.data; return; }
+        termRef.current?.write(m.data);
       } catch { /* ignore */ }
     };
     ws.onerror = () => { try { ws?.close(); } catch { /* ignore */ } };
@@ -467,29 +674,24 @@ export function PreviewModal({ deviceId, name, mode, sessionId, onClose }: Previ
         altRef.current = !!data?.alt;
         const term = termRef.current;
         if (output !== lastContentRef.current && term) {
+          if (selectingRef.current) {
+            // A finger is on the glass, selecting a word or block — never
+            // reset/rewrite under it. Hold the freshest snapshot and let
+            // endSelection() apply it the moment the user lets go.
+            pendingPollRef.current = { output, cursor };
+            if (mounted.current) setStatus('selecting');
+          } else {
           // Alt-screen apps (Claude Code) scroll inside the app — always
           // render. For normal content, pause re-rendering while the user
           // is scrolled back so the view doesn't snap to the bottom.
           const atBottom = term.buffer.active.viewportY >= term.buffer.active.length - term.rows;
           const userScrolling = !altRef.current && Date.now() - scrollIntentRef.current < 1500;
           if (altRef.current || (atBottom && !userScrolling)) {
-            lastContentRef.current = output;
-            term.reset();
-            // capture-pane terminates the last row with \n — writing it as-is
-            // creates a phantom empty line that shifts the screen (and our
-            // cursor placement) up by one row.
-            term.write(output.endsWith('\n') ? output.slice(0, -1) : output);
-            term.scrollToBottom();
-            // Place the terminal cursor where tmux's real cursor is —
-            // otherwise it just trails the last written character.
-            if (cursor?.visible) {
-              term.write(`\x1b[${cursor.y + 1};${cursor.x + 1}H\x1b[?25h`);
-            } else {
-              term.write('\x1b[?25l');
-            }
+            renderPaneOutput(output, cursor);
             if (mounted.current) setStatus('live');
           } else {
             if (mounted.current) setStatus('paused (scrolled)');
+          }
           }
         } else if (mounted.current) {
           setStatus('live');
@@ -662,7 +864,51 @@ export function PreviewModal({ deviceId, name, mode, sessionId, onClose }: Previ
               device unreachable, retrying…
             </div>
           )}
-          {!showHistory && status === 'paused (scrolled)' && (
+          {!showHistory && selecting && (
+            <div style={{
+              position: 'absolute', top: 12, left: '50%', transform: 'translateX(-50%)',
+              zIndex: Z.raised, display: 'inline-flex', gap: 8,
+              boxShadow: '0 8px 20px rgba(0,0,0,.45)', borderRadius: 999,
+            }}>
+              <button
+                onClick={copySelection}
+                onMouseDown={(e) => e.preventDefault()}
+                style={{
+                  background: RT.text, color: RT.bg, border: 'none', borderRadius: 999,
+                  padding: '8px 16px', fontFamily: FONT_MONO, fontSize: 11, fontWeight: 700,
+                  letterSpacing: '.06em', textTransform: 'uppercase', cursor: 'pointer',
+                  display: 'inline-flex', alignItems: 'center', gap: 6, touchAction: 'manipulation',
+                }}
+              >
+                <Icons.copy size={12} stroke={RT.bg} /> Copy
+              </button>
+              <button
+                onClick={endSelection}
+                onMouseDown={(e) => e.preventDefault()}
+                style={{
+                  background: RT.panel, color: RT.textDim, border: `1px solid ${RT.borderHi}`,
+                  borderRadius: 999, padding: '8px 14px', fontFamily: FONT_MONO, fontSize: 11,
+                  fontWeight: 600, letterSpacing: '.06em', textTransform: 'uppercase', cursor: 'pointer',
+                  touchAction: 'manipulation',
+                }}
+              >
+                Done
+              </button>
+            </div>
+          )}
+          {!showHistory && copyFlash && (
+            <div style={{
+              position: 'absolute', top: 12, left: '50%', transform: 'translateX(-50%)',
+              zIndex: Z.raised, background: RT.panel,
+              border: `1px solid ${copyFlash === 'ok' ? RT.green : RT.red}`,
+              borderRadius: 8, padding: '7px 14px', fontFamily: FONT_MONO, fontSize: 11.5,
+              color: copyFlash === 'ok' ? RT.green : RT.red, boxShadow: '0 8px 20px rgba(0,0,0,.45)',
+              whiteSpace: 'nowrap',
+            }}>
+              {copyFlash === 'ok' ? 'copied' : 'copy failed, clipboard unavailable'}
+            </div>
+          )}
+          {!showHistory && !selecting && status === 'paused (scrolled)' && (
             <button
               onClick={() => { scrollIntentRef.current = 0; termRef.current?.scrollToBottom(); }}
               style={{
@@ -689,7 +935,7 @@ export function PreviewModal({ deviceId, name, mode, sessionId, onClose }: Previ
           fontFamily: FONT_MONO, fontSize: 10.5, color: RT.textLow,
           letterSpacing: '.04em',
         }}>
-          <span>tap the keys above or type on a keyboard</span>
+          <span>tap the keys above, type on a keyboard, or hold a word to select</span>
           <div style={{ flex: 1 }} />
           <span>{deviceId}</span>
         </div>
@@ -700,14 +946,51 @@ export function PreviewModal({ deviceId, name, mode, sessionId, onClose }: Previ
 }
 
 // On-screen key bar for mobile — taps map to tmux send-keys specials.
+// How long a Ctrl arm stays live before it silently disarms. Long enough to
+// find the target key across a scrolled-out row, short enough that a stray
+// tap minutes later can never land as a control combo.
+const CTRL_ARM_MS = 3500;
+
 function KeyBar({ deviceId, name, onActivity }: { deviceId: string; name: string; onActivity?: () => void }) {
-  const send = (special: string) => {
-    onActivity?.();
-    api.sendKeys(deviceId, name, { special: [special] }).catch(() => { /* ignore */ });
+  const [ctrlArmed, setCtrlArmed] = useState(false);
+  const [failedLabel, setFailedLabel] = useState<string | null>(null);
+  const armTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const failTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+
+  const flashFailure = (label: string) => {
+    clearTimeout(failTimerRef.current);
+    setFailedLabel(label);
+    failTimerRef.current = setTimeout(() => setFailedLabel(null), 700);
   };
+
+  const send = (label: string, special: string) => {
+    onActivity?.();
+    api.sendKeys(deviceId, name, { special: [special] }).catch(() => flashFailure(label));
+  };
+
+  // Ctrl-combos never fire on the same tap that arms them: arming only
+  // reveals the letter row, and a second, deliberate tap on a letter sends
+  // it. Elevated sessions make a bare accidental Ctrl-C/Ctrl-D expensive,
+  // so a single mis-tap must never be enough.
+  const armCtrl = () => {
+    onActivity?.();
+    clearTimeout(armTimerRef.current);
+    setCtrlArmed(true);
+    armTimerRef.current = setTimeout(() => setCtrlArmed(false), CTRL_ARM_MS);
+  };
+  const sendCtrl = (letter: string) => {
+    clearTimeout(armTimerRef.current);
+    setCtrlArmed(false);
+    onActivity?.();
+    api.sendKeys(deviceId, name, { special: [`C-${letter.toLowerCase()}`] }).catch(() => flashFailure(`^${letter}`));
+  };
+
+  useEffect(() => () => { clearTimeout(armTimerRef.current); clearTimeout(failTimerRef.current); }, []);
+
   const keys: { label: string; special: string; flex?: number; accent?: string }[] = [
     { label: 'Esc', special: 'Escape' },
     { label: 'Tab', special: 'Tab' },
+    { label: '⇤Tab', special: 'BTab' },
     { label: '⇞',   special: 'PPage' },
     { label: '⇟',   special: 'NPage' },
     { label: '←',   special: 'Left' },
@@ -716,6 +999,16 @@ function KeyBar({ deviceId, name, onActivity }: { deviceId: string; name: string
     { label: '→',   special: 'Right' },
     { label: '⏎',   special: 'Enter', flex: 2, accent: RT.green },
   ];
+  const ctrlLetters = ['C', 'D', 'L', 'R', 'U', 'A'];
+  const btnBase: CSSProperties = {
+    minWidth: 44, minHeight: 38,
+    background: RT.panel, border: `1px solid ${RT.border}`, borderRadius: 8,
+    fontFamily: FONT_MONO, fontSize: 14, fontWeight: 500,
+    cursor: 'pointer', padding: '0 10px',
+    display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+    whiteSpace: 'nowrap', flex: 'none', touchAction: 'manipulation',
+  };
+
   return (
     <div style={{
       flex: 'none',
@@ -724,23 +1017,46 @@ function KeyBar({ deviceId, name, onActivity }: { deviceId: string; name: string
       padding: '8px 8px',
       display: 'flex', gap: 6, overflowX: 'auto', WebkitOverflowScrolling: 'touch',
     }}>
-      {keys.map((k) => (
+      <button
+        onClick={armCtrl}
+        onMouseDown={(e) => e.preventDefault()}
+        title="Ctrl (tap, then tap a letter)"
+        style={{
+          ...btnBase,
+          background: ctrlArmed ? RT.red : RT.panel,
+          color: ctrlArmed ? RT.bg : RT.textDim,
+          border: `1px solid ${ctrlArmed ? RT.red : RT.border}`,
+          fontWeight: 700, fontSize: 12, letterSpacing: '.02em',
+        }}
+      >
+        Ctrl
+      </button>
+      {ctrlArmed && ctrlLetters.map((l) => (
+        <button
+          key={`ctrl-${l}`}
+          onClick={() => sendCtrl(l)}
+          onMouseDown={(e) => e.preventDefault()}
+          style={{
+            ...btnBase,
+            background: failedLabel === `^${l}` ? RT.red : RT.card,
+            border: `1px solid ${RT.borderHi}`,
+            color: RT.text, fontWeight: 700,
+          }}
+        >
+          ^{l}
+        </button>
+      ))}
+      {!ctrlArmed && keys.map((k) => (
         <button
           key={k.label}
-          onClick={() => send(k.special)}
+          onClick={() => send(k.label, k.special)}
           // Prevent stealing focus from the terminal on tap.
           onMouseDown={(e) => e.preventDefault()}
           style={{
-            flex: k.flex ?? 1, minWidth: 44, minHeight: 38,
-            background: RT.panel,
-            color: k.accent ?? RT.text,
-            border: `1px solid ${RT.border}`,
-            borderRadius: 8,
-            fontFamily: FONT_MONO, fontSize: 14, fontWeight: 500,
-            cursor: 'pointer', padding: '0 10px',
-            display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-            whiteSpace: 'nowrap',
-            touchAction: 'manipulation',
+            ...btnBase,
+            flex: k.flex ?? 1,
+            background: failedLabel === k.label ? RT.red : RT.panel,
+            color: failedLabel === k.label ? RT.bg : (k.accent ?? RT.text),
           }}
         >
           {k.label}
