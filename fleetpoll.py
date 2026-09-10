@@ -215,6 +215,34 @@ class FleetPoller:
         except Exception:
             _LOG.exception("fleetpoll: cost ingest failed for device %r", device_id)
 
+        # Task-tk: hourly counterpart of the cost_daily ingest above, for
+        # store.Store.effective_tokens_in_hourly_window's five-hour
+        # figure. Unlike usage_daily_by_project, usage_hourly is present
+        # (kept-but-reduced, never dropped) under every role -- see
+        # fleet.py's own reasoning -- so there is no metadata fallback
+        # branch to mirror here; a legacy pre-fleet device's synthesized
+        # snapshot (see _poll_remote_legacy) simply has no "usage_hourly"
+        # key at all, which `isinstance(hourly, list)` below already
+        # treats as "nothing to ingest this poll", not an error. Its own
+        # try/except, same reasoning as every other ingest step here: a
+        # malformed usage_hourly shape from THIS device must never
+        # prevent its sessions/events/usage/cost-daily/limits from being
+        # ingested or its cursor from advancing.
+        try:
+            hourly = snapshot.get("usage_hourly")
+            if isinstance(hourly, list):
+                hourly_rows = [
+                    {"hour": r.get("hour"),
+                     "input": r.get("input"), "cache_read": r.get("cache_read"),
+                     "cache_write": r.get("cache_write"), "output": r.get("output"),
+                     "effective": r.get("effective")}
+                    for r in hourly if isinstance(r, dict)
+                ]
+                if hourly_rows:
+                    self.store.upsert_cost_hourly(device_id, hourly_rows)
+        except Exception:
+            _LOG.exception("fleetpoll: hourly cost ingest failed for device %r", device_id)
+
         # CONTRACT.md sections 3-4: persist this device's account-limits
         # reading whole, as reported. A legacy pre-fleet device's
         # synthesized snapshot (see _poll_remote_legacy) never has a

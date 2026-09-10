@@ -11,6 +11,7 @@ No lock is ever held while sleeping/blocking: the writer thread owns its
 own connection exclusively and callers block only on a per-call
 threading.Event, not on any shared mutex.
 """
+import calendar
 import json
 import logging
 import math
@@ -218,6 +219,21 @@ CREATE TABLE IF NOT EXISTS cost_daily (
     PRIMARY KEY (device_id, day, project)
 );
 CREATE INDEX IF NOT EXISTS idx_cost_daily_day ON cost_daily(day);
+-- Task-tk: sub-day-resolution counterpart to cost_daily, fed by
+-- usage.rollup()['hourly'] via fleet.py's usage_hourly and ingested by
+-- fleetpoll._ingest the same way cost_daily is. Device-wide only (no
+-- project column) -- see upsert_cost_hourly's own docstring for why.
+-- Brand new table (this comment written the same call it was added), so
+-- CREATE TABLE IF NOT EXISTS above is sufficient on its own, same as
+-- account_limits was when ITS OWN comment below was first written -- no
+-- existing hub.db can already have a differently-shaped version of it.
+CREATE TABLE IF NOT EXISTS cost_hourly (
+    device_id TEXT, hour TEXT,
+    input INTEGER, cache_read INTEGER, cache_write INTEGER,
+    output INTEGER, effective INTEGER, updated_at REAL,
+    PRIMARY KEY (device_id, hour)
+);
+CREATE INDEX IF NOT EXISTS idx_cost_hourly_hour ON cost_hourly(hour);
 CREATE TABLE IF NOT EXISTS alerts (
     device_id TEXT, session_id TEXT, rule TEXT,
     severity TEXT, message TEXT, value REAL, threshold REAL,
@@ -819,6 +835,63 @@ class Store:
             return {"skipped": skipped}
         return self._write(_do)
 
+    def upsert_cost_hourly(self, device_id, rows, now_fn=time.time):
+        """Task-tk: replace (never accumulate) this device's hourly
+        effective-token rollup -- the sub-day-resolution counterpart to
+        upsert_cost_daily above, fed by usage.rollup()['hourly'] via
+        fleet.py's usage_hourly. Device-wide only, no project column: the
+        five-hour estimate this feeds (effective_tokens_in_hourly_window
+        below) only ever needs the account-wide total, and a per-project
+        breakdown at hourly resolution would multiply the already-small
+        row count here by however many projects a device touches, for a
+        breakdown nothing reads -- the same bandwidth reasoning
+        usage.py's own HOURLY_RETENTION_HOURS comment gives on the device
+        side. Same "device reports cumulative totals for the bucket on
+        every poll" replace-not-accumulate semantics as upsert_cost_daily.
+
+        Rows are DENSE on the wire (usage.rollup()['hourly'] always sends
+        exactly HOURLY_RETENTION_HOURS entries, zero-filled where nothing
+        happened -- see that function's own docstring), so an hour simply
+        absent from `rows` here means this device has never reported it
+        (yet, or at all), never that it observed zero usage -- that
+        distinction is exactly what effective_tokens_in_hourly_window's
+        own coverage check below depends on.
+
+        Same coercion contract as upsert_cost_daily: a row with no `hour`
+        is skipped and logged (the natural key, same reasoning as `day`
+        there); `_coerce_sparse_fields` against `_COST_NUMERIC_FIELDS`
+        drops the whole row on a present-but-uncoercible numeric field,
+        leaves an absent/None one as SQL NULL."""
+        def _do(conn):
+            now = now_fn()
+            skipped = 0
+            for r in rows:
+                hour = r.get("hour")
+                if not hour:
+                    skipped += 1
+                    _LOG.warning(
+                        "upsert_cost_hourly: skipping row for device %r with no hour: %r",
+                        device_id, r)
+                    continue
+                coerced, bad_field = _coerce_sparse_fields(r, self._COST_NUMERIC_FIELDS)
+                if bad_field is not None:
+                    skipped += 1
+                    _LOG.warning(
+                        "upsert_cost_hourly: skipping row for device %r hour %r "
+                        "with a non-numeric %r field: %r", device_id, hour, bad_field, r)
+                    continue
+                conn.execute(
+                    "INSERT INTO cost_hourly (device_id, hour, input, cache_read, "
+                    "cache_write, output, effective, updated_at) VALUES (?,?,?,?,?,?,?,?) "
+                    "ON CONFLICT(device_id, hour) DO UPDATE SET "
+                    "input=excluded.input, cache_read=excluded.cache_read, "
+                    "cache_write=excluded.cache_write, output=excluded.output, "
+                    "effective=excluded.effective, updated_at=excluded.updated_at",
+                    (device_id, hour, coerced["input"], coerced["cache_read"],
+                     coerced["cache_write"], coerced["output"], coerced["effective"], now))
+            return {"skipped": skipped}
+        return self._write(_do)
+
     # CONTRACT.md section 3's `limits` object has exactly these top-level
     # keys. A remote device's /rc/fleet response is attacker-reachable
     # input (Minor 3, fix round 1 security review): a compromised or
@@ -1080,6 +1153,117 @@ class Store:
             return None
         return delta
 
+    def effective_tokens_in_hourly_window(self, window_seconds, now_fn=time.time):
+        """Task-tk: real sub-day-resolution measurement of effective
+        tokens consumed in the trailing `window_seconds`, built from
+        cost_hourly (usage.py's per-hour rollup, uploaded and stored
+        every poll via upsert_cost_hourly above) instead of the
+        in-memory sample series effective_tokens_in_window() above is
+        built on.
+
+        The key difference from that series: this needs no live process
+        uptime to "warm up". cost_hourly's rows are derived from
+        transcript timestamps that already exist on disk, so as soon as
+        every device has sent even one poll under this feature, the
+        window asked for here is already covered (as long as no device's
+        read was usage_partial -- see the module-level note below; this
+        function has no way to see that flag itself, callers must check
+        any_device_usage_partial() the same way effective_tokens_in_window's
+        own callers already do). That is exactly what makes a real
+        five-hour figure possible at all: the OLD in-memory series could
+        only ever answer a five-hour question after five hours of the
+        hub process staying up, which is why the five-hour estimate
+        shipped permanently suppressed the first time this was attempted
+        (see limits.estimates_are_coherent's own docstring for the live
+        bug that caused it).
+
+        SUMs `effective` per hour across every device (account-wide, same
+        aggregation cost_daily's own SUM already uses for the day-level
+        path), then windows it: an hour bucket that starts at or after
+        `now - window_seconds` counts in full; the one bucket (if any)
+        whose span straddles the window's start edge counts only for the
+        fraction of that hour actually inside the window, assuming a
+        uniform spread of tokens across the hour -- exact sub-hour
+        accounting is not recoverable from hour-granularity data, and a
+        uniform split is the least-biased approximation available without
+        finer resolution than usage.py tracks.
+
+        Coverage note: cost_hourly rows are DENSE on the wire (see
+        upsert_cost_hourly's own docstring) -- an hour with genuinely
+        zero usage is still a present, zero-valued row for any device
+        that has reported it, never simply absent. That density is what
+        lets "the oldest row we have doesn't reach back far enough" mean
+        exactly what it says (missing coverage) rather than being
+        confusable with "reached back far enough and found nothing" (a
+        real, present zero) -- the same ambiguity a sparse encoding would
+        have reintroduced, see usage.py's own 'hourly' docstring
+        paragraph.
+
+        Returns None -- deliberately, never a partial or zero-biased
+        number -- when:
+          - cost_hourly has no rows at all (no device has reported under
+            this feature yet, or the table was just pruned).
+          - the oldest hour on record does not reach back far enough to
+            cover `window_seconds`: silently treating an uncovered
+            stretch as "zero usage then" would UNDER-count `consumed`
+            and, via estimate_window_tokens, OVER-state the derived
+            budget -- the same "confidently wrong" failure
+            effective_tokens_in_window's own contract already refuses.
+          - the windowed total is <= 0: nothing to divide a percent into
+            that means anything, matching effective_tokens_in_window's
+            own contract for a non-positive delta.
+
+        Never raises."""
+        now = now_fn()
+        window_start = now - window_seconds
+        try:
+            conn = self._read_conn()
+            try:
+                rows = conn.execute(
+                    "SELECT hour, COALESCE(SUM(effective), 0) AS effective "
+                    "FROM cost_hourly GROUP BY hour ORDER BY hour ASC").fetchall()
+            finally:
+                conn.close()
+        except Exception:
+            _LOG.exception("effective_tokens_in_hourly_window: failed to read cost_hourly")
+            return None
+        if not rows:
+            return None
+        buckets = []
+        for row in rows:
+            try:
+                start = float(calendar.timegm(time.strptime(row["hour"], "%Y-%m-%dT%H")))
+            except (ValueError, TypeError):
+                # A row this hub itself never wrote (or a future schema
+                # this version doesn't understand) -- skip it rather than
+                # let one unparsable hour string raise out of the whole
+                # window computation.
+                continue
+            buckets.append((start, row["effective"] or 0))
+        if not buckets:
+            return None
+        buckets.sort(key=lambda b: b[0])
+        if buckets[0][0] > window_start:
+            # The retained history does not reach back far enough to
+            # answer for the whole window -- see the docstring's
+            # "never under-count" rule.
+            return None
+        total = 0.0
+        for start, eff in buckets:
+            end = start + 3600.0
+            if end <= window_start:
+                continue  # entirely before the window
+            if start >= window_start:
+                total += eff
+            else:
+                # Straddles the window's start edge: count only the
+                # fraction of this hour inside the window, assuming a
+                # uniform spread of tokens across the hour.
+                total += eff * ((end - window_start) / 3600.0)
+        if total <= 0:
+            return None
+        return total
+
     def replace_alerts(self, findings, now_fn=time.time):
         """Make the alerts table equal `findings` (guard.evaluate()'s
         output) exactly: every finding upserts its row, preserving
@@ -1186,7 +1370,7 @@ class Store:
             return {"count": len(current_keys), "skipped": skipped}
         return self._write(_do)
 
-    def prune(self, days=14, now_fn=time.time, cost_days=35):
+    def prune(self, days=14, now_fn=time.time, cost_days=35, cost_hourly_hours=24):
         """Delete old rows. `days` (default 14) governs session_events,
         audit_log and ended sessions, same as before this parameter
         existed. `cost_daily` uses its OWN cutoff, `cost_days` (default
@@ -1204,19 +1388,31 @@ class Store:
         (either can change independently; cost_days only needs to stay
         >= the largest `days` a caller actually asks cost_view() for).
 
+        `cost_hourly` (task-tk) likewise uses its OWN cutoff,
+        `cost_hourly_hours` (default 24), not `days` -- same
+        bare-hourly-call reasoning as cost_days above, just at hour
+        granularity. 24, not usage.py's own HOURLY_RETENTION_HOURS (6):
+        the hub only ever asks effective_tokens_in_hourly_window() for a
+        five-hour window, but this gives real headroom against a device
+        missing a poll or two (or running an older HOURLY_RETENTION_HOURS
+        after an upgrade) before its own oldest hours quietly age out of
+        the hub's copy from under it.
+
         session_usage's orphan sweep is unaffected by either cutoff -- it
         deletes by non-existence in `sessions`, not by age.
 
-        Boundary note: both cutoffs here are "delete strictly older than
-        the cutoff day/timestamp" (`<`), which errs toward keeping one
-        extra day/interval of data rather than deleting it -- the safe
-        direction for a prune() whose whole purpose is retention, given
-        Important 1 above. cost_view()'s own `days` window (a query, not
-        a delete) is the one documented as exact."""
+        Boundary note: every cutoff here is "delete strictly older than
+        the cutoff day/hour/timestamp" (`<`), which errs toward keeping
+        one extra day/hour/interval of data rather than deleting it --
+        the safe direction for a prune() whose whole purpose is
+        retention, given Important 1 above. cost_view()'s own `days`
+        window (a query, not a delete) is the one documented as exact."""
         def _do(conn):
             now = now_fn()
             cutoff = now - days * 86400
             cost_cutoff_day = time.strftime("%Y-%m-%d", time.gmtime(now - cost_days * 86400))
+            cost_hourly_cutoff = time.strftime(
+                "%Y-%m-%dT%H", time.gmtime(now - cost_hourly_hours * 3600))
             ev = conn.execute("DELETE FROM session_events WHERE ts < ?", (cutoff,)).rowcount
             au = conn.execute("DELETE FROM audit_log WHERE ts < ?", (cutoff,)).rowcount
             se = conn.execute(
@@ -1232,8 +1428,10 @@ class Store:
                 "AND s.session_id = session_usage.session_id)").rowcount
             cd = conn.execute(
                 "DELETE FROM cost_daily WHERE day < ?", (cost_cutoff_day,)).rowcount
+            ch = conn.execute(
+                "DELETE FROM cost_hourly WHERE hour < ?", (cost_hourly_cutoff,)).rowcount
             return {"events": ev, "audit_log": au, "sessions": se,
-                    "session_usage": su, "cost_daily": cd}
+                    "session_usage": su, "cost_daily": cd, "cost_hourly": ch}
         return self._write(_do)
 
     # -- reads -----------------------------------------------------------

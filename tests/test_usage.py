@@ -483,6 +483,103 @@ class DailyBucketTest(UsageTestCase):
         self.assertEqual(len(data["daily"]), 30)
 
 
+class HourlyRollupTest(UsageTestCase):
+    """Task-tk: rollup()['hourly'] is the sub-day-resolution counterpart
+    to `daily`, built for the hub's rolling five-hour token estimate.
+    Unlike every other bucket in this module, it is DENSE -- always
+    exactly HOURLY_RETENTION_HOURS entries, zero-filled where nothing
+    happened -- so the hub can tell "genuinely idle this hour" apart from
+    "we don't have data this far back yet" without a second signal."""
+
+    def _fixed_now(self, y=2026, mo=9, d=7, h=12, mi=0):
+        return datetime.datetime(y, mo, d, h, mi, tzinfo=datetime.timezone.utc).timestamp()
+
+    def test_dense_output_has_exactly_retention_hours_entries(self):
+        fixed_now = self._fixed_now()
+        data = usage.rollup(root=self.root, now_fn=lambda: fixed_now)
+        self.assertEqual(len(data["hourly"]), usage.HOURLY_RETENTION_HOURS)
+
+    def test_current_hour_bucket_key_matches_now(self):
+        fixed_now = self._fixed_now(h=12, mi=34)
+        data = usage.rollup(root=self.root, now_fn=lambda: fixed_now)
+        self.assertIn("2026-09-07T12", data["hourly"])
+
+    def test_zero_filled_hour_with_no_usage_is_present_not_absent(self):
+        # No transcript data at all -- every one of the dense hours must
+        # still appear, all zero, distinguishing "we checked and it was
+        # quiet" from "we have nothing to say about this hour".
+        fixed_now = self._fixed_now()
+        data = usage.rollup(root=self.root, now_fn=lambda: fixed_now)
+        for bucket in data["hourly"].values():
+            self.assertEqual(bucket["input"], 0)
+            self.assertEqual(bucket["output"], 0)
+            self.assertEqual(bucket["effective"], 0)
+
+    def test_records_fold_into_their_own_hour_bucket(self):
+        path = self._session_path()
+        fixed_now = self._fixed_now(h=12, mi=0)
+        # One record an hour ago (11:xx), one in the current hour (12:xx).
+        self._write(path,
+                     _line(_usage_row(msg_id="m1", ts="2026-09-07T11:15:00.000Z",
+                                       input_tokens=10, output=1))
+                     + _line(_usage_row(msg_id="m2", ts="2026-09-07T12:05:00.000Z",
+                                         input_tokens=3, output=1)))
+        data = usage.rollup(root=self.root, now_fn=lambda: fixed_now)
+        self.assertEqual(data["hourly"]["2026-09-07T11"]["input"], 10)
+        self.assertEqual(data["hourly"]["2026-09-07T12"]["input"], 3)
+        self.assertEqual(
+            data["hourly"]["2026-09-07T11"]["effective"], usage.effective(input=10, output=1))
+
+    def test_hour_outside_retention_window_never_appears(self):
+        path = self._session_path()
+        fixed_now = self._fixed_now(h=12, mi=0)
+        # 20 hours ago: well outside HOURLY_RETENTION_HOURS (6).
+        self._write(path, _line(_usage_row(
+            msg_id="m-old", ts="2026-09-06T16:00:00.000Z", input_tokens=99, output=1)))
+        data = usage.rollup(root=self.root, now_fn=lambda: fixed_now)
+        self.assertNotIn("2026-09-06T16", data["hourly"])
+        # And its tokens must not leak into any bucket that IS present.
+        for bucket in data["hourly"].values():
+            self.assertEqual(bucket["input"], 0)
+
+    def test_daily_output_unaffected_by_hourly_addition(self):
+        # Byte-for-byte identical `daily` is a hard constraint (task-tk
+        # brief): adding `hourly` must never change what `daily` reports.
+        path = self._session_path()
+        self._write(path, _line(_usage_row(
+            msg_id="m1", ts="2026-09-07T11:15:00.000Z", input_tokens=10, output=1)))
+        fixed_now = self._fixed_now(h=12, mi=0)
+        data = usage.rollup(root=self.root, now_fn=lambda: fixed_now)
+        self.assertEqual(data["daily"], {"2026-09-07": {
+            "input": 10, "cache_read": 0, "cache_write": 0, "output": 1,
+            "effective": usage.effective(input=10, output=1),
+        }})
+
+    def test_multiple_sessions_same_hour_sum_together(self):
+        path1 = self._session_path("sess-1")
+        path2 = self._session_path("sess-2")
+        fixed_now = self._fixed_now(h=12, mi=0)
+        self._write(path1, _line(_usage_row(
+            msg_id="m1", session_id="sess-1", ts="2026-09-07T12:01:00.000Z",
+            input_tokens=5, output=1)))
+        self._write(path2, _line(_usage_row(
+            msg_id="m2", session_id="sess-2", ts="2026-09-07T12:02:00.000Z",
+            input_tokens=7, output=1)))
+        data = usage.rollup(root=self.root, now_fn=lambda: fixed_now)
+        self.assertEqual(data["hourly"]["2026-09-07T12"]["input"], 12)
+
+    def test_incremental_read_still_produces_correct_hourly_totals(self):
+        path = self._session_path()
+        fixed_now = self._fixed_now(h=12, mi=0)
+        self._write(path, _line(_usage_row(
+            msg_id="m1", ts="2026-09-07T12:01:00.000Z", input_tokens=1, output=1)))
+        usage.rollup(root=self.root, now_fn=lambda: fixed_now)
+        self._write(path, _line(_usage_row(
+            msg_id="m2", ts="2026-09-07T12:02:00.000Z", input_tokens=2, output=1)), mode="a")
+        data = usage.rollup(root=self.root, now_fn=lambda: fixed_now)
+        self.assertEqual(data["hourly"]["2026-09-07T12"]["input"], 3)
+
+
 class MaxBytesPerCallTest(UsageTestCase):
     def test_budget_exhaustion_sets_partial_and_keeps_cached_data(self):
         path = self._session_path()

@@ -1574,6 +1574,31 @@ class UsageCostAlertsTest(unittest.TestCase):
         deleted = self.store.prune(days=14, cost_days=10)
         self.assertEqual(deleted["cost_daily"], 1)
 
+    def test_prune_cost_hourly_uses_its_own_cutoff_not_the_generic_days(self):
+        # Task-tk, same reasoning as test_prune_cost_daily_uses_its_own_cutoff
+        # above: fleetpoll.py calls prune() bare, hourly, so a cost_hourly
+        # row within cost_hourly_hours (default 24) must survive that bare
+        # call even though `days` defaults to 14.
+        recent = time.strftime("%Y-%m-%dT%H", time.gmtime(time.time() - 2 * 3600))
+        ancient = time.strftime("%Y-%m-%dT%H", time.gmtime(time.time() - 48 * 3600))
+        self.store.upsert_cost_hourly("local", [
+            {"hour": recent, "input": 1, "cache_read": 1, "cache_write": 1,
+             "output": 1, "effective": 1},
+            {"hour": ancient, "input": 1, "cache_read": 1, "cache_write": 1,
+             "output": 1, "effective": 1},
+        ])
+        deleted = self.store.prune()  # bare call, matching fleetpoll.py's own usage
+        self.assertEqual(deleted["cost_hourly"], 1)  # only the 48h-old row
+
+    def test_prune_cost_hourly_hours_param_is_independently_overridable(self):
+        recent = time.strftime("%Y-%m-%dT%H", time.gmtime(time.time() - 10 * 3600))
+        self.store.upsert_cost_hourly("local", [
+            {"hour": recent, "input": 1, "cache_read": 1, "cache_write": 1,
+             "output": 1, "effective": 1},
+        ])
+        deleted = self.store.prune(days=14, cost_hourly_hours=5)
+        self.assertEqual(deleted["cost_hourly"], 1)
+
     # -- concurrency -------------------------------------------------------
 
     def test_concurrent_writes_to_new_tables_do_not_raise(self):
@@ -2166,6 +2191,187 @@ class UsageSampleWindowTest(unittest.TestCase):
         with self.store._usage_samples_lock:
             samples = list(self.store._usage_samples)
         self.assertEqual(samples, [(2000.0, 1000)])
+
+
+def _hour_str(epoch):
+    return time.strftime("%Y-%m-%dT%H", time.gmtime(epoch))
+
+
+class UpsertCostHourlyTest(unittest.TestCase):
+    """Task-tk: cost_hourly is the sub-day-resolution counterpart to
+    cost_daily, ingested from usage.rollup()['hourly'] via fleet.py's
+    usage_hourly. Same replace-not-accumulate/coercion contract as
+    upsert_cost_daily, minus the project column (device-wide only)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = store.Store(os.path.join(self.tmp.name, "hub.db"))
+
+    def tearDown(self):
+        self.store.close()
+        self.tmp.cleanup()
+
+    def _hour_total(self, epoch, device_id="local"):
+        conn = self.store._read_conn()
+        try:
+            row = conn.execute(
+                "SELECT effective FROM cost_hourly WHERE device_id=? AND hour=?",
+                (device_id, _hour_str(epoch))).fetchone()
+        finally:
+            conn.close()
+        return row["effective"] if row is not None else None
+
+    def test_replaces_not_accumulates(self):
+        row = {"hour": _hour_str(0), "input": 10, "cache_read": 20, "cache_write": 3,
+               "output": 4, "effective": 500}
+        for _ in range(3):
+            self.store.upsert_cost_hourly("local", [row])
+        self.assertEqual(self._hour_total(0), 500)  # not 1500
+
+    def test_skips_rows_without_hour(self):
+        result = self.store.upsert_cost_hourly("local", [
+            {"input": 1, "cache_read": 2, "cache_write": 3, "output": 4, "effective": 5},
+        ])
+        self.assertEqual(result["skipped"], 1)
+
+    def test_skips_row_with_non_coercible_numeric_field(self):
+        result = self.store.upsert_cost_hourly("local", [
+            {"hour": _hour_str(0), "input": 1, "cache_read": 1, "cache_write": 1,
+             "output": 1, "effective": "n/a"},
+        ])
+        self.assertEqual(result["skipped"], 1)
+        self.assertIsNone(self._hour_total(0))
+
+    def test_coerces_numeric_strings(self):
+        result = self.store.upsert_cost_hourly("local", [
+            {"hour": _hour_str(0), "input": "1", "cache_read": "2", "cache_write": "3",
+             "output": "4", "effective": "5000"},
+        ])
+        self.assertEqual(result["skipped"], 0)
+        self.assertEqual(self._hour_total(0), 5000)
+
+    def test_none_field_is_absent_not_invalid(self):
+        result = self.store.upsert_cost_hourly("local", [
+            {"hour": _hour_str(0), "input": None, "cache_read": 1, "cache_write": 1,
+             "output": 1, "effective": 100},
+        ])
+        self.assertEqual(result["skipped"], 0)
+        self.assertEqual(self._hour_total(0), 100)
+
+    def test_dense_zero_row_is_stored_not_skipped(self):
+        # Task-tk: usage.rollup()['hourly'] is dense (zero-filled hours
+        # included), and that zero must reach the table as a real row --
+        # effective_tokens_in_hourly_window's coverage check depends on
+        # "present and zero" being distinguishable from "absent".
+        result = self.store.upsert_cost_hourly("local", [
+            {"hour": _hour_str(0), "input": 0, "cache_read": 0, "cache_write": 0,
+             "output": 0, "effective": 0},
+        ])
+        self.assertEqual(result["skipped"], 0)
+        self.assertEqual(self._hour_total(0), 0)
+
+    def test_bad_row_from_one_device_does_not_break_others(self):
+        good = {"hour": _hour_str(0), "input": 1, "cache_read": 1, "cache_write": 1,
+                "output": 1, "effective": 1}
+        self.store.upsert_cost_hourly("dev-good", [good])
+        result = self.store.upsert_cost_hourly("dev-bad", [
+            {"hour": _hour_str(0), "input": 1, "cache_read": 1, "cache_write": 1,
+             "output": 1, "effective": float("nan")},
+        ])
+        self.assertEqual(result["skipped"], 1)
+        self.assertEqual(self._hour_total(0, device_id="dev-good"), 1)
+
+
+class EffectiveTokensInHourlyWindowTest(unittest.TestCase):
+    """Task-tk: effective_tokens_in_hourly_window() is the real
+    sub-day-resolution replacement for the five-hour side of what
+    effective_tokens_in_window()'s in-memory sample series used to
+    (never) reliably answer -- built from cost_hourly instead, so
+    coverage depends on retention/reporting, not on the hub process
+    having stayed up for the whole window."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = store.Store(os.path.join(self.tmp.name, "hub.db"))
+
+    def tearDown(self):
+        self.store.close()
+        self.tmp.cleanup()
+
+    def _hour(self, epoch, effective, device_id="local"):
+        self.store.upsert_cost_hourly(device_id, [
+            {"hour": _hour_str(epoch), "input": 0, "cache_read": 0, "cache_write": 0,
+             "output": 0, "effective": effective},
+        ])
+
+    def test_no_rows_at_all_returns_none(self):
+        self.assertIsNone(self.store.effective_tokens_in_hourly_window(3600))
+
+    def test_full_hour_coverage_sums_exactly(self):
+        now = 6 * 3600.0  # hour boundary, so every bucket below is a full hour
+        # Hours [0,1,2,3,4,5) relative to epoch 0; window is the trailing
+        # 5 hours ending exactly at `now` (hour 6's boundary): hours 1-5.
+        for h in range(6):
+            self._hour(h * 3600.0, 10)
+        result = self.store.effective_tokens_in_hourly_window(5 * 3600, now_fn=lambda: now)
+        # Hours 1,2,3,4,5 (5 full hours) each contributing 10 -> 50.
+        self.assertEqual(result, 50)
+
+    def test_boundary_hour_is_fractionally_weighted(self):
+        # now = 2.5 hours into hour 2 (an hour NOT aligned to a boundary).
+        # Window = trailing 1 hour: [now-3600, now]. The bucket
+        # straddling window_start is hour 1 (01:00-02:00); only its last
+        # half-hour (01:30-02:00) falls inside the window.
+        now = 2 * 3600.0 + 1800.0
+        self._hour(0.0, 100)          # hour 0: entirely before the window
+        self._hour(3600.0, 40)        # hour 1: straddles window_start, half counted
+        self._hour(2 * 3600.0, 20)    # hour 2 (current, partial): fully counted
+        result = self.store.effective_tokens_in_hourly_window(3600, now_fn=lambda: now)
+        # 40 * 0.5 (half the hour is inside the window) + 20 (fully inside).
+        self.assertEqual(result, 40 * 0.5 + 20)
+
+    def test_insufficient_coverage_returns_none_not_a_truncated_number(self):
+        now = 10 * 3600.0
+        # Only one hour of history exists, nowhere near enough to cover a
+        # trailing 5-hour window ending at `now`.
+        self._hour(9 * 3600.0, 100)
+        self.assertIsNone(
+            self.store.effective_tokens_in_hourly_window(5 * 3600, now_fn=lambda: now))
+
+    def test_exact_boundary_coverage_is_accepted(self):
+        now = 5 * 3600.0
+        # Oldest bucket starts exactly at window_start: acceptable, not a
+        # gap.
+        for h in range(5):
+            self._hour(h * 3600.0, 10)
+        result = self.store.effective_tokens_in_hourly_window(5 * 3600, now_fn=lambda: now)
+        self.assertEqual(result, 50)
+
+    def test_zero_total_returns_none(self):
+        now = 5 * 3600.0
+        for h in range(5):
+            self._hour(h * 3600.0, 0)
+        self.assertIsNone(
+            self.store.effective_tokens_in_hourly_window(5 * 3600, now_fn=lambda: now))
+
+    def test_sums_across_devices(self):
+        now = 5 * 3600.0
+        for h in range(5):
+            self._hour(h * 3600.0, 10, device_id="dev-a")
+            self._hour(h * 3600.0, 5, device_id="dev-b")
+        result = self.store.effective_tokens_in_hourly_window(5 * 3600, now_fn=lambda: now)
+        self.assertEqual(result, 75)
+
+    def test_never_raises_on_a_read_failure(self):
+        def _broken_read_conn():
+            raise sqlite3.OperationalError("simulated failure")
+
+        with mock.patch.object(self.store, "_read_conn", _broken_read_conn):
+            try:
+                result = self.store.effective_tokens_in_hourly_window(3600)
+            except Exception as e:  # pragma: no cover - failure path
+                self.fail(f"effective_tokens_in_hourly_window raised {e!r}")
+        self.assertIsNone(result)
 
 
 class AnyDeviceUsagePartialTest(unittest.TestCase):
