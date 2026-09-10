@@ -8,6 +8,7 @@ import { api, fetchSessionEvents } from '../api';
 import type { SessionEvent } from '../api';
 import { formatRelativeTime as formatEventTime } from '../relativeTime';
 import { TranscriptView } from './TranscriptView';
+import { Portal } from './Portal';
 
 // One-line rendering of an event's extra payload, when non-empty.
 function formatExtra(extra: Record<string, unknown> | undefined): string | null {
@@ -571,6 +572,7 @@ export function PreviewModal({ deviceId, name, mode, sessionId, onClose }: Previ
   }, [fullscreen]);
 
   return (
+    <Portal>
     <div style={{
       position: 'fixed', inset: 0, background: 'rgba(0,0,0,.55)',
       display: 'flex', alignItems: fullscreen ? 'flex-start' : 'center', justifyContent: 'center',
@@ -693,6 +695,7 @@ export function PreviewModal({ deviceId, name, mode, sessionId, onClose }: Previ
         </div>
       </div>
     </div>
+    </Portal>
   );
 }
 

@@ -3,6 +3,7 @@ import { useState, useEffect, useRef } from 'react';
 import { RT, FONT_MONO, Z } from '../tokens';
 import { btn } from './btn';
 import { api } from '../api';
+import { Portal } from './Portal';
 
 interface TunnelStatus {
   available: boolean;
@@ -78,7 +79,8 @@ export function ShareTunnel({ onClose }: ShareTunnelProps) {
   };
 
   return (
-    /* Backdrop */
+    <Portal>
+    {/* Backdrop */}
     <div
       onClick={onClose}
       style={{
@@ -99,6 +101,7 @@ export function ShareTunnel({ onClose }: ShareTunnelProps) {
         // case and simply scrolls once content needs more than that.
         padding: '10vh 16px',
         overflowY: 'auto',
+        overscrollBehavior: 'contain',
         WebkitOverflowScrolling: 'touch',
       }}
     >
@@ -249,5 +252,6 @@ export function ShareTunnel({ onClose }: ShareTunnelProps) {
         </div>
       </div>
     </div>
+    </Portal>
   );
 }

@@ -2,6 +2,7 @@
 import { useEffect } from 'react';
 import { RT, FONT_MONO, Z } from '../tokens';
 import { Icons } from './primitives';
+import { Portal } from './Portal';
 import type { MTab } from './MobileNav';
 import type { PanelTab } from './PanelTabs';
 import type { DeviceCard } from '../types';
@@ -109,6 +110,7 @@ export function MobileMoreSheet({
   ];
 
   return (
+    <Portal>
     <>
       {/* Backdrop */}
       {open && (
@@ -180,6 +182,7 @@ export function MobileMoreSheet({
         ))}
       </div>
     </>
+    </Portal>
   );
 }
 

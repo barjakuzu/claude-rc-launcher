@@ -2,6 +2,7 @@
 import { useEffect, useState } from 'react';
 import { RT, FONT_MONO, tintFor, hueForId, kindForOs, Z } from '../tokens';
 import { Icons, Dot } from './primitives';
+import { Portal } from './Portal';
 import type { DeviceCard } from '../types';
 
 export interface DevicePickResult {
@@ -53,6 +54,7 @@ export function DevicePicker({
   const showRewriteToggle = contentHasSourceHome && anyTargetHasDifferentHome;
 
   return (
+    <Portal>
     <div
       style={{
         position: 'fixed', inset: 0, zIndex: Z.picker,
@@ -65,6 +67,7 @@ export function DevicePicker({
         // same pattern and reasoning.
         padding: '10vh 16px',
         overflowY: 'auto',
+        overscrollBehavior: 'contain',
         WebkitOverflowScrolling: 'touch',
       }}
       onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}
@@ -198,6 +201,7 @@ export function DevicePicker({
         </div>
       </div>
     </div>
+    </Portal>
   );
 }
 

@@ -18,7 +18,8 @@ import type { FleetDevice, FleetSession } from '../hooks/useFleet';
 import { api, isFailureEnvelope } from '../api';
 import { formatRelativeTime } from '../relativeTime';
 import { PreviewModal } from './PreviewModal';
-import { fixedMenuPos } from './menuPos';
+import { fixedMenuPos, useCloseMenuOnScroll } from './menuPos';
+import { Portal } from './Portal';
 
 interface AllSessionsProps {
   onOpenDevice: (id: string) => void;
@@ -448,6 +449,11 @@ function MoreMenu({ sessionId, rcUrl, isExternal, pending, onUnstick }: MoreMenu
     return () => document.removeEventListener('mousedown', off);
   }, [open]);
 
+  // See SessionRow.tsx: the menu portals to document.body and its position
+  // is computed once at open time, so a scroll anywhere in the list leaves
+  // it floating next to nothing unless closed.
+  useCloseMenuOnScroll(open, () => setOpen(false));
+
   const handleCopy = async () => {
     if (!sessionId) return;
     try { await navigator.clipboard.writeText(sessionId); } catch { /* ignore */ }
@@ -481,6 +487,7 @@ function MoreMenu({ sessionId, rcUrl, isExternal, pending, onUnstick }: MoreMenu
         <Icons.more size={14} stroke={RT.textDim} />
       </button>
       {open && (
+        <Portal>
         <div style={{
           ...(pos ?? {}),
           background: RT.panel, border: `1px solid ${RT.borderHi}`,
@@ -507,6 +514,7 @@ function MoreMenu({ sessionId, rcUrl, isExternal, pending, onUnstick }: MoreMenu
             />
           )}
         </div>
+        </Portal>
       )}
     </div>
   );

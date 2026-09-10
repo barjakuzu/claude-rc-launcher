@@ -5,7 +5,8 @@ import { Icons } from './primitives';
 import { V5IconButton } from './V5IconButton';
 import { DevicePicker, rewriteHomePaths, type DevicePickResult } from './DevicePicker';
 import { api } from '../api';
-import { fixedMenuPos } from './menuPos';
+import { fixedMenuPos, useCloseMenuOnScroll } from './menuPos';
+import { Portal } from './Portal';
 import { describeSchedule } from '../scheduleDisplay';
 import type { Schedule, DeviceCard } from '../types';
 
@@ -88,6 +89,11 @@ export function ScheduledRow({ s, deviceId, mobile = false, cards, onChanged, on
     if (menuOpen) document.addEventListener('mousedown', off);
     return () => document.removeEventListener('mousedown', off);
   }, [menuOpen]);
+
+  // See SessionRow.tsx: the menu portals to document.body and its position
+  // is computed once at open time, so a scroll anywhere in the list leaves
+  // it floating next to nothing unless closed.
+  useCloseMenuOnScroll(menuOpen, () => setMenuOpen(false));
 
   async function withPending(fn: () => Promise<void>) {
     if (pending) return;
@@ -285,6 +291,7 @@ export function ScheduledRow({ s, deviceId, mobile = false, cards, onChanged, on
           </V5IconButton>
 
           {menuOpen && (
+            <Portal>
             <div style={{
               ...(menuPos ?? {}),
               background: RT.panel, border: `1px solid ${RT.borderHi}`,
@@ -329,6 +336,7 @@ export function ScheduledRow({ s, deviceId, mobile = false, cards, onChanged, on
                 <Icons.stop size={11} stroke={RT.red} /> Delete
               </button>
             </div>
+            </Portal>
           )}
         </div>
       </div>

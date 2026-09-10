@@ -4,6 +4,7 @@ import { RT, FONT_MONO, Z } from '../tokens';
 import { Icons } from './primitives';
 import { btn } from './btn';
 import { api } from '../api';
+import { Portal } from './Portal';
 
 interface BrowseResult {
   path: string;
@@ -79,11 +80,20 @@ export function DirBrowser({ deviceId, initialPath, onSelect, onClose }: DirBrow
   };
 
   return (
-    /* Backdrop */
+    <Portal>
+    {/* Backdrop */}
     <div
       onClick={onClose}
       style={{
-        position: 'absolute',
+        // Round (2026-09-09-usability): this used to be position:'absolute',
+        // which resolved against MiniLauncher/V5Launcher's own small
+        // position:relative row instead of the viewport -- the backdrop
+        // dimmed only that row's box, not the screen, and the panel spilled
+        // out below it uncontained. Now portaled to document.body (see
+        // Portal.tsx) alongside every other overlay, so it needs the same
+        // position:'fixed' the rest of them use to actually cover the
+        // viewport.
+        position: 'fixed',
         inset: 0,
         zIndex: Z.modal,
         background: 'rgba(0,0,0,0.55)',
@@ -135,7 +145,7 @@ export function DirBrowser({ deviceId, initialPath, onSelect, onClose }: DirBrow
         </div>
 
         {/* Dir list */}
-        <div style={{ flex: 1, overflow: 'auto', padding: '6px 0' }}>
+        <div style={{ flex: 1, overflow: 'auto', overscrollBehavior: 'contain', padding: '6px 0' }}>
           {loading && (
             <div style={{ padding: '16px 14px', fontSize: 11, color: RT.textLow, fontFamily: FONT_MONO }}>
               Loading…
@@ -250,5 +260,6 @@ export function DirBrowser({ deviceId, initialPath, onSelect, onClose }: DirBrow
         </div>
       </div>
     </div>
+    </Portal>
   );
 }
