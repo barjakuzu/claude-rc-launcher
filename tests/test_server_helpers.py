@@ -6,6 +6,8 @@ import http.server
 import io
 import json
 import os
+import signal
+import subprocess
 import sys
 import threading
 import time
@@ -22,8 +24,9 @@ import store
 
 
 class _FakeCompleted:
-    def __init__(self, returncode):
+    def __init__(self, returncode, stdout=""):
         self.returncode = returncode
+        self.stdout = stdout
 
 
 class EnrichNextRunTest(unittest.TestCase):
@@ -524,6 +527,130 @@ class StopExternalPidTest(unittest.TestCase):
         fake_kill.assert_called_once()
         import signal
         self.assertEqual(fake_kill.call_args[0], (12345, signal.SIGTERM))
+
+
+class StopExternalPidMacosTest(unittest.TestCase):
+    """macOS has no /proc. _stop_external_pid dispatches to `ps -ww -p
+    <pid> -o comm=` instead (see _stop_external_pid_macos's docstring for
+    what a real Claude Code process on this fleet's MacBook Air actually
+    looks like, verified live rather than assumed). Same convention as
+    DetectAndRestartTest above: mutate server.sys.platform directly."""
+
+    def setUp(self):
+        self._orig_platform = server.sys.platform
+        server.sys.platform = "darwin"
+
+    def tearDown(self):
+        server.sys.platform = self._orig_platform
+
+    def test_stops_a_verified_claude_process(self):
+        def fake_run(cmd, **kw):
+            self.assertEqual(cmd, ["ps", "-ww", "-p", "12345", "-o", "comm="])
+            return _FakeCompleted(0, stdout="/Users/alice/.local/bin/claude\n")
+        with mock.patch("os.kill") as fake_kill:
+            ok, reason = server._stop_external_pid(12345, run=fake_run)
+        self.assertTrue(ok)
+        self.assertEqual(reason, "Stopped")
+        fake_kill.assert_called_once_with(12345, signal.SIGTERM)
+
+    def test_refuses_non_claude_process(self):
+        def fake_run(cmd, **kw):
+            return _FakeCompleted(0, stdout="/usr/bin/node\n")
+        ok, reason = server._stop_external_pid(99999, run=fake_run)
+        self.assertFalse(ok)
+        self.assertEqual(reason, "Not a claude process")
+
+    def test_process_not_found_is_honest_not_misleading(self):
+        # ps's own answer for a pid that genuinely doesn't exist: a
+        # non-zero exit and no output. This is the fix for the reported
+        # bug -- the old /proc-based code answered "Process not found"
+        # here too, but for the WRONG reason (no /proc on macOS at all,
+        # even for a pid that was alive), which sent the report chasing
+        # the wrong cause.
+        def fake_run(cmd, **kw):
+            return _FakeCompleted(1, stdout="")
+        ok, reason = server._stop_external_pid(99999, run=fake_run)
+        self.assertFalse(ok)
+        self.assertEqual(reason, "Process not found")
+
+    def test_cannot_verify_is_distinct_from_process_not_found(self):
+        # ps itself unusable (missing, or hangs past the timeout) is a
+        # different fact than "confirmed gone" -- must not be reported as
+        # "Process not found" (which the UI treats as gone: true and
+        # drops the row) nor silently allowed through.
+        def fake_run(cmd, **kw):
+            raise FileNotFoundError("ps not found")
+        ok, reason = server._stop_external_pid(99999, run=fake_run)
+        self.assertFalse(ok)
+        self.assertEqual(reason, "Could not verify this process")
+        self.assertNotIn(reason, server._STOP_GONE_REASONS)
+
+    def test_cannot_verify_on_timeout(self):
+        def fake_run(cmd, **kw):
+            raise subprocess.TimeoutExpired(cmd=cmd, timeout=5)
+        ok, reason = server._stop_external_pid(99999, run=fake_run)
+        self.assertFalse(ok)
+        self.assertEqual(reason, "Could not verify this process")
+
+    def test_kill_permission_denied(self):
+        def fake_run(cmd, **kw):
+            return _FakeCompleted(0, stdout="/Users/alice/.local/bin/claude\n")
+        with mock.patch("os.kill", side_effect=PermissionError):
+            ok, reason = server._stop_external_pid(12345, run=fake_run)
+        self.assertFalse(ok)
+        self.assertEqual(reason, "Permission denied")
+
+    def test_kill_process_lookup_error(self):
+        # Died between the ps check and the kill call -- genuinely gone.
+        def fake_run(cmd, **kw):
+            return _FakeCompleted(0, stdout="/Users/alice/.local/bin/claude\n")
+        with mock.patch("os.kill", side_effect=ProcessLookupError):
+            ok, reason = server._stop_external_pid(12345, run=fake_run)
+        self.assertFalse(ok)
+        self.assertEqual(reason, "Process not found")
+
+    def test_never_touches_proc_on_macos(self):
+        # The bug this whole class exists to fix: the old code opened
+        # /proc/<pid>/cmdline unconditionally, which doesn't exist on
+        # macOS at all -- confirm the macOS path never even tries.
+        def fake_open(*a, **kw):
+            raise AssertionError("must not touch /proc on macOS")
+        def fake_run(cmd, **kw):
+            return _FakeCompleted(0, stdout="/Users/alice/.local/bin/claude\n")
+        with mock.patch("builtins.open", fake_open), mock.patch("os.kill"):
+            ok, reason = server._stop_external_pid(12345, run=fake_run)
+        self.assertTrue(ok)
+
+
+class StopExternalPidDispatchTest(unittest.TestCase):
+    """_stop_external_pid itself only dispatches on sys.platform -- the
+    two platform-specific implementations are tested in full above."""
+
+    def setUp(self):
+        self._orig_platform = server.sys.platform
+
+    def tearDown(self):
+        server.sys.platform = self._orig_platform
+
+    def test_linux_platform_uses_proc(self):
+        server.sys.platform = "linux"
+        with mock.patch("builtins.open",
+                         mock.mock_open(read_data=b"/usr/local/bin/claude\x00")), \
+             mock.patch("os.kill"):
+            ok, reason = server._stop_external_pid(12345)
+        self.assertTrue(ok)
+
+    def test_darwin_platform_uses_ps(self):
+        server.sys.platform = "darwin"
+        calls = []
+
+        def fake_run(cmd, **kw):
+            calls.append(cmd)
+            return _FakeCompleted(0, stdout="/Users/alice/.local/bin/claude\n")
+        with mock.patch("os.kill"):
+            ok, reason = server._stop_external_pid(12345, run=fake_run)
+        self.assertTrue(ok)
+        self.assertTrue(any(c[0] == "ps" for c in calls))
 
 
 class StoppableSessionNamesTest(unittest.TestCase):

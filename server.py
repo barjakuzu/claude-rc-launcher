@@ -1105,18 +1105,35 @@ def _enable_rc_for_adopted(name, pane_id, run=subprocess.run, sleep=time.sleep, 
 
 def _stop_external_pid(pid, run=subprocess.run):
     """Stop a non-launcher (external) session by signaling its process
-    directly, only after verifying /proc/<pid>/cmdline's first argv token
-    is literally 'claude' — this is the only guard between "stop any
-    session shown in the UI" and "kill an arbitrary pid a browser named",
-    since external rows have no rc-* tmux session to scope the request to.
+    directly, only after verifying it is really a Claude process. This
+    is the only guard between "stop any session shown in the UI" and
+    "kill an arbitrary pid a browser named", since external rows have no
+    rc-* tmux session to scope the request to.
+
+    The identity check is platform-specific because there is no portable
+    stdlib way to read a process's argv0. Dispatches on sys.platform
+    (mutated directly by tests, same convention as _detect_and_restart's
+    own platform-specific probing below) rather than an injected
+    parameter, to stay consistent with how this module already does it.
+
     `run` is accepted for interface symmetry with other server.py helpers
-    that inject subprocess.run for testability, but the actual check reads
-    /proc directly (Linux-only) rather than shelling out.
+    that inject subprocess.run for testability; the Linux path ignores it
+    (it reads /proc directly, no subprocess involved), the macOS path
+    uses it to shell out to `ps`.
 
     Caller must pass a validated pid (positive int, not 1, not our own
-    pid) — this function does not re-derive that, it only verifies the
-    /proc identity check before signaling.
+    pid). This function does not re-derive that, it only verifies
+    identity before signaling.
     """
+    if sys.platform == "darwin":
+        return _stop_external_pid_macos(pid, run)
+    return _stop_external_pid_linux(pid)
+
+
+def _stop_external_pid_linux(pid):
+    """Linux identity check: /proc/<pid>/cmdline's first argv token, exact
+    and unambiguous (NUL-separated argv, no shell/width quirks to worry
+    about)."""
     try:
         with open(f"/proc/{pid}/cmdline", "rb") as f:
             raw = f.read()
@@ -1129,6 +1146,57 @@ def _stop_external_pid(pid, run=subprocess.run):
     parts = raw.split(b"\x00")
     argv0 = parts[0].decode(errors="replace") if parts else ""
     if os.path.basename(argv0) != "claude":
+        return False, "Not a claude process"
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except PermissionError:
+        return False, "Permission denied"
+    except ProcessLookupError:
+        return False, "Process not found"
+    return True, "Stopped"
+
+
+def _stop_external_pid_macos(pid, run):
+    """macOS has no /proc at all. The old code's `open("/proc/...")`
+    raised FileNotFoundError there for every pid, real or not, which was
+    caught by the same branch as a genuine "no such process" and answered
+    "Process not found" regardless: dishonest, since the process was
+    often alive and we simply never looked at the right place.
+
+    Verified live against a real Claude Code process on this fleet's
+    MacBook Air (installed the same way as this box, via the official
+    curl installer, not an npm/Node shebang wrapper): `ps -ww -p <pid>
+    -o comm=` reports the full invoked path
+    (/Users/<user>/.local/bin/claude), the same shape /proc/<pid>/cmdline
+    gives on Linux, so the same basename == "claude" check applies
+    unchanged. `-ww` disables ps's column truncation (confirmed
+    truncating to a fixed width when comm is combined with other -o
+    fields in a pty) so this holds regardless of terminal/pty width; comm
+    alone, un-truncated, was confirmed empty with a non-zero exit for a
+    pid that does not exist. If some other install method ever puts a
+    different executable in front of claude (e.g. a Node.js shebang
+    script reporting comm="node"), this refuses rather than guessing,
+    correct per this guard's whole purpose, even though it would also
+    refuse a legitimate stop on such a setup; that is a "cannot verify,
+    so refuse" outcome, not a security hole.
+    """
+    try:
+        r = run(["ps", "-ww", "-p", str(pid), "-o", "comm="],
+                capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        # `ps` itself is unusable (missing, hung past the timeout, ...).
+        # Genuinely can't tell whether this pid is a Claude process,
+        # which is not the same fact as "it doesn't exist." Refuse rather
+        # than guess either way, and say so honestly instead of reusing
+        # "Process not found" for a fact we don't actually have.
+        return False, "Could not verify this process"
+    comm = (r.stdout or "").strip()
+    if r.returncode != 0 or not comm:
+        # ps's own non-zero exit with no output for a pid that isn't
+        # running (also how it answers a pid outside its valid range):
+        # an actual "gone" fact, not an inability to check.
+        return False, "Process not found"
+    if os.path.basename(comm) != "claude":
         return False, "Not a claude process"
     try:
         os.kill(pid, signal.SIGTERM)
