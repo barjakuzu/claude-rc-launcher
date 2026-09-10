@@ -19,6 +19,7 @@ import { RT, FONT_MONO, Z } from '../tokens';
 import { btn } from './btn';
 import { api } from '../api';
 import { DirBrowser } from './DirBrowser';
+import { Portal } from './Portal';
 import type { Schedule } from '../types';
 
 // ── Cron presets ──────────────────────────────────────────────────────────────
@@ -367,7 +368,8 @@ export function ScheduleModal({ deviceId, initial, onClose, onSaved, devices }: 
   const canPickDevice = !initial && devices && devices.length > 0;
 
   return (
-    /* Backdrop */
+    <Portal>
+    {/* Backdrop */}
     <div
       onClick={onClose}
       style={{
@@ -394,6 +396,7 @@ export function ScheduleModal({ deviceId, initial, onClose, onSaved, devices }: 
           // no longer scrolls to reveal it.
           maxHeight: 'calc(100dvh - 40px)',
           overflow: 'auto',
+          overscrollBehavior: 'contain',
           background: RT.panel,
           border: `1px solid ${RT.borderHi}`,
           borderRadius: 12,
@@ -754,5 +757,6 @@ export function ScheduleModal({ deviceId, initial, onClose, onSaved, devices }: 
         />
       )}
     </div>
+    </Portal>
   );
 }

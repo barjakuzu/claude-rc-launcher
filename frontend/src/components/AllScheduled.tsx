@@ -9,7 +9,8 @@ import { DevicePicker, rewriteHomePaths, type DevicePickResult } from './DeviceP
 import { useAllSchedules } from '../useCrossDevice';
 import { describeSchedule } from '../scheduleDisplay';
 import { api } from '../api';
-import { fixedMenuPos } from './menuPos';
+import { fixedMenuPos, useCloseMenuOnScroll } from './menuPos';
+import { Portal } from './Portal';
 import type { DeviceCard, Schedule } from '../types';
 
 // task-l3: `trigger`/`limits_unavailable` aren't on the shared Schedule
@@ -90,6 +91,10 @@ export function AllScheduled({ cards, hasLoadedCards }: AllScheduledProps) {
   const [pickerEntry, setPickerEntry] = useState<PickerEntry | null>(null);
   const [moreOpenId, setMoreOpenId] = useState<string | null>(null);
   const [morePos, setMorePos] = useState<React.CSSProperties | null>(null);
+  // See SessionRow.tsx: the menu portals to document.body and its position
+  // is computed once at open time, so a scroll anywhere in the list leaves
+  // it floating next to nothing unless closed.
+  useCloseMenuOnScroll(moreOpenId !== null, () => setMoreOpenId(null));
 
   async function handlePick(result: DevicePickResult, entry: PickerEntry) {
     const targetDeviceId = result.deviceId;
@@ -251,6 +256,7 @@ export function AllScheduled({ cards, hasLoadedCards }: AllScheduledProps) {
                     <Icons.more size={13} stroke={RT.textDim} />
                   </button>
                   {moreOpenId === d.id + s.id && (
+                    <Portal>
                     <div style={{
                       ...(morePos ?? {}),
                       background: RT.panel, border: `1px solid ${RT.borderHi}`,
@@ -286,6 +292,7 @@ export function AllScheduled({ cards, hasLoadedCards }: AllScheduledProps) {
                         <Icons.stop size={11} stroke={RT.red} /> Delete
                       </button>
                     </div>
+                    </Portal>
                   )}
                 </div>
               </div>

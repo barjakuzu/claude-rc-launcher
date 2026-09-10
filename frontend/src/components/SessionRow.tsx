@@ -3,7 +3,8 @@ import { useState, useEffect, useRef } from 'react';
 import { RT, FONT_MONO, tintFor, Z } from '../tokens';
 import { Icons, CapBar, Dot, ExternalBadge } from './primitives';
 import { V5IconButton } from './V5IconButton';
-import { fixedMenuPos } from './menuPos';
+import { fixedMenuPos, useCloseMenuOnScroll } from './menuPos';
+import { Portal } from './Portal';
 import type { Session } from '../types';
 import { api, isFailureEnvelope } from '../api';
 
@@ -71,6 +72,13 @@ export function SessionRow({ s, hue, deviceId, mobile = false, onChanged, onPrev
     if (menuOpen) document.addEventListener('mousedown', off);
     return () => document.removeEventListener('mousedown', off);
   }, [menuOpen]);
+
+  // The menu portals to document.body and computes its position once, at
+  // open time, from the trigger's rect -- a scroll anywhere in the list
+  // (this row's own ancestor column, now that DeviceDetail.tsx scrolls as
+  // one unit) moves the trigger without moving the menu, so close it
+  // rather than leave it floating next to nothing.
+  useCloseMenuOnScroll(menuOpen, () => setMenuOpen(false));
 
   // dir: basename of workdir
   const dir = s.workdir
@@ -370,6 +378,7 @@ export function SessionRow({ s, hue, deviceId, mobile = false, onChanged, onPrev
           </V5IconButton>
 
           {menuOpen && (
+            <Portal>
             <div style={{
               ...(menuPos ?? {}),
               background: RT.panel, border: `1px solid ${RT.borderHi}`,
@@ -412,6 +421,7 @@ export function SessionRow({ s, hue, deviceId, mobile = false, onChanged, onPrev
                 </button>
               )}
             </div>
+            </Portal>
           )}
         </div>
         )}

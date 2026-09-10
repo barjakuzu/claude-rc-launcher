@@ -3,6 +3,7 @@ import { useState, useEffect, useRef } from 'react';
 import { RT, FONT_MONO, fmtDate, Z } from '../tokens';
 import { btn } from './btn';
 import { api, isFailureEnvelope } from '../api';
+import { Portal } from './Portal';
 
 interface ResumeSession {
   id: string;
@@ -112,6 +113,7 @@ export function ResumeList({ deviceId, onClose, onResumed }: ResumeListProps) {
   };
 
   return (
+    <Portal>
     <div
       onClick={onClose}
       style={{
@@ -213,7 +215,7 @@ export function ResumeList({ deviceId, onClose, onResumed }: ResumeListProps) {
         )}
 
         {/* Body */}
-        <div style={{ flex: 1, overflow: 'auto', padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: 6 }}>
+        <div style={{ flex: 1, overflow: 'auto', overscrollBehavior: 'contain', padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: 6 }}>
           {loading && (
             <div style={{ padding: 40, textAlign: 'center', color: RT.textLow, fontSize: 12 }}>Loading…</div>
           )}
@@ -298,5 +300,6 @@ export function ResumeList({ deviceId, onClose, onResumed }: ResumeListProps) {
         </div>
       </div>
     </div>
+    </Portal>
   );
 }
