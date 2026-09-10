@@ -1,5 +1,5 @@
 """Hub-side SQLite store: devices, sessions, session_events, audit_log,
-session_usage, cost_daily, alerts.
+session_usage, cost_daily, alerts, notify_log.
 
 One writer thread drains a queue.Queue (SQLite/WAL allows one writer at a
 time; funneling every write through one thread avoids "database is locked"
@@ -228,6 +228,19 @@ CREATE TABLE IF NOT EXISTS alerts (
 CREATE TABLE IF NOT EXISTS account_limits (
     device_id TEXT PRIMARY KEY,
     available INTEGER, fetched_at REAL, payload_json TEXT, updated_at REAL
+);
+-- notify.py's cooldown floor (task nt): the last time this exact
+-- (device_id, session_id, rule) target was notified about, regardless of
+-- whether the alerts row behind it has since been deleted and re-inserted
+-- (a flapping finding) or the hub itself restarted in between -- neither
+-- of those may reset the floor, which is the whole point of persisting it
+-- here instead of in-memory. session_id is "" for a device-targeted
+-- finding, same convention as the alerts table, so the composite primary
+-- key never relies on NULL-never-equals-NULL semantics.
+CREATE TABLE IF NOT EXISTS notify_log (
+    device_id TEXT, session_id TEXT NOT NULL DEFAULT '', rule TEXT,
+    last_notified REAL,
+    PRIMARY KEY (device_id, session_id, rule)
 );
 """
 # account_limits (CONTRACT.md section 4) is a brand-new table, same as
@@ -1120,10 +1133,18 @@ class Store:
         whatever it happened to be the first time it fired.
 
         Returns {"count": <current findings written>, "skipped": <findings
-        dropped for missing device_id/rule>} -- `skipped` added in fix
-        round 2 (review Minor 6) to match every sibling upsert
-        (upsert_sessions, upsert_session_usage, upsert_cost_daily all
-        report it).
+        dropped for missing device_id/rule>, "new": <findings whose key
+        (device_id, session_id, rule) was NOT already present in the table
+        before this call>} -- `skipped` added in fix round 2 (review Minor
+        6) to match every sibling upsert (upsert_sessions,
+        upsert_session_usage, upsert_cost_daily all report it). `new`
+        (task nt) is how the poll loop tells "a finding that just started
+        firing" from "one that has been firing for hours" without a
+        second read of first_seen after this write: computed from the SAME
+        pre-insert snapshot of existing keys this method already needed
+        for the delete-stale-rows pass below, inside the same write
+        transaction, so it can never race a concurrent poll cycle's own
+        replace_alerts call.
 
         `value`/`threshold` are coerced via _coerce_number before binding
         (fix round 4, review residual 1): guard.py's own _finite_or_none
@@ -1137,7 +1158,20 @@ class Store:
         originated from hub-local config rather than device input."""
         def _do(conn):
             now = now_fn()
+            # Snapshot of keys already in the table, taken BEFORE this
+            # batch's inserts -- the "new" list below is exactly the
+            # findings whose key was absent here, so it can never be
+            # confused by an ON CONFLICT UPDATE that runs moments later in
+            # this same function. session_id is normalized the same way
+            # current_keys builds it (None -> ""), matching the convention
+            # every row this method itself writes uses, so a legacy NULL
+            # row (pre-dating that convention) isn't mistaken for "new"
+            # just because "" != NULL in the raw column value.
+            pre_existing_keys = set(
+                (row["device_id"], row["session_id"] or "", row["rule"])
+                for row in conn.execute("SELECT device_id, session_id, rule FROM alerts"))
             current_keys = set()
+            new_findings = []
             skipped = 0
             for f in findings:
                 device_id = f.get("device_id")
@@ -1147,7 +1181,10 @@ class Store:
                     _LOG.warning("replace_alerts: skipping malformed finding: %r", f)
                     continue
                 session_id = f.get("session_id") or ""
-                current_keys.add((device_id, session_id, rule))
+                key = (device_id, session_id, rule)
+                current_keys.add(key)
+                if key not in pre_existing_keys:
+                    new_findings.append(f)
                 value = _coerce_number(f.get("value"))
                 threshold = _coerce_number(f.get("threshold"))
                 conn.execute(
@@ -1183,7 +1220,58 @@ class Store:
                         conn.execute(
                             "DELETE FROM alerts WHERE device_id=? AND session_id=? AND rule=?",
                             key)
-            return {"count": len(current_keys), "skipped": skipped}
+            return {"count": len(current_keys), "skipped": skipped, "new": new_findings}
+        return self._write(_do)
+
+    def claim_notifications(self, keys, cooldown_seconds, now_fn=time.time):
+        """notify.py's cooldown floor (task nt). `keys` is an iterable of
+        (device_id, session_id, rule) tuples (session_id "" for a
+        device-targeted finding, same convention as replace_alerts). For
+        each key, if notify_log has no row for it, or its last_notified is
+        more than `cooldown_seconds` in the past, the key is "claimed":
+        returned to the caller AND stamped with `now` in the same write
+        transaction, so the same rule for the same target cannot be
+        claimed twice inside the window even by two calls racing each
+        other -- there is exactly one writer thread, and this whole method
+        is one item on its queue.
+
+        This is deliberately a separate table from `alerts`, not a reuse
+        of alerts.first_seen: first_seen is wiped the moment a finding
+        stops appearing in a batch (replace_alerts deletes the row), so a
+        flapping alert that clears and re-fires within the cooldown window
+        would look brand new to first_seen and bypass the floor entirely.
+        notify_log rows are never deleted by replace_alerts, so the floor
+        holds across a flap and across a hub restart alike.
+
+        Returns a list (not a set) of the keys claimed, in the same order
+        `keys` was given, for a caller that wants to preserve grouping
+        order in its own output. Never raises on a malformed key -- an
+        entry that isn't a 3-tuple is skipped rather than aborting the
+        whole batch, matching replace_alerts's own "one bad row doesn't
+        cost every other row" discipline."""
+        def _do(conn):
+            now = now_fn()
+            claimed = []
+            for key in keys:
+                try:
+                    device_id, session_id, rule = key
+                except (TypeError, ValueError):
+                    continue
+                session_id = session_id or ""
+                row = conn.execute(
+                    "SELECT last_notified FROM notify_log WHERE device_id=? "
+                    "AND session_id=? AND rule=?", (device_id, session_id, rule)).fetchone()
+                last = row["last_notified"] if row else None
+                if last is not None and (now - last) < cooldown_seconds:
+                    continue
+                conn.execute(
+                    "INSERT INTO notify_log (device_id, session_id, rule, last_notified) "
+                    "VALUES (?,?,?,?) "
+                    "ON CONFLICT(device_id, session_id, rule) DO UPDATE SET "
+                    "last_notified=excluded.last_notified",
+                    (device_id, session_id, rule, now))
+                claimed.append((device_id, session_id, rule))
+            return claimed
         return self._write(_do)
 
     def prune(self, days=14, now_fn=time.time, cost_days=35):

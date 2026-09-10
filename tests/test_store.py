@@ -783,6 +783,7 @@ class UsageCostAlertsTest(unittest.TestCase):
             self.assertIn("session_usage", tables)
             self.assertIn("cost_daily", tables)
             self.assertIn("alerts", tables)
+            self.assertIn("notify_log", tables)
             # Fix round 1: target_type/name are on `alerts` from the start
             # on a fresh database too, applied via the same additive-column
             # path that handles a pre-existing alerts table (both run
@@ -1439,6 +1440,95 @@ class UsageCostAlertsTest(unittest.TestCase):
         # swept, same as any other stale finding.
         self.store.replace_alerts([])
         self.assertEqual(self.store.live_alerts(), [])
+
+    # -- replace_alerts "new" list (task nt) ------------------------------
+
+    def test_replace_alerts_new_list_contains_only_first_fire(self):
+        f1 = {"rule": "token_rate", "severity": "alert", "device_id": "local",
+              "session_id": "s1", "name": "rc-a", "message": "m", "value": 1.0,
+              "threshold": 2.0, "since": 100.0}
+        f2 = {"rule": "session_age", "severity": "warn", "device_id": "local",
+              "session_id": "s2", "name": "rc-b", "message": "m", "value": 1.0,
+              "threshold": 2.0, "since": 100.0}
+
+        # First cycle: both are new.
+        result1 = self.store.replace_alerts([f1], now_fn=lambda: 1000.0)
+        self.assertEqual([f["rule"] for f in result1["new"]], ["token_rate"])
+
+        # Second cycle: f1 keeps firing (not new), f2 fires for the first time.
+        result2 = self.store.replace_alerts([f1, f2], now_fn=lambda: 1030.0)
+        self.assertEqual([f["rule"] for f in result2["new"]], ["session_age"])
+
+        # Third cycle: both keep firing, nothing new.
+        result3 = self.store.replace_alerts([f1, f2], now_fn=lambda: 1060.0)
+        self.assertEqual(result3["new"], [])
+
+    def test_replace_alerts_new_list_reappears_after_the_finding_clears(self):
+        # An alert that stops firing is deleted (replace_alerts's own
+        # sweep); if it fires again later, it is "new" again from
+        # replace_alerts's point of view -- the persistent cooldown floor
+        # against re-notifying too often lives in notify.py/claim_notifications,
+        # not here.
+        f1 = {"rule": "token_rate", "severity": "alert", "device_id": "local",
+              "session_id": "s1", "name": "rc-a", "message": "m", "value": 1.0,
+              "threshold": 2.0, "since": 100.0}
+        r1 = self.store.replace_alerts([f1], now_fn=lambda: 1000.0)
+        self.assertEqual(len(r1["new"]), 1)
+        r2 = self.store.replace_alerts([], now_fn=lambda: 1030.0)  # clears
+        self.assertEqual(r2["new"], [])
+        r3 = self.store.replace_alerts([f1], now_fn=lambda: 1060.0)  # fires again
+        self.assertEqual(len(r3["new"]), 1)
+
+    def test_replace_alerts_new_list_excludes_skipped_findings(self):
+        malformed = {"rule": "token_rate", "severity": "alert", "message": "no device_id"}
+        result = self.store.replace_alerts([malformed])
+        self.assertEqual(result["skipped"], 1)
+        self.assertEqual(result["new"], [])
+
+    # -- claim_notifications (task nt) ------------------------------------
+
+    def test_claim_notifications_first_call_claims_and_second_within_window_does_not(self):
+        key = ("local", "s1", "token_rate")
+        claimed1 = self.store.claim_notifications([key], 3600, now_fn=lambda: 1000.0)
+        self.assertEqual(claimed1, [key])
+        # 10 minutes later, still inside the 1-hour cooldown: not claimed.
+        claimed2 = self.store.claim_notifications([key], 3600, now_fn=lambda: 1600.0)
+        self.assertEqual(claimed2, [])
+
+    def test_claim_notifications_claims_again_after_the_window_elapses(self):
+        key = ("local", "s1", "token_rate")
+        self.store.claim_notifications([key], 3600, now_fn=lambda: 1000.0)
+        claimed = self.store.claim_notifications([key], 3600, now_fn=lambda: 1000.0 + 3601)
+        self.assertEqual(claimed, [key])
+
+    def test_claim_notifications_survives_a_restart_within_the_window(self):
+        # Simulates a hub restart: a fresh Store handle against the same
+        # db_path must still see the prior claim and refuse to re-claim
+        # inside the cooldown window.
+        key = ("local", "s1", "token_rate")
+        self.store.claim_notifications([key], 3600, now_fn=lambda: 1000.0)
+        self.store.close()
+        reopened = store.Store(self.db_path)
+        try:
+            claimed = reopened.claim_notifications([key], 3600, now_fn=lambda: 1600.0)
+            self.assertEqual(claimed, [])
+        finally:
+            reopened.close()
+
+    def test_claim_notifications_device_target_uses_empty_string_session_id(self):
+        device_key = ("dev1", "", "device_offline")
+        claimed = self.store.claim_notifications([device_key], 3600, now_fn=lambda: 1000.0)
+        self.assertEqual(claimed, [device_key])
+        # A None session_id normalizes to the same "" key on the way in.
+        claimed2 = self.store.claim_notifications(
+            [("dev1", None, "device_offline")], 3600, now_fn=lambda: 1050.0)
+        self.assertEqual(claimed2, [])  # still within the window
+
+    def test_claim_notifications_skips_a_malformed_key_without_raising(self):
+        good_key = ("local", "s1", "token_rate")
+        claimed = self.store.claim_notifications(
+            [("only", "two"), good_key], 3600, now_fn=lambda: 1000.0)
+        self.assertEqual(claimed, [good_key])
 
     def test_live_alerts_ordering_alert_before_warn_then_oldest_first_seen(self):
         warn_old = {"rule": "session_age", "severity": "warn", "device_id": "local",

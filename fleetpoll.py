@@ -16,6 +16,7 @@ import devices
 import fleet
 import guard
 import noredirect
+import notify
 import store
 
 # Imported lazily inside _ingest (not at module load) to avoid a hard
@@ -468,9 +469,27 @@ class FleetPoller:
             findings = guard.evaluate(
                 {"devices": devices_in, "sessions": enriched_sessions},
                 now_fn=lambda: now)
-            self.store.replace_alerts(findings, now_fn=lambda: now)
+            result = self.store.replace_alerts(findings, now_fn=lambda: now)
         except Exception:
             _LOG.exception("fleetpoll: guard evaluation failed")
+            return
+
+        # notify.py (task nt): a finding notifies on the cycle it FIRST
+        # appears in the alerts table, never on every cycle it keeps
+        # firing -- store.replace_alerts's own "new" list is exactly that
+        # set, computed from the same pre-insert snapshot the delete pass
+        # already needed, so this can't drift from what actually got
+        # persisted. Its own try/except, separate from the guard
+        # evaluation above: a notify failure is not a guard failure, and
+        # must never be logged or reasoned about as one. notify.py itself
+        # already never raises and enforces its own subprocess timeout
+        # (never blocking this loop), but this call runs after every
+        # device this cycle has already been polled, so even a defensive
+        # failure here changes nothing about device polling.
+        try:
+            notify.notify_new_findings(result.get("new", []), self.store, now_fn=lambda: now)
+        except Exception:
+            _LOG.exception("fleetpoll: notify failed")
 
     def _maybe_prune(self, now):
         if now < self._next_prune_at:

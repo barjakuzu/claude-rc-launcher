@@ -1,5 +1,6 @@
 import http.server
 import os
+import sys
 import tempfile
 import threading
 import time
@@ -1125,6 +1126,180 @@ class GuardInvocationTest(unittest.TestCase):
 
         poller.poll_once(now_fn=lambda: very_late + 10)
         self.assertEqual(self.store.live_alerts(), [])
+
+
+class NotifyIntegrationTest(unittest.TestCase):
+    """task nt: notify.py wired into the real poll loop (_run_guard),
+    exercised through poll_once() end to end -- a real Store, a real
+    guard.evaluate() run, and a throwaway recorder script standing in for
+    RC_NOTIFY_CMD. Never wires up or exercises the user's real
+    notification transport."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = _fake_store(self.tmp.name)
+        self._saved_env = {
+            k: os.environ.pop(k, None) for k in
+            ("RC_NOTIFY_CMD", "RC_NOTIFY_MIN_SEVERITY", "RC_NOTIFY_COOLDOWN_SECONDS")
+        }
+        out_path = os.path.join(self.tmp.name, "out.log")
+        script_path = os.path.join(self.tmp.name, "recorder.py")
+        with open(script_path, "w") as f:
+            f.write(
+                "import sys\n"
+                "data = sys.stdin.buffer.read()\n"
+                f"with open({out_path!r}, 'ab') as out:\n"
+                "    out.write(data + b'\\n---\\n')\n"
+            )
+        self.out_path = out_path
+        os.environ["RC_NOTIFY_CMD"] = f"{sys.executable} {script_path}"
+
+    def tearDown(self):
+        for k, v in self._saved_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        self.store.close()
+        self.tmp.cleanup()
+
+    def _records(self):
+        if not os.path.exists(self.out_path):
+            return []
+        with open(self.out_path, "rb") as f:
+            raw = f.read()
+        import json as _json
+        return [_json.loads(c) for c in raw.split(b"\n---\n") if c.strip()]
+
+    @patch("fleetpoll.fleet.build_fleet")
+    @patch("fleetpoll.devices.load_devices")
+    @patch("fleetpoll.devices.get_local_name")
+    def test_first_fire_notifies_repeat_cycles_do_not(
+            self, get_name, load_devices, build_fleet):
+        get_name.return_value = "hub"
+        load_devices.return_value = []
+        # A session already over the token_total default (50M effective) --
+        # an "alert"-severity finding, at or above the default threshold.
+        build_fleet.return_value = {
+            "device_name": "hub", "role": "full", "version": "1", "claude_version": "1",
+            "sessions": [{
+                "session_id": "s1", "name": "rc-big", "kind": "launcher",
+                "status": "idle", "started_at": 1000.0,
+                "usage": {"input": 0, "cache_read": 0, "cache_write": 0,
+                          "output": 0, "effective": 999_000_000, "last_ts": 1000.0},
+            }],
+            "events": [], "cursor": None, "generated_at": 1000.0, "errors": [],
+        }
+        poller = fleetpoll.FleetPoller(self.store, http_get=MagicMock())
+        poller.poll_once(now_fn=lambda: 1000.0)
+        self.assertEqual(len(self._records()), 1)
+
+        # Fifteen more 30-second cycles of the SAME still-firing finding:
+        # must not produce fifteen more messages.
+        for i in range(1, 16):
+            poller.poll_once(now_fn=lambda i=i: 1000.0 + i * 30)
+        self.assertEqual(len(self._records()), 1)
+
+    @patch("fleetpoll.fleet.build_fleet")
+    @patch("fleetpoll.devices.load_devices")
+    @patch("fleetpoll.devices.get_local_name")
+    def test_grouped_burst_of_many_findings_is_one_message(
+            self, get_name, load_devices, build_fleet):
+        get_name.return_value = "hub"
+        load_devices.return_value = []
+        sessions = [{
+            "session_id": f"s{i}", "name": f"rc-{i}", "kind": "launcher",
+            "status": "idle", "started_at": 1000.0,
+            "usage": {"input": 0, "cache_read": 0, "cache_write": 0,
+                      "output": 0, "effective": 999_000_000, "last_ts": 1000.0},
+        } for i in range(15)]
+        build_fleet.return_value = {
+            "device_name": "hub", "role": "full", "version": "1", "claude_version": "1",
+            "sessions": sessions, "events": [], "cursor": None,
+            "generated_at": 1000.0, "errors": [],
+        }
+        poller = fleetpoll.FleetPoller(self.store, http_get=MagicMock())
+        poller.poll_once(now_fn=lambda: 1000.0)
+
+        records = self._records()
+        self.assertEqual(len(records), 1)  # one message, not fifteen separate ones
+        # Both token_total and token_rate can fire per session at this
+        # usage level, so >= 15 (one grouped message covering all of them),
+        # never fifteen separate notify invocations.
+        self.assertGreaterEqual(records[0]["count"], 15)
+        session_ids = {f["session_id"] for f in records[0]["findings"]}
+        self.assertEqual(len(session_ids), 15)
+
+    @patch("fleetpoll.fleet.build_fleet")
+    @patch("fleetpoll.devices.load_devices")
+    @patch("fleetpoll.devices.get_local_name")
+    def test_warn_severity_finding_does_not_notify_at_default_threshold(
+            self, get_name, load_devices, build_fleet):
+        get_name.return_value = "hub"
+        load_devices.return_value = []
+        # session_age is a "warn"-severity rule; well over the 24h default.
+        build_fleet.return_value = {
+            "device_name": "hub", "role": "full", "version": "1", "claude_version": "1",
+            "sessions": [{"session_id": "s1", "name": "rc-old", "kind": "launcher",
+                          "status": "idle", "started_at": 1.0}],
+            "events": [], "cursor": None, "generated_at": 1000.0, "errors": [],
+        }
+        poller = fleetpoll.FleetPoller(self.store, http_get=MagicMock())
+        very_late = 30 * 3600
+        poller.poll_once(now_fn=lambda: very_late)
+        self.assertIn("session_age", {a["rule"] for a in self.store.live_alerts()})
+        self.assertEqual(self._records(), [])  # warn, below default "alert" threshold
+
+    @patch("fleetpoll.fleet.build_fleet")
+    @patch("fleetpoll.devices.load_devices")
+    @patch("fleetpoll.devices.get_local_name")
+    def test_unset_rc_notify_cmd_is_silent(self, get_name, load_devices, build_fleet):
+        del os.environ["RC_NOTIFY_CMD"]  # simulate notifications never configured
+        get_name.return_value = "hub"
+        load_devices.return_value = []
+        build_fleet.return_value = {
+            "device_name": "hub", "role": "full", "version": "1", "claude_version": "1",
+            "sessions": [{
+                "session_id": "s1", "name": "rc-big", "kind": "launcher",
+                "status": "idle", "started_at": 1000.0,
+                "usage": {"input": 0, "cache_read": 0, "cache_write": 0,
+                          "output": 0, "effective": 999_000_000, "last_ts": 1000.0},
+            }],
+            "events": [], "cursor": None, "generated_at": 1000.0, "errors": [],
+        }
+        poller = fleetpoll.FleetPoller(self.store, http_get=MagicMock())
+        poller.poll_once(now_fn=lambda: 1000.0)  # must not raise
+        self.assertIn("token_total", {a["rule"] for a in self.store.live_alerts()})
+        self.assertFalse(os.path.exists(self.out_path))  # recorder never ran
+
+    @patch("fleetpoll.fleet.build_fleet")
+    @patch("fleetpoll.devices.load_devices")
+    @patch("fleetpoll.devices.get_local_name")
+    def test_hanging_notify_command_does_not_stall_the_poll_loop(
+            self, get_name, load_devices, build_fleet):
+        get_name.return_value = "hub"
+        load_devices.return_value = []
+        hang_script = os.path.join(self.tmp.name, "hang.py")
+        with open(hang_script, "w") as f:
+            f.write("import time\ntime.sleep(30)\n")
+        os.environ["RC_NOTIFY_CMD"] = f"{sys.executable} {hang_script}"
+        os.environ["RC_NOTIFY_TIMEOUT_SECONDS"] = "0.5"
+        build_fleet.return_value = {
+            "device_name": "hub", "role": "full", "version": "1", "claude_version": "1",
+            "sessions": [{
+                "session_id": "s1", "name": "rc-big", "kind": "launcher",
+                "status": "idle", "started_at": 1000.0,
+                "usage": {"input": 0, "cache_read": 0, "cache_write": 0,
+                          "output": 0, "effective": 999_000_000, "last_ts": 1000.0},
+            }],
+            "events": [], "cursor": None, "generated_at": 1000.0, "errors": [],
+        }
+        poller = fleetpoll.FleetPoller(self.store, http_get=MagicMock())
+        start = time.time()
+        poller.poll_once(now_fn=lambda: 1000.0)
+        elapsed = time.time() - start
+        self.assertLess(elapsed, 5.0)  # did not block for the 30s sleep
+        del os.environ["RC_NOTIFY_TIMEOUT_SECONDS"]
 
 
 class LimitsIngestTest(unittest.TestCase):
