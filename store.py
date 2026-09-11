@@ -989,6 +989,43 @@ class Store:
             return {"skipped": False}
         return self._write(_do)
 
+    def clear_account_limits(self, device_id):
+        """Delete `device_id`'s account_limits row, if it has one.
+
+        Task L5 live-bug fix: a device that used to be the fleet's
+        elected limits fetcher (fleet.is_limits_hub()) and has since
+        become a satellite stops sending a "limits" key at all (fleet.py:
+        "limits_result stays None ... key omitted"), but its OLD row
+        from when it WAS fetching never went anywhere on its own --
+        upsert_account_limits only ever overwrites on a fresh report, it
+        is never called at all once a device stops reporting. Left alone,
+        that row sits in the table forever, getting staler every poll,
+        and limits_view() (see LIMITS_DIVERGENCE_THRESHOLD's own comment)
+        had nothing telling it that row was no longer live evidence of
+        anything -- exactly the live bug this fix addresses: a 35-hour-
+        old satellite reading compared against the hub's fresh one,
+        reported as a disagreement that was never real.
+
+        fleetpoll._ingest calls this the moment a device's snapshot omits
+        the "limits" key -- that omission IS is_limits_hub() saying "not
+        my job, right now" (fleet.py), so it is exactly the signal that
+        this device's stored reading, if any, is no longer being kept
+        current by anyone and should not go on being treated as live
+        data. Called unconditionally (whether or not a row exists) so
+        the common case -- a device that has never fetched at all -- is
+        a harmless no-op, not a special case to detect first.
+
+        Never raises past this call: sqlite3 errors surface exactly like
+        every other _write() call in this module.
+
+        A no-op DELETE (no matching row) still marks the write as
+        occurring for the caller's error handling, same as every other
+        method here -- there is no meaningful "skipped" distinction to
+        report, unlike upsert_account_limits's malformed-payload case."""
+        def _do(conn):
+            conn.execute("DELETE FROM account_limits WHERE device_id = ?", (device_id,))
+        return self._write(_do)
+
     # Task-m3 (2026-09-09-usability): the user wants the 5-hour/7-day
     # limits shown in effective tokens, not only Anthropic's percent.
     # Anthropic's usage endpoint never reports a token budget (limits.py's
@@ -1762,8 +1799,35 @@ class Store:
     # field which can never be true must never be left unexplained.
     LIMITS_DIVERGENCE_THRESHOLD = 5
 
-    def limits_view(self):
+    # Task L5 live-bug fix: a row this old is not evidence of anything
+    # any more, even if it is still marked available=True. Normal
+    # operation refreshes the hub's own row roughly every
+    # limits.CACHE_TTL_SECONDS (60s), backing off no further than
+    # limits.RATE_LIMIT_BACKOFF_CEILING_SECONDS (900s, 15 minutes) even
+    # under sustained 429s -- so 1800s (30 minutes) is a generous margin
+    # above the worst case a genuinely still-fetching device can produce,
+    # while being nowhere near the many-hour staleness a satellite that
+    # stopped fetching (and, before clear_account_limits, was never
+    # cleaned up) actually showed in production. Used by limits_view()
+    # below to exclude stale rows from both `primary` selection and the
+    # `divergent` comparison: a row this old has "nothing to disagree
+    # WITH" (same reasoning the docstring already gives for an
+    # unparseable payload), not a second truth to weigh against a fresh
+    # one. This is a read-time backstop, not a substitute for
+    # clear_account_limits actively deleting a satellite's row once its
+    # hub notices it stopped reporting -- it also covers the gap before
+    # that happens (a device that goes fully unreachable, so no poll ever
+    # completes to trigger the delete) and, unlike a delete, needs no
+    # write to take effect against data already sitting in the table.
+    ACCOUNT_LIMITS_STALE_SECONDS = 1800
+
+    def limits_view(self, now_fn=time.time):
         """Hub-wide account_limits aggregation (CONTRACT.md section 4).
+
+        `now_fn` is an injection seam (tests) for the ACCOUNT_LIMITS_
+        STALE_SECONDS freshness check below; real callers leave it unset
+        and get time.time(), same convention as record_usage_sample/
+        effective_tokens_in_window above.
 
         Returns {"rows": [...], "primary": <payload dict or None>,
         "primary_device_id": <str or None>, "divergent": bool}.
@@ -1774,22 +1838,35 @@ class Store:
         somehow failed to parse), "updated_at"}.
 
         `primary`/`primary_device_id`: the freshest (highest fetched_at)
-        AVAILABLE row's payload and the device_id it came from, or
-        (None, None) if no device has ever reported available data --
-        CONTRACT.md section 5: "primary is null when no device has
-        data... Never invent zeros." Returned as two separate values
-        (not primary embedded with device_id already merged in) because
-        that merge is server.py's /api/limits route's job, same division
-        of labor as cost_view() leaving `days`/`totals` to the API layer.
+        AVAILABLE, NOT-STALE row's payload and the device_id it came
+        from, or (None, None) if no device has ever reported available,
+        current data -- CONTRACT.md section 5: "primary is null when no
+        device has data... Never invent zeros." Returned as two separate
+        values (not primary embedded with device_id already merged in)
+        because that merge is server.py's /api/limits route's job, same
+        division of labor as cost_view() leaving `days`/`totals` to the
+        API layer.
 
-        `divergent`: True when at least two AVAILABLE rows' five_hour.percent
-        differ by more than LIMITS_DIVERGENCE_THRESHOLD points. A row with
-        no usable five_hour reading (never fetched, or a payload that
-        failed to parse) is excluded from the comparison -- it has nothing
-        to disagree WITH, not evidence either way."""
+        `divergent`: True when at least two AVAILABLE, NOT-STALE rows'
+        five_hour.percent differ by more than LIMITS_DIVERGENCE_THRESHOLD
+        points. A row with no usable five_hour reading (never fetched, or
+        a payload that failed to parse) is excluded from the comparison
+        -- it has nothing to disagree WITH, not evidence either way.
+
+        "NOT-STALE" (both uses above): fetched_at is a real number and
+        `now - fetched_at` is within ACCOUNT_LIMITS_STALE_SECONDS (see
+        that constant's own comment). A row without a usable fetched_at
+        at all is treated as stale too, for the same "nothing to compare
+        against" reason as an unparseable payload -- an unknown age is
+        never evidence of freshness. This is what keeps a satellite's
+        long-dead row (clear_account_limits normally removes it, but
+        cannot for a device that has gone fully unreachable) from ever
+        again being picked as `primary` or manufacturing a divergence
+        against the hub's own current reading, which is the live bug
+        this filtering was added to fix."""
         conn = self._read_conn()
         try:
-            now = time.time()
+            now = now_fn()
             rows_raw = conn.execute(
                 "SELECT device_id, available, fetched_at, payload_json, updated_at "
                 "FROM account_limits").fetchall()
@@ -1807,18 +1884,26 @@ class Store:
                 row for row in rows
                 if row["available"] and isinstance(row["payload"], dict)
             ]
+
+            def _is_fresh(row):
+                fetched_at = row["fetched_at"]
+                if not isinstance(fetched_at, (int, float)) or isinstance(fetched_at, bool):
+                    return False
+                return (now - fetched_at) <= self.ACCOUNT_LIMITS_STALE_SECONDS
+
+            fresh_available_rows = [row for row in available_rows if _is_fresh(row)]
+
             primary = None
             primary_device_id = None
-            if available_rows:
+            if fresh_available_rows:
                 def _sort_key(row):
-                    fetched_at = row["fetched_at"]
-                    return fetched_at if isinstance(fetched_at, (int, float)) else float("-inf")
-                freshest = max(available_rows, key=_sort_key)
+                    return row["fetched_at"]
+                freshest = max(fresh_available_rows, key=_sort_key)
                 primary = freshest["payload"]
                 primary_device_id = freshest["device_id"]
 
             five_hour_percents = []
-            for row in available_rows:
+            for row in fresh_available_rows:
                 bucket = row["payload"].get("five_hour")
                 if not isinstance(bucket, dict):
                     continue

@@ -2040,7 +2040,7 @@ class AccountLimitsTest(unittest.TestCase):
     def test_primary_is_the_freshest_available_row_across_devices(self):
         self.store.upsert_account_limits("local", self._payload(fetched_at=1000.0))
         self.store.upsert_account_limits("laptop", self._payload(fetched_at=2000.0, five_hour_percent=51.0))
-        view = self.store.limits_view()
+        view = self.store.limits_view(now_fn=lambda: 2000.0)
         self.assertEqual(view["primary_device_id"], "laptop")
         self.assertEqual(view["primary"]["five_hour"]["percent"], 51.0)
 
@@ -2048,31 +2048,31 @@ class AccountLimitsTest(unittest.TestCase):
         self.store.upsert_account_limits("local", self._payload(fetched_at=1000.0))
         self.store.upsert_account_limits(
             "laptop", self._payload(available=False, fetched_at=9999.0))
-        view = self.store.limits_view()
+        view = self.store.limits_view(now_fn=lambda: 1000.0)
         self.assertEqual(view["primary_device_id"], "local")
 
     def test_divergent_false_within_5_points(self):
         self.store.upsert_account_limits("local", self._payload(fetched_at=1000.0, five_hour_percent=50.0))
         self.store.upsert_account_limits("laptop", self._payload(fetched_at=1000.0, five_hour_percent=55.0))
-        view = self.store.limits_view()
+        view = self.store.limits_view(now_fn=lambda: 1000.0)
         self.assertFalse(view["divergent"])
 
     def test_divergent_true_beyond_5_points(self):
         self.store.upsert_account_limits("local", self._payload(fetched_at=1000.0, five_hour_percent=50.0))
         self.store.upsert_account_limits("laptop", self._payload(fetched_at=1000.0, five_hour_percent=55.1))
-        view = self.store.limits_view()
+        view = self.store.limits_view(now_fn=lambda: 1000.0)
         self.assertTrue(view["divergent"])
 
     def test_divergent_ignores_unavailable_rows(self):
         self.store.upsert_account_limits("local", self._payload(fetched_at=1000.0, five_hour_percent=50.0))
         self.store.upsert_account_limits(
             "laptop", self._payload(available=False, fetched_at=1000.0))
-        view = self.store.limits_view()
+        view = self.store.limits_view(now_fn=lambda: 1000.0)
         self.assertFalse(view["divergent"])
 
     def test_divergent_false_with_only_one_available_row(self):
         self.store.upsert_account_limits("local", self._payload(fetched_at=1000.0))
-        view = self.store.limits_view()
+        view = self.store.limits_view(now_fn=lambda: 1000.0)
         self.assertFalse(view["divergent"])
 
     def test_row_missing_five_hour_excluded_from_divergence_but_still_listed(self):
@@ -2080,9 +2080,57 @@ class AccountLimitsTest(unittest.TestCase):
         no_bucket = dict(payload, five_hour=None)
         self.store.upsert_account_limits("local", payload)
         self.store.upsert_account_limits("laptop", no_bucket)
-        view = self.store.limits_view()
+        view = self.store.limits_view(now_fn=lambda: 1000.0)
         self.assertEqual(len(view["rows"]), 2)
         self.assertFalse(view["divergent"])
+
+    def test_stale_row_excluded_from_primary(self):
+        # Task L5 live-bug fix: a device that stopped fetching long ago
+        # (fetched_at far in the past relative to `now`) must not be
+        # picked as primary just because it happens to be the only
+        # available row on record -- an old reading is not current data.
+        self.store.upsert_account_limits("local", self._payload(fetched_at=1000.0))
+        now = 1000.0 + store.Store.ACCOUNT_LIMITS_STALE_SECONDS + 1
+        view = self.store.limits_view(now_fn=lambda: now)
+        self.assertIsNone(view["primary"])
+        self.assertIsNone(view["primary_device_id"])
+
+    def test_stale_row_does_not_cause_divergence_against_a_fresh_one(self):
+        # This is the exact production shape of the live bug: a hub with
+        # a fresh reading, and a satellite's long-stale row still sitting
+        # in account_limits with a wildly different five_hour.percent.
+        # Before this fix that compared as a real disagreement; it must
+        # not any more.
+        now = 100000.0
+        self.store.upsert_account_limits(
+            "local", self._payload(fetched_at=now - 780.0, five_hour_percent=31.0))
+        self.store.upsert_account_limits(
+            "home", self._payload(
+                fetched_at=now - (2094 * 60), five_hour_percent=95.0))
+        view = self.store.limits_view(now_fn=lambda: now)
+        self.assertFalse(view["divergent"])
+        self.assertEqual(view["primary_device_id"], "local")
+        self.assertEqual(view["primary"]["five_hour"]["percent"], 31.0)
+
+    def test_two_genuinely_fresh_fetchers_still_flip_divergent(self):
+        # The whole reason LIMITS_DIVERGENCE_THRESHOLD is kept: an
+        # operator misconfiguration leaving RC_FETCH_LIMITS on for two
+        # devices sharing an account must still be caught when both
+        # readings are current.
+        now = 100000.0
+        self.store.upsert_account_limits(
+            "local", self._payload(fetched_at=now - 30.0, five_hour_percent=31.0))
+        self.store.upsert_account_limits(
+            "laptop", self._payload(fetched_at=now - 30.0, five_hour_percent=60.0))
+        view = self.store.limits_view(now_fn=lambda: now)
+        self.assertTrue(view["divergent"])
+
+    def test_row_with_non_numeric_fetched_at_treated_as_stale(self):
+        payload = self._payload()
+        payload["fetched_at"] = "not-a-number"
+        self.store.upsert_account_limits("local", payload)
+        view = self.store.limits_view(now_fn=lambda: 1000.0)
+        self.assertIsNone(view["primary"])
 
     def test_fetched_at_non_numeric_is_stored_as_none(self):
         payload = self._payload()
@@ -2120,6 +2168,23 @@ class AccountLimitsTest(unittest.TestCase):
         self.assertEqual(result, {"skipped": True})
         view = self.store.limits_view()
         self.assertEqual(view["rows"], [])
+
+    def test_clear_account_limits_removes_the_row(self):
+        self.store.upsert_account_limits("laptop", self._payload(fetched_at=1000.0))
+        self.assertEqual(len(self.store.limits_view()["rows"]), 1)
+        self.store.clear_account_limits("laptop")
+        self.assertEqual(self.store.limits_view()["rows"], [])
+
+    def test_clear_account_limits_on_device_with_no_row_is_a_no_op(self):
+        self.store.clear_account_limits("never-fetched")
+        self.assertEqual(self.store.limits_view()["rows"], [])
+
+    def test_clear_account_limits_only_clears_the_named_device(self):
+        self.store.upsert_account_limits("local", self._payload(fetched_at=1000.0))
+        self.store.upsert_account_limits("laptop", self._payload(fetched_at=1000.0))
+        self.store.clear_account_limits("laptop")
+        view = self.store.limits_view()
+        self.assertEqual([r["device_id"] for r in view["rows"]], ["local"])
 
     def test_size_cap_applies_after_stripping_unknown_keys(self):
         # A payload that's only oversized because of junk keys that get

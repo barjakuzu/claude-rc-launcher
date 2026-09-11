@@ -1418,7 +1418,7 @@ class LimitsIngestTest(unittest.TestCase):
         poller = fleetpoll.FleetPoller(self.store, http_get=MagicMock())
         poller.poll_once()
 
-        view = self.store.limits_view()
+        view = self.store.limits_view(now_fn=lambda: 1000.0)
         self.assertEqual(len(view["rows"]), 1)
         self.assertEqual(view["rows"][0]["device_id"], "local")
         self.assertTrue(view["rows"][0]["available"])
@@ -1462,6 +1462,43 @@ class LimitsIngestTest(unittest.TestCase):
         view = self.store.fleet_view()
         self.assertEqual(len(view["sessions"]), 1)
         self.assertEqual(poller._cursors["local"], "cur-1")
+        self.assertEqual(self.store.limits_view()["rows"], [])
+
+    @patch("fleetpoll.fleet.build_fleet")
+    @patch("fleetpoll.devices.load_devices")
+    @patch("fleetpoll.devices.get_local_name")
+    def test_device_that_stops_fetching_has_its_old_row_cleared(
+            self, get_name, load_devices, build_fleet):
+        # Task L5 live-bug fix: a device that used to be the fleet's
+        # elected limits fetcher and has since become a satellite
+        # (fleet.is_limits_hub() flipped to False for it) stops sending
+        # a "limits" key at all -- same wire shape as a legacy device
+        # that never had one. Unlike that case, this device has a REAL
+        # old row sitting in account_limits from when it WAS fetching,
+        # and that row must be cleared, not left to sit there getting
+        # more stale every poll -- the exact production bug this fix
+        # addresses (a satellite's 35-hour-old reading still being
+        # compared against the hub's fresh one).
+        get_name.return_value = "hub"
+        load_devices.return_value = []
+        build_fleet.return_value = {
+            "device_name": "hub", "role": "full", "version": "1", "claude_version": "1",
+            "sessions": [], "events": [], "cursor": None, "generated_at": 1000.0,
+            "errors": [], "limits": self._limits_payload(),
+        }
+        poller = fleetpoll.FleetPoller(self.store, http_get=MagicMock())
+        poller.poll_once()
+        self.assertEqual(len(self.store.limits_view()["rows"]), 1)
+
+        # Same device, next poll: it has become a satellite and no
+        # longer reports a "limits" key at all.
+        build_fleet.return_value = {
+            "device_name": "hub", "role": "full", "version": "1", "claude_version": "1",
+            "sessions": [], "events": [], "cursor": None, "generated_at": 1060.0,
+            "errors": [],
+        }
+        poller.poll_once()
+
         self.assertEqual(self.store.limits_view()["rows"], [])
 
     @patch("fleetpoll.fleet.build_fleet")

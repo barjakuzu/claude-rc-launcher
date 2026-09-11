@@ -2093,7 +2093,18 @@ class ApiLimitsRouteTest(_ApiRouteFixture):
     query-string tolerance (covered by ApiRouteQueryStringToleranceTest
     above)."""
 
-    def _limits_payload(self, available=True, fetched_at=1000.0, five_hour_percent=56.0):
+    def _limits_payload(self, available=True, fetched_at=None, five_hour_percent=56.0):
+        # fetched_at defaults to "just now" (real clock), not a fixed
+        # epoch: /api/limits routes through store.limits_view() with the
+        # real clock (server.py never injects a now_fn there), and
+        # limits_view() now excludes anything past
+        # store.Store.ACCOUNT_LIMITS_STALE_SECONDS from `primary`/
+        # `divergent` (Task L5 live-bug fix) -- a fixed epoch deep in
+        # unix-time's past would make every row in this class stale by
+        # construction, unrelated to what each test actually means to
+        # exercise.
+        if fetched_at is None:
+            fetched_at = time.time()
         return {
             "available": available, "fetched_at": fetched_at,
             "five_hour": {"percent": five_hour_percent, "resets_at": "r"} if available else None,
@@ -2144,9 +2155,9 @@ class ApiLimitsRouteTest(_ApiRouteFixture):
 
     def test_divergent_flag_surfaces_from_store(self):
         server.HUB_STORE.upsert_account_limits(
-            "local", self._limits_payload(fetched_at=1000.0, five_hour_percent=50.0))
+            "local", self._limits_payload(five_hour_percent=50.0))
         server.HUB_STORE.upsert_account_limits(
-            "laptop", self._limits_payload(fetched_at=1000.0, five_hour_percent=90.0))
+            "laptop", self._limits_payload(five_hour_percent=90.0))
         data, code = self._get_json("/api/limits")
         self.assertEqual(code, 200)
         self.assertTrue(data["divergent"])
@@ -2217,8 +2228,13 @@ class ApiLimitsEstimatedTokensTest(_ApiRouteFixture):
     mechanism's own mechanics are covered by tests/test_store.py."""
 
     def _limits_payload(self, five_hour_percent=56.0, seven_day_percent=80.0):
+        # fetched_at is "just now" (real clock), not a fixed epoch --
+        # same reasoning as ApiLimitsRouteTest._limits_payload above:
+        # limits_view() now excludes stale rows from `primary` entirely
+        # (Task L5 live-bug fix), and every test in this class needs a
+        # live `primary` to attach estimated_tokens to.
         return {
-            "available": True, "fetched_at": 1000.0,
+            "available": True, "fetched_at": time.time(),
             "five_hour": {"percent": five_hour_percent, "resets_at": "r"},
             "seven_day": {"percent": seven_day_percent, "resets_at": "r"},
             "scoped": [], "spend": None, "extra_usage": None, "error": None,

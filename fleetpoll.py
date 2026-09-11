@@ -247,17 +247,53 @@ class FleetPoller:
         # CONTRACT.md sections 3-4: persist this device's account-limits
         # reading whole, as reported. A legacy pre-fleet device's
         # synthesized snapshot (see _poll_remote_legacy) never has a
-        # "limits" key at all, so this is a no-op for it -- exactly right,
-        # there is nothing to store and no reason to write a fabricated
-        # unavailable row over whatever (if anything) a later real /rc/fleet
-        # poll of that same device eventually reports. Its own try/except,
-        # same as usage/cost above: a malformed "limits" shape from THIS
-        # device must never prevent its sessions/events/usage/cost from
-        # being ingested or its cursor from advancing.
+        # "limits" key at all, same as any current device that
+        # fleet.is_limits_hub() has elected NOT to fetch this poll
+        # (fleet.py: "limits_result stays None ... key omitted").
+        #
+        # Task L5 live-bug fix: those two cases used to be handled
+        # identically -- a no-op, on the reasoning that there is nothing
+        # to store and no reason to write a fabricated unavailable row
+        # over whatever a later real poll eventually reports. That is
+        # still correct for a device that has NEVER reported limits (a
+        # legacy device, or one that has simply never been elected
+        # fetcher), but it left a real bug for a device that USED to be
+        # this account's fetcher and became a satellite: its last real
+        # row stayed in account_limits forever, getting more stale every
+        # poll, with nothing here ever telling the store it was no longer
+        # current -- confirmed live: a satellite's 35-hour-old row still
+        # being compared against the hub's fresh one by limits_view()'s
+        # divergence check.
+        #
+        # The fix: an absent "limits" key on a snapshot that otherwise
+        # ingested successfully (we are past the isinstance(snapshot,
+        # dict) checks above the cost/hourly ingest steps this sits
+        # alongside) is not just "nothing to add", it is fleet.py's own
+        # is_limits_hub() telling us, as of THIS poll, "not my job right
+        # now" -- a live, positive statement about the current fleet
+        # role, from the one device that actually knows it. Clearing this
+        # device's row on that signal is what keeps account_limits
+        # honest instead of accumulating rows for devices that stopped
+        # updating them: a device that never had a row (the common case)
+        # gets a harmless no-op DELETE; a device that just became a
+        # satellite gets its now-stale row removed within one poll cycle
+        # of its hub reaching it, exactly matching how quickly
+        # fleet.is_limits_hub() itself flips a device into satellite mode.
+        # store.limits_view()'s own ACCOUNT_LIMITS_STALE_SECONDS filter is
+        # the backstop for the gap this can't close -- a device that goes
+        # fully unreachable, so no poll (and therefore no clear) ever
+        # happens again.
+        #
+        # Its own try/except, same as usage/cost above: a malformed
+        # "limits" shape, or a failed clear, from THIS device must never
+        # prevent its sessions/events/usage/cost from being ingested or
+        # its cursor from advancing.
         try:
             limits_payload = snapshot.get("limits")
             if isinstance(limits_payload, dict):
                 self.store.upsert_account_limits(device_id, limits_payload)
+            else:
+                self.store.clear_account_limits(device_id)
         except Exception:
             _LOG.exception("fleetpoll: limits ingest failed for device %r", device_id)
 
