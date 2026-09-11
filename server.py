@@ -1592,12 +1592,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self._json({
                     "generated_at": now, "primary": None, "devices": [], "divergent": False,
                 })
-            # Task-m3: cheap (self-throttled, in-memory) side effect of
-            # serving this route -- see store.Store.record_usage_sample's
-            # own docstring for why sampling here, rather than from a
-            # poll loop, is enough to keep the token-budget estimate
-            # below fed at a useful resolution.
-            HUB_STORE.record_usage_sample(now_fn=lambda: now)
+            # Task-m3 sampled record_usage_sample() here as a cheap,
+            # self-throttled side effect of serving this route, to feed
+            # the in-memory series effective_tokens_in_window() read for
+            # the seven_day estimate below. Task L5 follow-up: seven_day
+            # now reads effective_tokens_in_daily_window() (cost_daily)
+            # instead, same as five_hour already reads cost_hourly, so
+            # nothing downstream of this route reads that series any
+            # more -- the call is dropped rather than left running to no
+            # purpose. store.Store.record_usage_sample/
+            # effective_tokens_in_window remain in store.py, exercised by
+            # their own tests, in case a future caller needs them again.
             view = HUB_STORE.limits_view()
             device_names = {
                 d["id"]: d.get("name", d["id"])
@@ -1659,10 +1664,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 # the sample series does -- its coverage depends on
                 # retention/reporting, not on the hub having stayed up
                 # for five hours -- so five_hour can now carry a real,
-                # shown estimate. seven_day is untouched: it keeps using
-                # the in-memory series exactly as before (task-tk's brief
-                # is a five-hour figure, not a rebuild of a path that
-                # already works).
+                # shown estimate.
+                #
+                # Task L5 follow-up: seven_day gets the same treatment
+                # now, for the same reason -- cost_daily already holds
+                # ~35 days of transcript-derived per-day totals, far past
+                # the 7-day window this needs, restart-proof and needing
+                # no live uptime, which is exactly the property that made
+                # the in-memory sample series a bad fit here (it can only
+                # answer a 7-day question after 7 days of continuous
+                # process uptime). effective_tokens_in_daily_window()
+                # below is seven_day's counterpart to the hourly function
+                # above, including the same boundary-bucket prorating --
+                # see its own docstring for how a 7-day ROLLING window is
+                # derived from day-granularity buckets. The in-memory
+                # sample series (effective_tokens_in_window) is no longer
+                # read by this route at all.
                 #
                 # The same two guards still apply, now to BOTH windows:
                 # any_device_usage_partial() (a device's usage.py cache
@@ -1687,7 +1704,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                             limits.FIVE_HOUR_WINDOW_SECONDS, now_fn=lambda: now))
                     seven_day_candidate = limits.estimate_window_tokens(
                         _window_percent(seven_day_window),
-                        HUB_STORE.effective_tokens_in_window(
+                        HUB_STORE.effective_tokens_in_daily_window(
                             limits.SEVEN_DAY_WINDOW_SECONDS, now_fn=lambda: now))
                     if limits.estimates_are_coherent(five_hour_candidate, seven_day_candidate):
                         five_hour_estimate = five_hour_candidate

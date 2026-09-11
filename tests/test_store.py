@@ -2529,6 +2529,108 @@ class EffectiveTokensInHourlyWindowTest(unittest.TestCase):
         self.assertIsNone(result)
 
 
+def _day_str(epoch):
+    return time.strftime("%Y-%m-%d", time.gmtime(epoch))
+
+
+class EffectiveTokensInDailyWindowTest(unittest.TestCase):
+    """Task L5 follow-up: effective_tokens_in_daily_window() is the
+    seven_day counterpart to effective_tokens_in_hourly_window() above --
+    same windowing/prorating logic, one level coarser (cost_daily
+    instead of cost_hourly), built to replace the in-memory sample
+    series (effective_tokens_in_window()) as seven_day's source: that
+    series can only ever answer a 7-day question after 7 days of
+    continuous hub uptime, while cost_daily's rows are transcript-
+    derived and already on disk, so coverage depends on retention/
+    reporting, not process uptime."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = store.Store(os.path.join(self.tmp.name, "hub.db"))
+
+    def tearDown(self):
+        self.store.close()
+        self.tmp.cleanup()
+
+    def _day(self, epoch, effective, device_id="local"):
+        self.store.upsert_cost_daily(device_id, [
+            {"day": _day_str(epoch), "project": "", "input": 0, "cache_read": 0,
+             "cache_write": 0, "output": 0, "effective": effective},
+        ])
+
+    def test_no_rows_at_all_returns_none(self):
+        self.assertIsNone(self.store.effective_tokens_in_daily_window(7 * 86400))
+
+    def test_full_day_coverage_sums_exactly(self):
+        DAY = 86400.0
+        now = 8 * DAY  # day boundary, so every bucket below is a full day
+        # Days [0..7] relative to epoch 0; window is the trailing 7 days
+        # ending exactly at `now` (day 8's boundary): days 1-7.
+        for d in range(8):
+            self._day(d * DAY, 10)
+        result = self.store.effective_tokens_in_daily_window(7 * DAY, now_fn=lambda: now)
+        # Days 1-7 (7 full days) each contributing 10 -> 70.
+        self.assertEqual(result, 70)
+
+    def test_boundary_day_is_fractionally_weighted(self):
+        DAY = 86400.0
+        # now = half a day into day 2 (not aligned to a day boundary).
+        now = 2 * DAY + DAY / 2
+        self._day(0.0, 100)      # day 0: entirely before the window
+        self._day(DAY, 40)       # day 1: straddles window_start, half counted
+        self._day(2 * DAY, 20)   # day 2 (current, partial): fully counted
+        result = self.store.effective_tokens_in_daily_window(DAY, now_fn=lambda: now)
+        # 40 * 0.5 (half the day is inside the window) + 20 (fully inside).
+        self.assertEqual(result, 40 * 0.5 + 20)
+
+    def test_insufficient_coverage_returns_none_not_a_truncated_number(self):
+        DAY = 86400.0
+        now = 10 * DAY
+        # Only one day of history exists, nowhere near enough to cover a
+        # trailing 7-day window ending at `now`.
+        self._day(9 * DAY, 100)
+        self.assertIsNone(
+            self.store.effective_tokens_in_daily_window(7 * DAY, now_fn=lambda: now))
+
+    def test_exact_boundary_coverage_is_accepted(self):
+        DAY = 86400.0
+        now = 7 * DAY
+        # Oldest bucket starts exactly at window_start: acceptable, not a
+        # gap.
+        for d in range(7):
+            self._day(d * DAY, 10)
+        result = self.store.effective_tokens_in_daily_window(7 * DAY, now_fn=lambda: now)
+        self.assertEqual(result, 70)
+
+    def test_zero_total_returns_none(self):
+        DAY = 86400.0
+        now = 7 * DAY
+        for d in range(7):
+            self._day(d * DAY, 0)
+        self.assertIsNone(
+            self.store.effective_tokens_in_daily_window(7 * DAY, now_fn=lambda: now))
+
+    def test_sums_across_devices(self):
+        DAY = 86400.0
+        now = 7 * DAY
+        for d in range(7):
+            self._day(d * DAY, 10, device_id="dev-a")
+            self._day(d * DAY, 5, device_id="dev-b")
+        result = self.store.effective_tokens_in_daily_window(7 * DAY, now_fn=lambda: now)
+        self.assertEqual(result, 105)
+
+    def test_never_raises_on_a_read_failure(self):
+        def _broken_read_conn():
+            raise sqlite3.OperationalError("simulated failure")
+
+        with mock.patch.object(self.store, "_read_conn", _broken_read_conn):
+            try:
+                result = self.store.effective_tokens_in_daily_window(7 * 86400)
+            except Exception as e:  # pragma: no cover - failure path
+                self.fail(f"effective_tokens_in_daily_window raised {e!r}")
+        self.assertIsNone(result)
+
+
 class AnyDeviceUsagePartialTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

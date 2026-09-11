@@ -1314,6 +1314,128 @@ class Store:
             return None
         return total
 
+    def effective_tokens_in_daily_window(self, window_seconds, now_fn=time.time):
+        """Task L5 follow-up: real, restart-proof measurement of effective
+        tokens consumed in the trailing `window_seconds`, built from
+        cost_daily (already populated every poll by upsert_cost_daily,
+        fed by usage.rollup()'s transcript-derived per-day totals)
+        instead of the in-memory sample series effective_tokens_in_window()
+        above is built on.
+
+        This is the seven_day counterpart to
+        effective_tokens_in_hourly_window() above, and exists for exactly
+        the same reason that one replaced the sample series for
+        five_hour: the sample series can only ever answer a window
+        question after the hub process has stayed up for the FULL window
+        (7 days here), because it is fed by resampling at request
+        cadence, not by anything already on disk. cost_daily needs no
+        such warm-up -- its rows are derived from transcript timestamps
+        that already exist, with cost_days=35 days of retention
+        (store.prune()) comfortably past the 7-day window this is ever
+        asked for -- so as soon as a fresh install's devices have each
+        reported even a few days of history, the window asked for here
+        is already covered, restarts included.
+
+        SUMs `effective` per day across every device (account-wide, same
+        aggregation the hourly path above and /api/cost's own `totals`
+        already use), then windows it exactly the way
+        effective_tokens_in_hourly_window() windows hours: a day bucket
+        that starts at or after `now - window_seconds` counts in full;
+        the one bucket (if any) whose span straddles the window's start
+        edge counts only for the fraction of that day actually inside
+        the window, assuming a uniform spread of tokens across the day.
+
+        Boundary choice (a 7-day window is a rolling 604800-second period
+        ending now, not the last 7 calendar-day buckets): this prorates
+        the OLDEST day the same way the hourly window prorates its oldest
+        hour, rather than snapping to whole UTC days -- a window that
+        happened to be asked for at 23:59 UTC would otherwise include
+        nearly 8 full calendar days of history, and one asked for at
+        00:01 UTC would include barely 6, which is not a 7-day figure
+        either way. Day buckets are UTC-midnight-aligned (cost_daily.day
+        is written as a UTC calendar date, fleet.py's _today_str), so
+        this is the same uniform-spread approximation the hourly window
+        already makes, just at day granularity -- exact sub-day
+        accounting is not recoverable from day-resolution data, and this
+        is the least-biased approximation available without finer
+        resolution than cost_daily tracks. The same "dense, never
+        sparse" coverage property the hourly window's docstring relies on
+        does NOT strictly hold here (a device that reports zero
+        cost_daily rows for a day it was simply never polled on looks
+        identical to one that reported genuine zero usage, since
+        CONTRACT.md section 1 does not require a zero-usage day to be
+        sent), but that ambiguity only ever UNDER-counts `consumed` --
+        the same safe direction the missing-coverage check below already
+        takes -- never over-counts it, so it does not undermine the
+        "never invent a number that overstates the budget" contract this
+        function shares with its hourly sibling.
+
+        Returns None -- deliberately, never a partial or zero-biased
+        number -- when:
+          - cost_daily has no rows at all.
+          - the oldest day on record does not reach back far enough to
+            cover `window_seconds`: silently treating an uncovered
+            stretch as "zero usage then" would UNDER-count `consumed`
+            and, via estimate_window_tokens, OVER-state the derived
+            budget -- the same "confidently wrong" failure
+            effective_tokens_in_hourly_window's own contract already
+            refuses.
+          - the windowed total is <= 0: nothing to divide a percent into
+            that means anything, matching effective_tokens_in_hourly_window's
+            own contract for a non-positive total.
+
+        Never raises."""
+        now = now_fn()
+        window_start = now - window_seconds
+        try:
+            conn = self._read_conn()
+            try:
+                rows = conn.execute(
+                    "SELECT day, COALESCE(SUM(effective), 0) AS effective "
+                    "FROM cost_daily GROUP BY day ORDER BY day ASC").fetchall()
+            finally:
+                conn.close()
+        except Exception:
+            _LOG.exception("effective_tokens_in_daily_window: failed to read cost_daily")
+            return None
+        if not rows:
+            return None
+        buckets = []
+        for row in rows:
+            try:
+                start = float(calendar.timegm(time.strptime(row["day"], "%Y-%m-%d")))
+            except (ValueError, TypeError):
+                # A row this hub itself never wrote (or a future schema
+                # this version doesn't understand) -- skip it rather than
+                # let one unparsable day string raise out of the whole
+                # window computation.
+                continue
+            buckets.append((start, row["effective"] or 0))
+        if not buckets:
+            return None
+        buckets.sort(key=lambda b: b[0])
+        if buckets[0][0] > window_start:
+            # The retained history does not reach back far enough to
+            # answer for the whole window -- see the docstring's
+            # "never under-count" rule.
+            return None
+        total = 0.0
+        DAY_SECONDS = 86400.0
+        for start, eff in buckets:
+            end = start + DAY_SECONDS
+            if end <= window_start:
+                continue  # entirely before the window
+            if start >= window_start:
+                total += eff
+            else:
+                # Straddles the window's start edge: count only the
+                # fraction of this day inside the window, assuming a
+                # uniform spread of tokens across the day.
+                total += eff * ((end - window_start) / DAY_SECONDS)
+        if total <= 0:
+            return None
+        return total
+
     def replace_alerts(self, findings, now_fn=time.time):
         """Make the alerts table equal `findings` (guard.evaluate()'s
         output) exactly: every finding upserts its row, preserving

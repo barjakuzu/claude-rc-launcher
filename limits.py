@@ -106,9 +106,11 @@ CACHE_TTL_SECONDS = 60
 FETCH_TIMEOUT_SECONDS = 5
 
 # Task-m3: the two window lengths the Anthropic usage endpoint reports a
-# percent for. Used by server.py to ask store.Store.effective_tokens_in_window()
-# for the matching lookback and by estimate_window_tokens() below to turn
-# that measurement into a token budget alongside the percent.
+# percent for. Used by server.py to ask store.Store.effective_tokens_in_hourly_window()
+# (five_hour) / store.Store.effective_tokens_in_daily_window() (seven_day,
+# Task L5 follow-up) for the matching lookback, and by
+# estimate_window_tokens() below to turn that measurement into a token
+# budget alongside the percent.
 FIVE_HOUR_WINDOW_SECONDS = 5 * 3600
 SEVEN_DAY_WINDOW_SECONDS = 7 * 24 * 3600
 
