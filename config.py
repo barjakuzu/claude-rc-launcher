@@ -2,7 +2,7 @@
 
 import os
 
-VERSION = "2.1.21"
+VERSION = "2.1.22"
 
 # Single home directory for all claude-rc data
 RC_HOME = os.environ.get("RC_HOME", os.path.expanduser("~/.claude-rc"))
