@@ -2275,7 +2275,7 @@ class ApiLimitsEstimatedTokensTest(_ApiRouteFixture):
             "scoped": [], "spend": None, "extra_usage": None, "error": None,
         }
 
-    def _seed_daily(self, now, per_day_effective, days=7, device_id="local"):
+    def _seed_daily(self, now, per_day_effective, days=7, device_id="local", partial=False):
         """Seeds `days` full daily buckets (d=0..days-1 before `now`)
         each carrying `per_day_effective`, plus one EXTRA zero-valued
         boundary bucket at d=days. Written straight into cost_daily via
@@ -2302,9 +2302,9 @@ class ApiLimitsEstimatedTokensTest(_ApiRouteFixture):
         ]
         rows.append({"day": _day_str_at(now - days * 86400), "project": "", "input": 0,
                       "cache_read": 0, "cache_write": 0, "output": 0, "effective": 0})
-        server.HUB_STORE.upsert_cost_daily(device_id, rows)
+        server.HUB_STORE.upsert_cost_daily(device_id, rows, partial=partial)
 
-    def _seed_hourly(self, now, per_hour_effective, hours=5, device_id="local"):
+    def _seed_hourly(self, now, per_hour_effective, hours=5, device_id="local", partial=False):
         """Seeds `hours` full hourly buckets (h=0..hours-1 before `now`)
         each carrying `per_hour_effective`, plus one EXTRA zero-valued
         boundary bucket at h=hours. Written straight into cost_hourly via
@@ -2336,7 +2336,7 @@ class ApiLimitsEstimatedTokensTest(_ApiRouteFixture):
         ]
         rows.append({"hour": _hour_str_at(now - hours * 3600), "input": 0, "cache_read": 0,
                       "cache_write": 0, "output": 0, "effective": 0})
-        server.HUB_STORE.upsert_cost_hourly(device_id, rows)
+        server.HUB_STORE.upsert_cost_hourly(device_id, rows, partial=partial)
 
     def test_no_history_omits_both_estimates_but_keeps_percent(self):
         server.HUB_STORE.upsert_account_limits("local", self._limits_payload())
@@ -2422,25 +2422,51 @@ class ApiLimitsEstimatedTokensTest(_ApiRouteFixture):
             self.assertIsNotNone(est)
             self.assertIs(est["approximate"], True)
 
-    def test_usage_partial_device_suppresses_both_estimates(self):
-        # A device whose usage cache is still converging after a restart
-        # under-reads for EVERY window it feeds, hourly and daily
-        # included -- not just the account-wide daily total the original
-        # fix round 1 was about. Even with history that would otherwise
-        # yield clean, coherent estimates on both sides, a partial
-        # device must suppress both.
+    def test_rows_written_while_partial_suppress_both_estimates(self):
+        # Task lg: the real, narrowed risk -- cost_hourly/cost_daily rows
+        # that were themselves written by a partial poll (this device's
+        # usage cache was still converging at the moment THESE rows were
+        # upserted) may still be silently revised upward by a later poll,
+        # so they must not feed an estimate yet, regardless of what the
+        # device's CURRENT usage_partial state happens to be by the time
+        # /api/limits is read.
+        server.HUB_STORE.upsert_account_limits(
+            "local", self._limits_payload(five_hour_percent=50.0, seven_day_percent=50.0))
+        now = time.time()
+        self._seed_hourly(now, 100, partial=True)
+        self._seed_daily(now, 100, partial=True)
+        data, code = self._get_json("/api/limits")
+        self.assertEqual(code, 200)
+        self.assertIsNone(data["primary"]["five_hour"]["estimated_tokens"])
+        self.assertIsNone(data["primary"]["seven_day"]["estimated_tokens"])
+
+    def test_currently_partial_device_with_already_settled_rows_still_estimates(self):
+        # Task lg: the exact live bug this fix addresses -- a hub can be
+        # mid-catch-up RIGHT NOW (devices.usage_partial reads True this
+        # very poll) while the cost_hourly/cost_daily rows feeding both
+        # windows were written by an EARLIER, already-settled poll (the
+        # common case right after a restart: the database still holds
+        # the last-known-good totals from before). The old gate
+        # (any_device_usage_partial(), a live device-wide snapshot) blanked
+        # both estimates in this situation for no reason; the new
+        # per-row `partial` check must not, since neither row was ever
+        # touched by the in-progress catch-up.
+        now = time.time()
+        self._seed_hourly(now, 100, partial=False)
+        self._seed_daily(now, 100, partial=False)
         server.HUB_STORE.upsert_device({"id": "local", "name": "Dev", "role": "full",
                                          "version": "1", "claude_version": "1",
                                          "usage_partial": True})
         server.HUB_STORE.upsert_account_limits(
             "local", self._limits_payload(five_hour_percent=50.0, seven_day_percent=50.0))
-        now = time.time()
-        self._seed_hourly(now, 100)
-        self._seed_daily(now, 100)
         data, code = self._get_json("/api/limits")
         self.assertEqual(code, 200)
-        self.assertIsNone(data["primary"]["five_hour"]["estimated_tokens"])
-        self.assertIsNone(data["primary"]["seven_day"]["estimated_tokens"])
+        five = data["primary"]["five_hour"]["estimated_tokens"]
+        seven = data["primary"]["seven_day"]["estimated_tokens"]
+        self.assertIsNotNone(five)
+        self.assertEqual(five["consumed"], 500)
+        self.assertIsNotNone(seven)
+        self.assertEqual(seven["consumed"], 700)
 
     def test_incoherent_pair_suppresses_both_estimates(self):
         # A five-hour window's activity is a strict subset of a

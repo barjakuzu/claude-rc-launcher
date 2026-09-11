@@ -905,11 +905,13 @@ def estimates_are_coherent(shorter, longer):
     here: a device's usage cache still converging after a restart,
     whose catch-up growth looks identical to real usage in whichever
     window happens to be sampled while it is happening, regardless of
-    that window's own length -- see store.py's any_device_usage_partial
-    and its callers for the fix at the source). This is a second,
-    independent backstop, not a substitute for that fix: it catches an
-    incoherent PAIR even if some future change introduces a different
-    way for one side to go bad on its own.
+    that window's own length -- see store.py's effective_tokens_in_
+    hourly_window/effective_tokens_in_daily_window (and the
+    _window_has_unsettled_rows check both use) for the fix at the
+    source. This is a second, independent backstop, not a substitute
+    for that fix: it catches an incoherent PAIR even if some future
+    change introduces a different way for one side to go bad on its
+    own.
 
     Never raises."""
     if shorter is None or longer is None:

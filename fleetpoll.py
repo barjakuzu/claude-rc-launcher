@@ -212,7 +212,12 @@ class FleetPoller:
                     for r in (daily if isinstance(daily, list) else []) if isinstance(r, dict)
                 ]
             if cost_rows:
-                self.store.upsert_cost_daily(device_id, cost_rows)
+                # Task lg: stamps this poll's usage_partial onto every row
+                # touched this call -- store.Store.upsert_cost_daily's own
+                # docstring covers why that's a per-row fact, not a
+                # device-wide one, and effective_tokens_in_daily_window
+                # reads it back.
+                self.store.upsert_cost_daily(device_id, cost_rows, partial=usage_partial)
         except Exception:
             _LOG.exception("fleetpoll: cost ingest failed for device %r", device_id)
 
@@ -240,7 +245,9 @@ class FleetPoller:
                     for r in hourly if isinstance(r, dict)
                 ]
                 if hourly_rows:
-                    self.store.upsert_cost_hourly(device_id, hourly_rows)
+                    # Task lg: same per-row partial stamp as upsert_cost_daily
+                    # above -- see store.Store.upsert_cost_hourly's docstring.
+                    self.store.upsert_cost_hourly(device_id, hourly_rows, partial=usage_partial)
         except Exception:
             _LOG.exception("fleetpoll: hourly cost ingest failed for device %r", device_id)
 

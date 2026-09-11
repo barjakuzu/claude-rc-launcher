@@ -1681,34 +1681,45 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 # sample series (effective_tokens_in_window) is no longer
                 # read by this route at all.
                 #
-                # The same two guards still apply, now to BOTH windows:
-                # any_device_usage_partial() (a device's usage.py cache
-                # still converging after a restart under-reads for
-                # EVERY window it feeds, hourly included) and
-                # estimates_are_coherent() cross-checking the two
-                # estimates against each other -- an incoherent pair is
-                # proof the underlying measurement is contaminated right
-                # now even if any_device_usage_partial() didn't happen to
-                # catch it (see that function's own docstring). Suppress
-                # BOTH on that failure, not just seven_day: an incoherent
-                # five_hour reading is exactly the "not trustworthy"
-                # outcome that must stay null rather than ship anyway.
+                # Task lg: the per-window guard now lives in store.py
+                # itself -- effective_tokens_in_hourly_window/effective_
+                # tokens_in_daily_window each return None whenever any
+                # STORED row feeding that specific window was itself
+                # written by a poll that was partial for its device
+                # (store.Store._window_has_unsettled_rows, reading
+                # cost_hourly/cost_daily's own per-row `partial` column --
+                # see upsert_cost_hourly/upsert_cost_daily). That replaces
+                # the old blanket any_device_usage_partial() pre-check here,
+                # which gated on whether the CURRENT poll happened to be
+                # partial anywhere in the fleet, regardless of whether the
+                # rows this route actually reads were affected -- a hub
+                # can be mid-catch-up right now while every row inside
+                # both windows was written by an earlier, already-settled
+                # poll, and the old gate blanked that correct answer for
+                # no reason. estimates_are_coherent() cross-checking the
+                # two estimates against each other stays as a second,
+                # independent backstop -- an incoherent pair is proof the
+                # underlying measurement is contaminated right now even if
+                # the per-row check didn't happen to catch it (see that
+                # function's own docstring). Suppress BOTH on that
+                # failure, not just seven_day: an incoherent five_hour
+                # reading is exactly the "not trustworthy" outcome that
+                # must stay null rather than ship anyway.
                 five_hour_window = primary.get("five_hour")
                 seven_day_window = primary.get("seven_day")
                 five_hour_estimate = None
                 seven_day_estimate = None
-                if not HUB_STORE.any_device_usage_partial():
-                    five_hour_candidate = limits.estimate_window_tokens(
-                        _window_percent(five_hour_window),
-                        HUB_STORE.effective_tokens_in_hourly_window(
-                            limits.FIVE_HOUR_WINDOW_SECONDS, now_fn=lambda: now))
-                    seven_day_candidate = limits.estimate_window_tokens(
-                        _window_percent(seven_day_window),
-                        HUB_STORE.effective_tokens_in_daily_window(
-                            limits.SEVEN_DAY_WINDOW_SECONDS, now_fn=lambda: now))
-                    if limits.estimates_are_coherent(five_hour_candidate, seven_day_candidate):
-                        five_hour_estimate = five_hour_candidate
-                        seven_day_estimate = seven_day_candidate
+                five_hour_candidate = limits.estimate_window_tokens(
+                    _window_percent(five_hour_window),
+                    HUB_STORE.effective_tokens_in_hourly_window(
+                        limits.FIVE_HOUR_WINDOW_SECONDS, now_fn=lambda: now))
+                seven_day_candidate = limits.estimate_window_tokens(
+                    _window_percent(seven_day_window),
+                    HUB_STORE.effective_tokens_in_daily_window(
+                        limits.SEVEN_DAY_WINDOW_SECONDS, now_fn=lambda: now))
+                if limits.estimates_are_coherent(five_hour_candidate, seven_day_candidate):
+                    five_hour_estimate = five_hour_candidate
+                    seven_day_estimate = seven_day_candidate
                 if isinstance(five_hour_window, dict):
                     primary["five_hour"] = {**five_hour_window, "estimated_tokens": five_hour_estimate}
                 if isinstance(seven_day_window, dict):

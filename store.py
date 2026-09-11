@@ -216,6 +216,7 @@ CREATE TABLE IF NOT EXISTS cost_daily (
     device_id TEXT, day TEXT, project TEXT,
     input INTEGER, cache_read INTEGER, cache_write INTEGER,
     output INTEGER, effective INTEGER, updated_at REAL,
+    partial INTEGER,
     PRIMARY KEY (device_id, day, project)
 );
 CREATE INDEX IF NOT EXISTS idx_cost_daily_day ON cost_daily(day);
@@ -231,6 +232,7 @@ CREATE TABLE IF NOT EXISTS cost_hourly (
     device_id TEXT, hour TEXT,
     input INTEGER, cache_read INTEGER, cache_write INTEGER,
     output INTEGER, effective INTEGER, updated_at REAL,
+    partial INTEGER,
     PRIMARY KEY (device_id, hour)
 );
 CREATE INDEX IF NOT EXISTS idx_cost_hourly_hour ON cost_hourly(hour);
@@ -370,6 +372,33 @@ def _migrate_device_columns(conn):
             conn.execute(f"ALTER TABLE devices ADD COLUMN {col} {coltype}")
 
 
+# Task lg: cost_hourly/cost_daily gain `partial` (1 when the poll that
+# wrote/refreshed THIS row reported usage_partial=True for its device, 0
+# or NULL otherwise) -- see upsert_cost_hourly/upsert_cost_daily's own
+# docstrings for why this is per-ROW, not a device-wide flag: a row this
+# poll did not touch (a day/hour a still-warming device simply hasn't
+# re-read the source transcript for yet, cost_daily's sparse reporting in
+# particular -- CONTRACT.md's "usage_daily is sparse, not zero-filled"
+# ruling) keeps whatever `partial` value its LAST write left it with,
+# which is exactly right: that row's value hasn't changed, so whether it
+# can be trusted hasn't changed either, regardless of what the device is
+# doing on THIS poll. Additive (ALTER TABLE ADD COLUMN, only when absent):
+# both tables already exist in any hub.db that ran a store.py from before
+# this column, and CREATE TABLE IF NOT EXISTS in _SCHEMA is a no-op
+# against them, same pattern as every other _migrate_*_columns here.
+_NEW_COST_COLUMNS = (
+    ("partial", "INTEGER"),
+)
+
+
+def _migrate_cost_columns(conn):
+    for table in ("cost_hourly", "cost_daily"):
+        existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+        for col, coltype in _NEW_COST_COLUMNS:
+            if col not in existing:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {coltype}")
+
+
 def _json_or_none(value):
     return None if value is None else json.dumps(value)
 
@@ -430,6 +459,7 @@ class Store:
             _migrate_session_columns(init_conn)
             _migrate_alert_columns(init_conn)
             _migrate_device_columns(init_conn)
+            _migrate_cost_columns(init_conn)
             init_conn.commit()
             # De-duplicate any pre-existing rows (from a DB created before
             # this unique index existed) before creating the index, then
@@ -790,7 +820,7 @@ class Store:
             return {"skipped": skipped}
         return self._write(_do)
 
-    def upsert_cost_daily(self, device_id, rows, now_fn=time.time):
+    def upsert_cost_daily(self, device_id, rows, now_fn=time.time, partial=False):
         """Replace (never accumulate) this device's per-project daily cost
         totals. Each row in `rows` is a dict with day, project, input,
         cache_read, cache_write, output, effective. The device reports
@@ -816,9 +846,24 @@ class Store:
         coerce via _coerce_number skips the whole row, logged in full,
         same as upsert_session_usage above -- see that method's docstring,
         _coerce_sparse_fields and _coerce_number itself for exactly what
-        counts as coercible."""
+        counts as coercible.
+
+        `partial` (Task lg, default False -- most callers, e.g. tests
+        exercising the coercion contract above, don't care) is this
+        POLL's usage_meta.partial (fleetpoll._ingest passes the device's
+        own current reading, not a per-row fact from `rows` itself): it
+        is written onto every row THIS CALL touches, replacing whatever
+        `partial` that row carried before. A row this call does NOT touch
+        -- CONTRACT.md's "usage_daily is sparse" ruling means a day a
+        still-warming device hasn't gotten around to re-reading yet is
+        simply absent from `rows`, not present-but-zero -- keeps
+        whatever `partial` its last write left it with, which is exactly
+        the point: that row's value hasn't changed, so neither has
+        whether it can be trusted. See effective_tokens_in_daily_window's
+        own docstring for how this is read back."""
         def _do(conn):
             now = now_fn()
+            partial_val = 1 if partial else 0
             skipped = 0
             for r in rows:
                 day = r.get("day")
@@ -838,17 +883,20 @@ class Store:
                 project = r.get("project") or ""
                 conn.execute(
                     "INSERT INTO cost_daily (device_id, day, project, input, cache_read, "
-                    "cache_write, output, effective, updated_at) VALUES (?,?,?,?,?,?,?,?,?) "
+                    "cache_write, output, effective, updated_at, partial) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?) "
                     "ON CONFLICT(device_id, day, project) DO UPDATE SET "
                     "input=excluded.input, cache_read=excluded.cache_read, "
                     "cache_write=excluded.cache_write, output=excluded.output, "
-                    "effective=excluded.effective, updated_at=excluded.updated_at",
+                    "effective=excluded.effective, updated_at=excluded.updated_at, "
+                    "partial=excluded.partial",
                     (device_id, day, project, coerced["input"], coerced["cache_read"],
-                     coerced["cache_write"], coerced["output"], coerced["effective"], now))
+                     coerced["cache_write"], coerced["output"], coerced["effective"], now,
+                     partial_val))
             return {"skipped": skipped}
         return self._write(_do)
 
-    def upsert_cost_hourly(self, device_id, rows, now_fn=time.time):
+    def upsert_cost_hourly(self, device_id, rows, now_fn=time.time, partial=False):
         """Task-tk: replace (never accumulate) this device's hourly
         effective-token rollup -- the sub-day-resolution counterpart to
         upsert_cost_daily above, fed by usage.rollup()['hourly'] via
@@ -874,9 +922,23 @@ class Store:
         is skipped and logged (the natural key, same reasoning as `day`
         there); `_coerce_sparse_fields` against `_COST_NUMERIC_FIELDS`
         drops the whole row on a present-but-uncoercible numeric field,
-        leaves an absent/None one as SQL NULL."""
+        leaves an absent/None one as SQL NULL.
+
+        `partial` (Task lg, default False): same per-row write-time flag
+        as upsert_cost_daily's own `partial` argument -- see that
+        docstring for what it means and why it is stamped onto every row
+        THIS CALL touches rather than tracked device-wide. Because
+        `hourly` is DENSE (unlike `daily`'s sparse reporting), a poll
+        that is itself partial normally touches every retained hour on
+        the wire, so in practice this flag moves together across the
+        whole hourly window for one device far more often than
+        upsert_cost_daily's does -- but the mechanism is the same, and
+        the per-row storage still matters: it is what lets a row survive
+        past HOURLY_RETENTION_HOURS worth of clean polls without a stale
+        device-wide flag re-tainting it."""
         def _do(conn):
             now = now_fn()
+            partial_val = 1 if partial else 0
             skipped = 0
             for r in rows:
                 hour = r.get("hour")
@@ -895,13 +957,16 @@ class Store:
                     continue
                 conn.execute(
                     "INSERT INTO cost_hourly (device_id, hour, input, cache_read, "
-                    "cache_write, output, effective, updated_at) VALUES (?,?,?,?,?,?,?,?) "
+                    "cache_write, output, effective, updated_at, partial) "
+                    "VALUES (?,?,?,?,?,?,?,?,?) "
                     "ON CONFLICT(device_id, hour) DO UPDATE SET "
                     "input=excluded.input, cache_read=excluded.cache_read, "
                     "cache_write=excluded.cache_write, output=excluded.output, "
-                    "effective=excluded.effective, updated_at=excluded.updated_at",
+                    "effective=excluded.effective, updated_at=excluded.updated_at, "
+                    "partial=excluded.partial",
                     (device_id, hour, coerced["input"], coerced["cache_read"],
-                     coerced["cache_write"], coerced["output"], coerced["effective"], now))
+                     coerced["cache_write"], coerced["output"], coerced["effective"], now,
+                     partial_val))
             return {"skipped": skipped}
         return self._write(_do)
 
@@ -1066,14 +1131,30 @@ class Store:
     # SAME `consumed` figure, which is impossible (a 5-hour window's
     # activity is a strict subset of a 7-day window's), and (2) the
     # resulting `budget` was accordingly incoherent between the two
-    # (5-hour showing a LARGER implied budget than 7-day). Both
-    # record_usage_sample (below) and the read side in effective_tokens_
-    # in_window's caller (server.py) now check any_device_usage_partial()
-    # -- CONTRACT.md's existing "this device's usage cache is still
-    # converging after a restart" signal, already tracked on `devices`
-    # for exactly this situation -- and refuse to trust the total while
+    # (5-hour showing a LARGER implied budget than 7-day). record_usage_
+    # sample (below) checks any_device_usage_partial() to skip sampling
+    # while ANY device is mid-catch-up, refusing to trust the total while
     # it is true, rather than letting a catch-up burst masquerade as
-    # real-time consumption.
+    # real-time consumption -- this is the in-memory sample series' own
+    # gate and does not need to be more precise than "any device", since
+    # it is deciding whether to trust one account-wide total right now,
+    # not which stored rows are safe to read later.
+    #
+    # Task lg: effective_tokens_in_hourly_window/effective_tokens_in_daily_
+    # window below (the LIVE read path server.py's /api/limits route
+    # actually uses) do NOT use any_device_usage_partial() -- that flag is
+    # a snapshot of the CURRENT poll only, disconnected from which STORED
+    # cost_hourly/cost_daily rows it actually touched. A hub can be mid-
+    # catch-up (usage_partial=True right now) while every row feeding a
+    # given window was written by an earlier, already-settled poll -- the
+    # common case right after a restart, where the database still holds
+    # the last-known-good totals from before. Gating the read on the live
+    # flag blanks a correct answer for as long as the catch-up takes.
+    # Those two functions instead check each relevant row's own `partial`
+    # column (see upsert_cost_hourly/upsert_cost_daily's own docstrings,
+    # and _window_has_unsettled_rows) -- whether the STORED data itself
+    # is complete for the window being asked about, not whether some
+    # unrelated rollup pass happens to still be running.
     USAGE_SAMPLE_MIN_INTERVAL_SECONDS = 20
     USAGE_SAMPLE_RETENTION_SECONDS = 8 * 24 * 3600  # a bit over the longest window (7 days)
 
@@ -1084,10 +1165,13 @@ class Store:
         figures under-read and are still catching up). Task-m3 fix round
         1: record_usage_sample uses this to skip sampling while it is
         true (a catch-up burst must never be mistaken for a sample of
-        real-time consumption), and server.py's /api/limits route uses
-        it a second time at read time, since the account can still be
-        mid-catch-up even between two samples that were each individually
-        clean. Never raises; a failed read is treated as "assume
+        real-time consumption). Task lg: server.py's /api/limits route no
+        longer uses this for its window estimates -- see the comment
+        above USAGE_SAMPLE_MIN_INTERVAL_SECONDS for why a live, device-
+        wide flag is the wrong gate for a question about already-stored
+        rows; effective_tokens_in_hourly_window/effective_tokens_in_
+        daily_window read cost_hourly/cost_daily's own per-row `partial`
+        column instead. Never raises; a failed read is treated as "assume
         partial" (the safer direction: refusing a good estimate is a
         smaller failure than showing a contaminated one)."""
         try:
@@ -1203,6 +1287,63 @@ class Store:
             return None
         return delta
 
+    def _window_has_unsettled_rows(self, conn, table, time_column, time_parser,
+                                    bucket_seconds, window_start):
+        """Task lg: True if any row in `table` (cost_hourly or cost_daily)
+        that overlaps the window starting at `window_start` carries
+        partial=1 -- i.e. the poll that last wrote/refreshed THAT ROW
+        reported usage_partial=True for its device (see upsert_cost_daily/
+        upsert_cost_hourly's own docstrings for exactly when `partial` is
+        stamped and why it is a per-row fact, not a device-wide one).
+
+        This is the narrowed replacement for gating the whole estimate on
+        any_device_usage_partial(): it only distrusts rows that actually
+        feed THIS window, and only the specific rows a partial poll
+        actually touched -- not every row belonging to a device that
+        happens to be partial right now. A row from BEFORE the device's
+        current catch-up episode even started (untouched by it, e.g. a
+        day cost_daily's sparse reporting hasn't gotten back around to
+        yet) keeps whatever `partial` its last, unrelated write left it
+        with, so an old, already-settled reading is never re-tainted just
+        because the same device is warming up again later.
+
+        `time_column` is "hour" or "day"; `time_parser` turns that
+        column's string value into a bucket start (epoch seconds), same
+        format each of the two callers already parses with elsewhere.
+        A row with `partial` NULL (written before this column existed --
+        the additive migration leaves pre-existing rows NULL, see
+        _migrate_cost_columns) is treated as 0/settled, not unknown: it
+        was written under the OLD code, which only ever wrote a row's
+        cumulative total once its rollup had already produced one, at
+        whatever poll cadence was in effect then -- there is no evidence
+        it was ever part of an in-progress catch-up, and the "never
+        invent a risk out of a gap" rule this function's docstring
+        already applies to a missing device row applies here too.
+        Missing/unparsable bucket strings are skipped, not treated as
+        unsettled, same reasoning.
+
+        Never raises; a failed read is treated as unsettled (the same
+        "refuse a good estimate rather than risk a contaminated one"
+        direction every other guard in this area takes)."""
+        try:
+            rows = conn.execute(
+                f"SELECT {time_column} AS bucket, updated_at, partial FROM {table}"
+            ).fetchall()
+        except Exception:
+            _LOG.exception("_window_has_unsettled_rows: failed to read %s", table)
+            return True
+        for row in rows:
+            if not row["partial"]:
+                continue  # 0, or NULL from a pre-migration row -- settled
+            try:
+                start = time_parser(row["bucket"])
+            except (ValueError, TypeError):
+                continue
+            if start + bucket_seconds <= window_start:
+                continue  # bucket entirely before the window, irrelevant
+            return True
+        return False
+
     def effective_tokens_in_hourly_window(self, window_seconds, now_fn=time.time):
         """Task-tk: real sub-day-resolution measurement of effective
         tokens consumed in the trailing `window_seconds`, built from
@@ -1215,11 +1356,11 @@ class Store:
         uptime to "warm up". cost_hourly's rows are derived from
         transcript timestamps that already exist on disk, so as soon as
         every device has sent even one poll under this feature, the
-        window asked for here is already covered (as long as no device's
-        read was usage_partial -- see the module-level note below; this
-        function has no way to see that flag itself, callers must check
-        any_device_usage_partial() the same way effective_tokens_in_window's
-        own callers already do). That is exactly what makes a real
+        window asked for here is already covered (as long as none of the
+        rows actually inside the window still carry `partial=1` -- see
+        _window_has_unsettled_rows, checked below against each row's own
+        stored flag, not against any device's CURRENT usage_partial
+        state). That is exactly what makes a real
         five-hour figure possible at all: the OLD in-memory series could
         only ever answer a five-hour question after five hours of the
         hub process staying up, which is why the five-hour estimate
@@ -1262,6 +1403,14 @@ class Store:
           - the windowed total is <= 0: nothing to divide a percent into
             that means anything, matching effective_tokens_in_window's
             own contract for a non-positive delta.
+          - (Task lg) any row that overlaps the window was written while
+            its device was mid-catch-up and has not yet been rewritten by
+            a poll after that device settled -- see
+            _window_has_unsettled_rows. That row's own value may still be
+            silently revised upward by a future poll, the same
+            "confidently wrong" failure the two checks above already
+            refuse, just caught at the per-row level instead of the
+            whole-table level.
 
         Never raises."""
         now = now_fn()
@@ -1272,6 +1421,11 @@ class Store:
                 rows = conn.execute(
                     "SELECT hour, COALESCE(SUM(effective), 0) AS effective "
                     "FROM cost_hourly GROUP BY hour ORDER BY hour ASC").fetchall()
+                if self._window_has_unsettled_rows(
+                        conn, "cost_hourly", "hour",
+                        lambda s: float(calendar.timegm(time.strptime(s, "%Y-%m-%dT%H"))),
+                        3600.0, window_start):
+                    return None
             finally:
                 conn.close()
         except Exception:
@@ -1334,7 +1488,9 @@ class Store:
         (store.prune()) comfortably past the 7-day window this is ever
         asked for -- so as soon as a fresh install's devices have each
         reported even a few days of history, the window asked for here
-        is already covered, restarts included.
+        is already covered, restarts included, PROVIDED none of the rows
+        actually inside the window were written mid-catch-up and never
+        rewritten since -- see _window_has_unsettled_rows, checked below.
 
         SUMs `effective` per day across every device (account-wide, same
         aggregation the hourly path above and /api/cost's own `totals`
@@ -1383,6 +1539,11 @@ class Store:
           - the windowed total is <= 0: nothing to divide a percent into
             that means anything, matching effective_tokens_in_hourly_window's
             own contract for a non-positive total.
+          - (Task lg) any row that overlaps the window was written while
+            its device was mid-catch-up and has not yet been rewritten by
+            a poll after that device settled -- see
+            _window_has_unsettled_rows, same reasoning as its hourly
+            sibling above.
 
         Never raises."""
         now = now_fn()
@@ -1393,6 +1554,11 @@ class Store:
                 rows = conn.execute(
                     "SELECT day, COALESCE(SUM(effective), 0) AS effective "
                     "FROM cost_daily GROUP BY day ORDER BY day ASC").fetchall()
+                if self._window_has_unsettled_rows(
+                        conn, "cost_daily", "day",
+                        lambda s: float(calendar.timegm(time.strptime(s, "%Y-%m-%d"))),
+                        86400.0, window_start):
+                    return None
             finally:
                 conn.close()
         except Exception:
