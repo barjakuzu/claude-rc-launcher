@@ -397,6 +397,14 @@ def _migrate_cost_columns(conn):
         for col, coltype in _NEW_COST_COLUMNS:
             if col not in existing:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {coltype}")
+                if col == "partial":
+                    # Backfill round 1 (review): a pre-existing row has no
+                    # evidence it was ever written cleanly -- NULL read as
+                    # settled was the unsafe direction (a blank beats a
+                    # wrong figure on screen), so every row already in the
+                    # table is marked unsettled until its own device's
+                    # next poll rewrites it with a real stamp.
+                    conn.execute(f"UPDATE {table} SET partial = 1")
 
 
 def _json_or_none(value):
@@ -1310,17 +1318,20 @@ class Store:
         `time_column` is "hour" or "day"; `time_parser` turns that
         column's string value into a bucket start (epoch seconds), same
         format each of the two callers already parses with elsewhere.
-        A row with `partial` NULL (written before this column existed --
-        the additive migration leaves pre-existing rows NULL, see
-        _migrate_cost_columns) is treated as 0/settled, not unknown: it
-        was written under the OLD code, which only ever wrote a row's
-        cumulative total once its rollup had already produced one, at
-        whatever poll cadence was in effect then -- there is no evidence
-        it was ever part of an in-progress catch-up, and the "never
-        invent a risk out of a gap" rule this function's docstring
-        already applies to a missing device row applies here too.
-        Missing/unparsable bucket strings are skipped, not treated as
-        unsettled, same reasoning.
+
+        Backfill (review round 1): a row written before this column
+        existed has no evidence it was ever written cleanly, and treating
+        that absence of evidence as "settled" was the unsafe direction --
+        _migrate_cost_columns backfills every pre-existing row to
+        partial=1 the moment the column is added, so this function never
+        even has to special-case NULL: it stays untrustworthy until its
+        own device's next poll rewrites it with a real stamp, one poll
+        interval after deploy, worst case. `truthy` here therefore only
+        ever means an explicit 1 (freshly stamped or backfilled); a row
+        this function reads as 0 is one that has been rewritten by a real
+        poll since. Missing/unparsable bucket strings are skipped, not
+        treated as unsettled, since a bucket this function cannot even
+        place in time cannot be evidenced as a risk either.
 
         Never raises; a failed read is treated as unsettled (the same
         "refuse a good estimate rather than risk a contaminated one"
