@@ -265,7 +265,7 @@ class FleetPoller:
         # being compared against the hub's fresh one by limits_view()'s
         # divergence check.
         #
-        # The fix: an absent "limits" key on a snapshot that otherwise
+        # The fix: an ABSENT "limits" key on a snapshot that otherwise
         # ingested successfully (we are past the isinstance(snapshot,
         # dict) checks above the cost/hourly ingest steps this sits
         # alongside) is not just "nothing to add", it is fleet.py's own
@@ -279,19 +279,37 @@ class FleetPoller:
         # satellite gets its now-stale row removed within one poll cycle
         # of its hub reaching it, exactly matching how quickly
         # fleet.is_limits_hub() itself flips a device into satellite mode.
-        # store.limits_view()'s own ACCOUNT_LIMITS_STALE_SECONDS filter is
-        # the backstop for the gap this can't close -- a device that goes
-        # fully unreachable, so no poll (and therefore no clear) ever
-        # happens again.
+        # store.limits_view()'s own ACCOUNT_LIMITS_STALE_SECONDS gate on
+        # `divergent` is the backstop for the gap this can't close -- a
+        # device that goes fully unreachable, so no poll (and therefore
+        # no clear) ever happens again.
+        #
+        # Coordinator review (2026-09-11): a "limits" key that IS present
+        # but malformed (not a dict -- upsert_account_limits's own
+        # not-a-dict skip, e.g. a buggy remote device sending a string or
+        # a list) is a different case from an absent key, and must go
+        # back to being a no-op, not a clear. Treating them alike turned
+        # one transient bad payload into permanent data loss for a device
+        # that IS still this account's fetcher -- last-good is kept
+        # specifically to survive exactly that kind of bad moment, and a
+        # single malformed poll must not throw it away. Only a truly
+        # absent key -- "limits" not present in the snapshot at all --
+        # is the is_limits_hub() satellite signal the clear above exists
+        # for; a present-but-wrong-shaped value is not that signal.
         #
         # Its own try/except, same as usage/cost above: a malformed
-        # "limits" shape, or a failed clear, from THIS device must never
-        # prevent its sessions/events/usage/cost from being ingested or
-        # its cursor from advancing.
+        # "limits" shape, or a failed upsert/clear, from THIS device must
+        # never prevent its sessions/events/usage/cost from being
+        # ingested or its cursor from advancing.
         try:
-            limits_payload = snapshot.get("limits")
-            if isinstance(limits_payload, dict):
-                self.store.upsert_account_limits(device_id, limits_payload)
+            if "limits" in snapshot:
+                limits_payload = snapshot["limits"]
+                if isinstance(limits_payload, dict):
+                    self.store.upsert_account_limits(device_id, limits_payload)
+                # else: present but malformed -- leave any existing
+                # last-good row untouched, same as calling
+                # upsert_account_limits directly with a non-dict payload
+                # already does (it logs and skips, never deletes).
             else:
                 self.store.clear_account_limits(device_id)
         except Exception:

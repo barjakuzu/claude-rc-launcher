@@ -1467,6 +1467,44 @@ class LimitsIngestTest(unittest.TestCase):
     @patch("fleetpoll.fleet.build_fleet")
     @patch("fleetpoll.devices.load_devices")
     @patch("fleetpoll.devices.get_local_name")
+    def test_malformed_limits_on_a_later_poll_does_not_delete_the_last_good_row(
+            self, get_name, load_devices, build_fleet):
+        # Coordinator review (2026-09-11): a present-but-malformed
+        # "limits" value must stay a no-op, same as it always was --
+        # NOT a clear. A single transient bad payload (still this
+        # account's fetcher, just a glitchy poll) must not throw away
+        # the last-good row that exists specifically to survive exactly
+        # that kind of bad moment. Only a truly ABSENT "limits" key
+        # (the satellite signal) clears the row -- see
+        # test_device_that_stops_fetching_has_its_old_row_cleared below.
+        get_name.return_value = "hub"
+        load_devices.return_value = []
+        build_fleet.return_value = {
+            "device_name": "hub", "role": "full", "version": "1", "claude_version": "1",
+            "sessions": [], "events": [], "cursor": None, "generated_at": 1000.0,
+            "errors": [], "limits": self._limits_payload(),
+        }
+        poller = fleetpoll.FleetPoller(self.store, http_get=MagicMock())
+        poller.poll_once()
+        self.assertEqual(len(self.store.limits_view()["rows"]), 1)
+
+        # Same device, next poll: still the fetcher, but this one poll's
+        # "limits" value came back malformed.
+        build_fleet.return_value = {
+            "device_name": "hub", "role": "full", "version": "1", "claude_version": "1",
+            "sessions": [], "events": [], "cursor": None, "generated_at": 1060.0,
+            "errors": [], "limits": "not a dict",
+        }
+        poller.poll_once()
+
+        view = self.store.limits_view()
+        self.assertEqual(len(view["rows"]), 1)
+        self.assertEqual(view["rows"][0]["device_id"], "local")
+        self.assertEqual(view["rows"][0]["payload"]["five_hour"]["percent"], 56.0)
+
+    @patch("fleetpoll.fleet.build_fleet")
+    @patch("fleetpoll.devices.load_devices")
+    @patch("fleetpoll.devices.get_local_name")
     def test_device_that_stops_fetching_has_its_old_row_cleared(
             self, get_name, load_devices, build_fleet):
         # Task L5 live-bug fix: a device that used to be the fleet's

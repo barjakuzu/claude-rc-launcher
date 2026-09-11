@@ -2201,6 +2201,34 @@ class ApiLimitsRouteTest(_ApiRouteFixture):
         self.assertEqual(data["devices"][0]["device_id"], "hub")
         self.assertFalse(data["divergent"])
 
+    def test_lone_stale_reading_still_served_as_primary_with_its_age(self):
+        # Coordinator review (2026-09-11): serving null instead of a
+        # stale-but-real reading was itself a live bug -- CONTRACT.md
+        # section 3 requires the last good value with its original
+        # fetched_at, precisely so the UI can show staleness rather than
+        # go dark. This also matters because fetched_at is the FETCHING
+        # DEVICE'S OWN CLOCK: a device with clock skew past the
+        # staleness threshold must not make limits look totally
+        # unavailable fleet-wide.
+        server.HUB_STORE.upsert_device({"id": "local", "name": "Dev VM", "role": "full",
+                                         "version": "1", "claude_version": "1"})
+        stale_fetched_at = time.time() - store.Store.ACCOUNT_LIMITS_STALE_SECONDS - 3600
+        server.HUB_STORE.upsert_account_limits(
+            "local", self._limits_payload(fetched_at=stale_fetched_at))
+
+        data, code = self._get_json("/api/limits")
+
+        self.assertEqual(code, 200)
+        self.assertIsNotNone(data["primary"])
+        self.assertEqual(data["primary"]["device_id"], "local")
+        self.assertEqual(data["primary"]["five_hour"]["percent"], 56.0)
+        self.assertFalse(data["divergent"])
+        # The age is reachable via devices[], keyed by the same
+        # device_id primary carries -- never a bare "unavailable" with
+        # no way to tell how old the number is.
+        dev = next(d for d in data["devices"] if d["device_id"] == "local")
+        self.assertGreaterEqual(dev["age_seconds"], store.Store.ACCOUNT_LIMITS_STALE_SECONDS)
+
 
 def _hour_str_at(epoch):
     return time.strftime("%Y-%m-%dT%H", time.gmtime(epoch))

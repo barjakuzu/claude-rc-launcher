@@ -2084,16 +2084,22 @@ class AccountLimitsTest(unittest.TestCase):
         self.assertEqual(len(view["rows"]), 2)
         self.assertFalse(view["divergent"])
 
-    def test_stale_row_excluded_from_primary(self):
-        # Task L5 live-bug fix: a device that stopped fetching long ago
-        # (fetched_at far in the past relative to `now`) must not be
-        # picked as primary just because it happens to be the only
-        # available row on record -- an old reading is not current data.
+    def test_stale_row_is_still_primary_not_discarded(self):
+        # Coordinator review (2026-09-11): an earlier version of this fix
+        # excluded stale rows from `primary` entirely, which broke
+        # CONTRACT.md section 3's "serve the last good value with its
+        # original fetched_at so the UI can show how stale it is" -- and
+        # worse, since fetched_at is the FETCHING DEVICE'S OWN CLOCK, a
+        # device with clock skew past the staleness threshold would make
+        # limits look permanently unavailable fleet-wide with no
+        # explanation. A stale reading, still served with its true
+        # fetched_at, is what the contract actually asks for.
         self.store.upsert_account_limits("local", self._payload(fetched_at=1000.0))
         now = 1000.0 + store.Store.ACCOUNT_LIMITS_STALE_SECONDS + 1
         view = self.store.limits_view(now_fn=lambda: now)
-        self.assertIsNone(view["primary"])
-        self.assertIsNone(view["primary_device_id"])
+        self.assertIsNotNone(view["primary"])
+        self.assertEqual(view["primary_device_id"], "local")
+        self.assertEqual(view["primary"]["fetched_at"], 1000.0)
 
     def test_stale_row_does_not_cause_divergence_against_a_fresh_one(self):
         # This is the exact production shape of the live bug: a hub with
@@ -2125,12 +2131,31 @@ class AccountLimitsTest(unittest.TestCase):
         view = self.store.limits_view(now_fn=lambda: now)
         self.assertTrue(view["divergent"])
 
-    def test_row_with_non_numeric_fetched_at_treated_as_stale(self):
+    def test_row_with_non_numeric_fetched_at_is_still_usable_as_primary(self):
+        # An unusable fetched_at (stored as None -- see
+        # test_fetched_at_non_numeric_is_stored_as_none) sorts as the
+        # oldest possible reading, but it is still the ONLY data this
+        # device has ever reported, and CONTRACT.md section 5 only says
+        # primary is null when NO device has data -- not when the one
+        # device that does has an unreadable age.
         payload = self._payload()
         payload["fetched_at"] = "not-a-number"
         self.store.upsert_account_limits("local", payload)
         view = self.store.limits_view(now_fn=lambda: 1000.0)
-        self.assertIsNone(view["primary"])
+        self.assertIsNotNone(view["primary"])
+        self.assertEqual(view["primary_device_id"], "local")
+
+    def test_row_with_non_numeric_fetched_at_excluded_from_divergence(self):
+        # An unusable fetched_at can't be judged fresh, so it must not
+        # participate in the divergence comparison even though it can
+        # still be primary (previous test).
+        self.store.upsert_account_limits(
+            "local", self._payload(fetched_at=1000.0, five_hour_percent=50.0))
+        bad = self._payload(five_hour_percent=90.0)
+        bad["fetched_at"] = "not-a-number"
+        self.store.upsert_account_limits("laptop", bad)
+        view = self.store.limits_view(now_fn=lambda: 1000.0)
+        self.assertFalse(view["divergent"])
 
     def test_fetched_at_non_numeric_is_stored_as_none(self):
         payload = self._payload()

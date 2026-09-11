@@ -1168,7 +1168,7 @@ class Store:
             ago: the series does not yet reach back far enough to cover
             the whole window. Reporting a partial window as though it
             were the whole one would UNDER-count `consumed`, which then
-            OVER-states the derived budget -- exactly the "confidently
+            UNDER-states the derived budget -- exactly the "confidently
             wrong" failure this whole feature exists to avoid, so a
             not-yet-covered window returns nothing rather than a number
             with a silent downward bias.
@@ -1256,7 +1256,7 @@ class Store:
           - the oldest hour on record does not reach back far enough to
             cover `window_seconds`: silently treating an uncovered
             stretch as "zero usage then" would UNDER-count `consumed`
-            and, via estimate_window_tokens, OVER-state the derived
+            and, via estimate_window_tokens, UNDER-state the derived
             budget -- the same "confidently wrong" failure
             effective_tokens_in_window's own contract already refuses.
           - the windowed total is <= 0: nothing to divide a percent into
@@ -1376,7 +1376,7 @@ class Store:
           - the oldest day on record does not reach back far enough to
             cover `window_seconds`: silently treating an uncovered
             stretch as "zero usage then" would UNDER-count `consumed`
-            and, via estimate_window_tokens, OVER-state the derived
+            and, via estimate_window_tokens, UNDER-state the derived
             budget -- the same "confidently wrong" failure
             effective_tokens_in_hourly_window's own contract already
             refuses.
@@ -1921,26 +1921,36 @@ class Store:
     # field which can never be true must never be left unexplained.
     LIMITS_DIVERGENCE_THRESHOLD = 5
 
-    # Task L5 live-bug fix: a row this old is not evidence of anything
-    # any more, even if it is still marked available=True. Normal
-    # operation refreshes the hub's own row roughly every
-    # limits.CACHE_TTL_SECONDS (60s), backing off no further than
-    # limits.RATE_LIMIT_BACKOFF_CEILING_SECONDS (900s, 15 minutes) even
-    # under sustained 429s -- so 1800s (30 minutes) is a generous margin
-    # above the worst case a genuinely still-fetching device can produce,
-    # while being nowhere near the many-hour staleness a satellite that
-    # stopped fetching (and, before clear_account_limits, was never
-    # cleaned up) actually showed in production. Used by limits_view()
-    # below to exclude stale rows from both `primary` selection and the
-    # `divergent` comparison: a row this old has "nothing to disagree
-    # WITH" (same reasoning the docstring already gives for an
-    # unparseable payload), not a second truth to weigh against a fresh
-    # one. This is a read-time backstop, not a substitute for
-    # clear_account_limits actively deleting a satellite's row once its
-    # hub notices it stopped reporting -- it also covers the gap before
-    # that happens (a device that goes fully unreachable, so no poll ever
-    # completes to trigger the delete) and, unlike a delete, needs no
-    # write to take effect against data already sitting in the table.
+    # Task L5 live-bug fix: a row this old is no longer evidence that a
+    # SECOND device disagrees with the primary reading, even if it is
+    # still marked available=True. Normal operation refreshes the hub's
+    # own row roughly every limits.CACHE_TTL_SECONDS (60s), backing off
+    # no further than limits.RATE_LIMIT_BACKOFF_CEILING_SECONDS (900s, 15
+    # minutes) even under sustained 429s -- so 1800s (30 minutes) is a
+    # generous margin above the worst case a genuinely still-fetching
+    # device can produce, while being nowhere near the many-hour
+    # staleness a satellite that stopped fetching (and, before
+    # clear_account_limits, was never cleaned up) actually showed in
+    # production.
+    #
+    # Used by limits_view() below for the `divergent` comparison ONLY --
+    # coordinator review (2026-09-11): an earlier version of this fix
+    # also excluded stale rows from `primary` selection, which broke
+    # CONTRACT.md section 3's "serve the last good value with its
+    # original fetched_at so the UI can show how stale it is" for the
+    # single-device case: when the one and only row goes stale (nothing
+    # to compare against, so "divergent" was never the problem there),
+    # `primary` went null instead of staying the last good reading, the
+    # UI lost the number AND the age (age_seconds is looked up by
+    # `primary.device_id`, itself now null), and -- the sharper failure
+    # -- `fetched_at` is the FETCHING DEVICE'S OWN CLOCK, so a device with
+    # clock skew past this threshold would make limits look permanently
+    # unavailable fleet-wide for a reason no user could see or fix. A
+    # stale reading clearly labelled with its age is useful; nothing at
+    # all is not. `primary` is therefore always the freshest AVAILABLE
+    # row regardless of age now -- staleness is purely a "how much do two
+    # readings actually disagree RIGHT NOW" concern, not a "do we have
+    # data" one.
     ACCOUNT_LIMITS_STALE_SECONDS = 1800
 
     def limits_view(self, now_fn=time.time):
@@ -1960,32 +1970,31 @@ class Store:
         somehow failed to parse), "updated_at"}.
 
         `primary`/`primary_device_id`: the freshest (highest fetched_at)
-        AVAILABLE, NOT-STALE row's payload and the device_id it came
-        from, or (None, None) if no device has ever reported available,
-        current data -- CONTRACT.md section 5: "primary is null when no
-        device has data... Never invent zeros." Returned as two separate
-        values (not primary embedded with device_id already merged in)
-        because that merge is server.py's /api/limits route's job, same
-        division of labor as cost_view() leaving `days`/`totals` to the
-        API layer.
+        AVAILABLE row's payload and the device_id it came from, or
+        (None, None) if no device has ever reported available data --
+        CONTRACT.md section 5: "primary is null when no device has
+        data... Never invent zeros." Age (however stale) is still
+        reachable from this: server.py's /api/limits route merges
+        `device_id` into `primary` and separately lists every row
+        (including this one) with its own `age_seconds` in `devices[]`,
+        so the UI can always show how old `primary` is, never just a
+        bare "unavailable". Returned as two separate values (not primary
+        embedded with device_id already merged in) because that merge is
+        server.py's /api/limits route's job, same division of labor as
+        cost_view() leaving `days`/`totals` to the API layer.
 
-        `divergent`: True when at least two AVAILABLE, NOT-STALE rows'
-        five_hour.percent differ by more than LIMITS_DIVERGENCE_THRESHOLD
-        points. A row with no usable five_hour reading (never fetched, or
-        a payload that failed to parse) is excluded from the comparison
-        -- it has nothing to disagree WITH, not evidence either way.
-
-        "NOT-STALE" (both uses above): fetched_at is a real number and
-        `now - fetched_at` is within ACCOUNT_LIMITS_STALE_SECONDS (see
-        that constant's own comment). A row without a usable fetched_at
-        at all is treated as stale too, for the same "nothing to compare
-        against" reason as an unparseable payload -- an unknown age is
-        never evidence of freshness. This is what keeps a satellite's
-        long-dead row (clear_account_limits normally removes it, but
-        cannot for a device that has gone fully unreachable) from ever
-        again being picked as `primary` or manufacturing a divergence
-        against the hub's own current reading, which is the live bug
-        this filtering was added to fix."""
+        `divergent`: True when at least two AVAILABLE rows, EACH fetched
+        within ACCOUNT_LIMITS_STALE_SECONDS of `now` (see that constant's
+        own comment), disagree by more than LIMITS_DIVERGENCE_THRESHOLD
+        points on five_hour.percent. A row with no usable five_hour
+        reading (never fetched, or a payload that failed to parse) is
+        excluded from the comparison -- it has nothing to disagree WITH,
+        not evidence either way. A row without a usable fetched_at at all
+        is treated as not-fresh for this comparison too, for the same
+        reason. This staleness gate applies ONLY to `divergent`, not to
+        `primary` selection -- see ACCOUNT_LIMITS_STALE_SECONDS's own
+        comment for why conflating the two was a live bug in its own
+        right."""
         conn = self._read_conn()
         try:
             now = now_fn()
@@ -2007,25 +2016,26 @@ class Store:
                 if row["available"] and isinstance(row["payload"], dict)
             ]
 
+            primary = None
+            primary_device_id = None
+            if available_rows:
+                def _sort_key(row):
+                    fetched_at = row["fetched_at"]
+                    return fetched_at if isinstance(fetched_at, (int, float)) else float("-inf")
+                freshest = max(available_rows, key=_sort_key)
+                primary = freshest["payload"]
+                primary_device_id = freshest["device_id"]
+
             def _is_fresh(row):
                 fetched_at = row["fetched_at"]
                 if not isinstance(fetched_at, (int, float)) or isinstance(fetched_at, bool):
                     return False
                 return (now - fetched_at) <= self.ACCOUNT_LIMITS_STALE_SECONDS
 
-            fresh_available_rows = [row for row in available_rows if _is_fresh(row)]
-
-            primary = None
-            primary_device_id = None
-            if fresh_available_rows:
-                def _sort_key(row):
-                    return row["fetched_at"]
-                freshest = max(fresh_available_rows, key=_sort_key)
-                primary = freshest["payload"]
-                primary_device_id = freshest["device_id"]
-
             five_hour_percents = []
-            for row in fresh_available_rows:
+            for row in available_rows:
+                if not _is_fresh(row):
+                    continue
                 bucket = row["payload"].get("five_hour")
                 if not isinstance(bucket, dict):
                     continue
