@@ -1311,54 +1311,68 @@ class Store:
         cleanly.
 
         Backfill round 2 (review): a bare `partial=1` reading is not
-        enough on its own -- a device that goes offline (a laptop asleep,
-        a satellite that drops off the tailnet) freezes every row it
-        wrote at whatever `partial` it last carried, and only a poll FROM
-        THAT DEVICE can ever rewrite it. If that device's LAST report
-        before going dark happened to be a backfilled or genuinely
-        in-progress catch-up, its rows would stay flagged forever, for as
-        long as the device stays offline -- an unsettled flag that has
-        long outlived the situation that justified it. A `partial=1` row
-        is therefore treated as settled once its OWNER device gives
-        either kind of evidence that it has moved on:
+        enough on its own -- cost_daily's sparse reporting (CONTRACT.md's
+        "usage_daily is sparse, not zero-filled" ruling) means a device
+        can finish a real catch-up, or simply receive the migration
+        backfill, without its next few polls happening to revisit every
+        old day again, so the row's own `partial` bit can outlive the
+        situation that set it even while the device keeps polling
+        normally. A `partial=1` row is therefore treated as settled once
+        its OWNER device gives evidence of having moved on:
+        devices.usage_partial is False -- the device's own latest report
+        says its usage cache is not currently converging, which means
+        whatever produced this row's partial=1 is no longer an active
+        process that could still grow it, whether or not that same poll
+        happened to rewrite this exact bucket.
 
-        - devices.usage_partial is False: the device's own latest report
-          says its usage cache is not currently converging. Whatever
-          produced this row's partial=1 (a real catch-up that finished
-          without happening to rewrite this exact bucket again -- cost_daily's
-          sparse reporting makes that possible -- or a blanket migration
-          backfill) is no longer an active process that could still grow
-          this row, because the device itself is not claiming to be
-          mid-catch-up right now.
-        - devices.online is False: the device is currently unreachable
-          (fleetpoll._mark_unreachable, set on the very next failed poll
-          attempt -- normally within one poll interval of going dark).
-          An offline device cannot be writing anything, partial or
-          otherwise, so nothing here can grow while it stays dark --
-          per the coordinator's own framing, the row "is as final as it
-          will ever be" until reconnection, at which point its next real
-          poll supersedes this one regardless.
+        A verified probe against the real rollup confirmed the mechanism
+        this relies on: a day several days old, with usage recorded
+        during warm-up and none in the device's latest poll, is still
+        re-emitted in full by a converging poll (usage.rollup's `daily`
+        is a full recompute from the 30-day cache on every call, not a
+        diff), and upsert_cost_daily replaces rather than accumulates --
+        so a settled device's row for that day genuinely carries a
+        correct, rewritten total, not a stale one merely reclassified as
+        trustworthy.
 
-        Deliberately NOT a bare timeout on the row's own age or the
-        device's last_seen: a duration threshold would have to guess at
-        "how long is too long for a real catch-up", the same kind of
-        invented number this whole feature exists to avoid showing, and
-        it would either reintroduce the live bug for a device merely slow
-        to reconnect (too short) or leave a genuinely stuck device
-        suppressed for a long time regardless (too long). Both signals
-        above are instead direct, current evidence about the SAME device
-        that wrote the row, already tracked on `devices` for other
-        reasons, needing no new column and no chosen constant.
+        An `online`-based branch (device confirmed unreachable) was tried
+        and removed: it is the one path that can put a WRONG number on
+        screen rather than a blank. A device that wrote rows at some
+        fraction of true usage during warm-up and then went offline
+        before a settled poll could correct them would have those rows
+        read as final the moment it dropped off -- a silent, unbounded
+        undercount (measured on a real probe: 1.5M shown against 15M
+        true, 6.7M against 66.7M) that estimates_are_coherent() cannot
+        catch, since a uniform undercount scales both windows by the same
+        factor and stays internally consistent between them. Without that
+        branch, a device that goes dark mid-catch-up keeps suppressing
+        the window until its rows age out of it on their own -- the safe
+        direction, a blank outliving its cause rather than a wrong figure
+        outliving its cause.
+
+        Deliberately NOT a bare timeout on the row's own age either: a
+        duration threshold would have to guess at "how long is too long
+        for a real catch-up", the same kind of invented number this whole
+        feature exists to avoid showing, and it would either reintroduce
+        a live bug for a device merely slow to reconnect (too short) or
+        leave a genuinely stuck device suppressed for a long time
+        regardless (too long). usage_partial is instead direct, current
+        evidence about the SAME device that wrote the row, already
+        tracked on `devices` for other reasons, needing no new column and
+        no chosen constant.
 
         A row whose device is unknown to `devices` (should not happen --
         upsert_cost_hourly/daily and upsert_device are both fed by the
         same fleetpoll._ingest call -- but nothing here should raise over
         it) is left unsettled: this function's job is to catch a real,
-        evidenced risk, not to invent settledness out of a join gap. A
-        device that is BOTH currently reporting usage_partial=True AND
-        online keeps every one of its partial=1 rows unsettled, exactly
-        the case this whole feature must still catch: a device actively,
-        right now, mid-catch-up.
+        evidenced risk, not to invent settledness out of a join gap. Note
+        the asymmetry this leaves with the `partial` NULL case just below
+        (a row with no `partial` value at all reads as settled, not
+        unsettled): that pairing predates the migration backfill always
+        setting `partial` to a real 0/1 on every row it touches, so NULL
+        should not occur in practice any more, but the two defaults
+        disagree on principle and whoever next widens either rule should
+        resolve that rather than copy it forward.
 
         `time_column` is "hour" or "day"; `time_parser` turns that
         column's string value into a bucket start (epoch seconds), same
@@ -1371,9 +1385,9 @@ class Store:
         "refuse a good estimate rather than risk a contaminated one"
         direction every other guard in this area takes)."""
         try:
-            devices_state = {
-                row["id"]: (bool(row["usage_partial"]), bool(row["online"]))
-                for row in conn.execute("SELECT id, usage_partial, online FROM devices")
+            devices_usage_partial = {
+                row["id"]: bool(row["usage_partial"])
+                for row in conn.execute("SELECT id, usage_partial FROM devices")
             }
             rows = conn.execute(
                 f"SELECT device_id, {time_column} AS bucket, partial FROM {table}"
@@ -1390,9 +1404,9 @@ class Store:
                 continue
             if start + bucket_seconds <= window_start:
                 continue  # bucket entirely before the window, irrelevant
-            device_usage_partial, device_online = devices_state.get(
-                row["device_id"], (True, True))  # unknown device: no evidence, stay unsettled
-            if not device_usage_partial or not device_online:
+            device_usage_partial = devices_usage_partial.get(
+                row["device_id"], True)  # unknown device: no evidence, stay unsettled
+            if not device_usage_partial:
                 continue  # the owning device has moved on -- settled
             return True
         return False

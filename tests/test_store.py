@@ -2581,15 +2581,34 @@ class EffectiveTokensInHourlyWindowTest(unittest.TestCase):
         result = self.store.effective_tokens_in_hourly_window(5 * 3600, now_fn=lambda: now)
         self.assertEqual(result, 50)
 
-    def test_partial_row_from_an_offline_device_does_not_suppress(self):
-        # Task lg backfill round 2 (the live bug): a device that has gone
-        # unreachable freezes its rows exactly as they are -- nothing can
-        # revise them further while it stays dark, regardless of what its
-        # last reported usage_partial happened to be.
+    def test_partial_row_from_an_offline_device_still_suppresses(self):
+        # Backfill round 3 (review): the `online`-based branch was tried
+        # and removed -- it is the one path that can put a WRONG number
+        # on screen (a device that under-reads during warm-up and then
+        # goes dark before a settled poll could correct it would have its
+        # rows read as final, an unbounded silent undercount). Going
+        # offline is therefore no longer, on its own, evidence a row has
+        # settled: only the device's own usage_partial=False report is.
         now = 5 * 3600.0
         self.store.upsert_device({"id": "local", "name": "hub", "role": "full",
                                    "version": "1", "claude_version": "1",
                                    "usage_partial": True})
+        self.store.mark_device_offline("local")
+        for h in range(5):
+            self._hour(h * 3600.0, 10, partial=True)
+        self.assertIsNone(
+            self.store.effective_tokens_in_hourly_window(5 * 3600, now_fn=lambda: now))
+
+    def test_partial_row_from_an_offline_but_previously_settled_device_does_not_suppress(self):
+        # Going offline does not by itself un-settle a row either: a
+        # device whose LAST report before going dark was clean
+        # (usage_partial=False) is still trusted, offline or not -- the
+        # evidence is the device's own reported state, not its
+        # reachability.
+        now = 5 * 3600.0
+        self.store.upsert_device({"id": "local", "name": "hub", "role": "full",
+                                   "version": "1", "claude_version": "1",
+                                   "usage_partial": False})
         self.store.mark_device_offline("local")
         for h in range(5):
             self._hour(h * 3600.0, 10, partial=True)
@@ -2749,21 +2768,36 @@ class EffectiveTokensInDailyWindowTest(unittest.TestCase):
         result = self.store.effective_tokens_in_daily_window(7 * DAY, now_fn=lambda: now)
         self.assertEqual(result, 70)
 
-    def test_partial_row_from_an_offline_device_does_not_suppress(self):
-        # The reported live bug: a device asleep/unreachable for hours
-        # freezes its cost_daily rows at whatever partial value they last
-        # carried, however that happened (a genuine catch-up, or a
-        # migration backfill), and only a poll FROM that device could
-        # ever rewrite them -- which cannot happen while it stays dark.
-        # devices.online (already set on the very next failed poll
-        # attempt) is direct evidence of exactly that, independent of
-        # whatever usage_partial value the device's last report happened
-        # to leave behind.
+    def test_partial_row_from_an_offline_device_still_suppresses(self):
+        # Backfill round 3 (review): an `online`-based branch was tried
+        # here too and removed for the same reason as its hourly sibling
+        # -- a device that under-reads during warm-up and then goes dark
+        # before a settled poll could correct it would otherwise have its
+        # rows read as final, an unbounded silent undercount that
+        # estimates_are_coherent() cannot catch (a uniform undercount
+        # scales both windows together). Offline alone is not evidence of
+        # settlement; only usage_partial=False is.
         DAY = 86400.0
         now = 7 * DAY
         self.store.upsert_device({"id": "mac", "name": "mac", "role": "full",
                                    "version": "1", "claude_version": "1",
                                    "usage_partial": True})
+        self.store.mark_device_offline("mac")
+        for d in range(7):
+            self._day(d * DAY, 10, device_id="mac", partial=True)
+        self.assertIsNone(
+            self.store.effective_tokens_in_daily_window(7 * DAY, now_fn=lambda: now))
+
+    def test_partial_row_from_an_offline_but_previously_settled_device_does_not_suppress(self):
+        # This is the actual live scenario the backfill fixed: the mac
+        # devices row already read usage_partial=False (its last report
+        # before going to sleep was clean) even though it has since gone
+        # offline -- that alone settles its old, backfilled rows.
+        DAY = 86400.0
+        now = 7 * DAY
+        self.store.upsert_device({"id": "mac", "name": "mac", "role": "full",
+                                   "version": "1", "claude_version": "1",
+                                   "usage_partial": False})
         self.store.mark_device_offline("mac")
         for d in range(7):
             self._day(d * DAY, 10, device_id="mac", partial=True)
