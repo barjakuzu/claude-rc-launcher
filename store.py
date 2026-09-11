@@ -1299,49 +1299,87 @@ class Store:
                                     bucket_seconds, window_start):
         """Task lg: True if any row in `table` (cost_hourly or cost_daily)
         that overlaps the window starting at `window_start` carries
-        partial=1 -- i.e. the poll that last wrote/refreshed THAT ROW
+        partial=1 AND its device has not since given evidence of having
+        moved on from whatever produced that flag (see below).
+
+        partial=1 means the poll that last wrote/refreshed THAT ROW
         reported usage_partial=True for its device (see upsert_cost_daily/
         upsert_cost_hourly's own docstrings for exactly when `partial` is
-        stamped and why it is a per-row fact, not a device-wide one).
+        stamped and why it is a per-row fact, not a device-wide one), OR
+        the row predates this column and was backfilled to 1 on migration
+        (_migrate_cost_columns) for having no evidence it was ever written
+        cleanly.
 
-        This is the narrowed replacement for gating the whole estimate on
-        any_device_usage_partial(): it only distrusts rows that actually
-        feed THIS window, and only the specific rows a partial poll
-        actually touched -- not every row belonging to a device that
-        happens to be partial right now. A row from BEFORE the device's
-        current catch-up episode even started (untouched by it, e.g. a
-        day cost_daily's sparse reporting hasn't gotten back around to
-        yet) keeps whatever `partial` its last, unrelated write left it
-        with, so an old, already-settled reading is never re-tainted just
-        because the same device is warming up again later.
+        Backfill round 2 (review): a bare `partial=1` reading is not
+        enough on its own -- a device that goes offline (a laptop asleep,
+        a satellite that drops off the tailnet) freezes every row it
+        wrote at whatever `partial` it last carried, and only a poll FROM
+        THAT DEVICE can ever rewrite it. If that device's LAST report
+        before going dark happened to be a backfilled or genuinely
+        in-progress catch-up, its rows would stay flagged forever, for as
+        long as the device stays offline -- an unsettled flag that has
+        long outlived the situation that justified it. A `partial=1` row
+        is therefore treated as settled once its OWNER device gives
+        either kind of evidence that it has moved on:
+
+        - devices.usage_partial is False: the device's own latest report
+          says its usage cache is not currently converging. Whatever
+          produced this row's partial=1 (a real catch-up that finished
+          without happening to rewrite this exact bucket again -- cost_daily's
+          sparse reporting makes that possible -- or a blanket migration
+          backfill) is no longer an active process that could still grow
+          this row, because the device itself is not claiming to be
+          mid-catch-up right now.
+        - devices.online is False: the device is currently unreachable
+          (fleetpoll._mark_unreachable, set on the very next failed poll
+          attempt -- normally within one poll interval of going dark).
+          An offline device cannot be writing anything, partial or
+          otherwise, so nothing here can grow while it stays dark --
+          per the coordinator's own framing, the row "is as final as it
+          will ever be" until reconnection, at which point its next real
+          poll supersedes this one regardless.
+
+        Deliberately NOT a bare timeout on the row's own age or the
+        device's last_seen: a duration threshold would have to guess at
+        "how long is too long for a real catch-up", the same kind of
+        invented number this whole feature exists to avoid showing, and
+        it would either reintroduce the live bug for a device merely slow
+        to reconnect (too short) or leave a genuinely stuck device
+        suppressed for a long time regardless (too long). Both signals
+        above are instead direct, current evidence about the SAME device
+        that wrote the row, already tracked on `devices` for other
+        reasons, needing no new column and no chosen constant.
+
+        A row whose device is unknown to `devices` (should not happen --
+        upsert_cost_hourly/daily and upsert_device are both fed by the
+        same fleetpoll._ingest call -- but nothing here should raise over
+        it) is left unsettled: this function's job is to catch a real,
+        evidenced risk, not to invent settledness out of a join gap. A
+        device that is BOTH currently reporting usage_partial=True AND
+        online keeps every one of its partial=1 rows unsettled, exactly
+        the case this whole feature must still catch: a device actively,
+        right now, mid-catch-up.
 
         `time_column` is "hour" or "day"; `time_parser` turns that
         column's string value into a bucket start (epoch seconds), same
         format each of the two callers already parses with elsewhere.
-
-        Backfill (review round 1): a row written before this column
-        existed has no evidence it was ever written cleanly, and treating
-        that absence of evidence as "settled" was the unsafe direction --
-        _migrate_cost_columns backfills every pre-existing row to
-        partial=1 the moment the column is added, so this function never
-        even has to special-case NULL: it stays untrustworthy until its
-        own device's next poll rewrites it with a real stamp, one poll
-        interval after deploy, worst case. `truthy` here therefore only
-        ever means an explicit 1 (freshly stamped or backfilled); a row
-        this function reads as 0 is one that has been rewritten by a real
-        poll since. Missing/unparsable bucket strings are skipped, not
-        treated as unsettled, since a bucket this function cannot even
-        place in time cannot be evidenced as a risk either.
+        Missing/unparsable bucket strings are skipped, not treated as
+        unsettled, since a bucket this function cannot even place in time
+        cannot be evidenced as a risk either.
 
         Never raises; a failed read is treated as unsettled (the same
         "refuse a good estimate rather than risk a contaminated one"
         direction every other guard in this area takes)."""
         try:
+            devices_state = {
+                row["id"]: (bool(row["usage_partial"]), bool(row["online"]))
+                for row in conn.execute("SELECT id, usage_partial, online FROM devices")
+            }
             rows = conn.execute(
-                f"SELECT {time_column} AS bucket, updated_at, partial FROM {table}"
+                f"SELECT device_id, {time_column} AS bucket, partial FROM {table}"
             ).fetchall()
         except Exception:
-            _LOG.exception("_window_has_unsettled_rows: failed to read %s", table)
+            _LOG.exception("_window_has_unsettled_rows: failed to read %s/devices", table)
             return True
         for row in rows:
             if not row["partial"]:
@@ -1352,6 +1390,10 @@ class Store:
                 continue
             if start + bucket_seconds <= window_start:
                 continue  # bucket entirely before the window, irrelevant
+            device_usage_partial, device_online = devices_state.get(
+                row["device_id"], (True, True))  # unknown device: no evidence, stay unsettled
+            if not device_usage_partial or not device_online:
+                continue  # the owning device has moved on -- settled
             return True
         return False
 

@@ -2478,11 +2478,11 @@ class EffectiveTokensInHourlyWindowTest(unittest.TestCase):
         self.store.close()
         self.tmp.cleanup()
 
-    def _hour(self, epoch, effective, device_id="local"):
+    def _hour(self, epoch, effective, device_id="local", partial=False):
         self.store.upsert_cost_hourly(device_id, [
             {"hour": _hour_str(epoch), "input": 0, "cache_read": 0, "cache_write": 0,
              "output": 0, "effective": effective},
-        ])
+        ], partial=partial)
 
     def test_no_rows_at_all_returns_none(self):
         self.assertIsNone(self.store.effective_tokens_in_hourly_window(3600))
@@ -2553,6 +2553,71 @@ class EffectiveTokensInHourlyWindowTest(unittest.TestCase):
                 self.fail(f"effective_tokens_in_hourly_window raised {e!r}")
         self.assertIsNone(result)
 
+    def test_partial_row_from_an_active_online_device_suppresses(self):
+        # The real, still-current risk this whole feature exists for: a
+        # device that is BOTH reporting usage_partial=True right now AND
+        # online (actively polling, mid-catch-up) may still revise this
+        # row upward on its next poll.
+        now = 5 * 3600.0
+        self.store.upsert_device({"id": "local", "name": "hub", "role": "full",
+                                   "version": "1", "claude_version": "1",
+                                   "usage_partial": True})
+        for h in range(5):
+            self._hour(h * 3600.0, 10, partial=(h == 4))
+        self.assertIsNone(
+            self.store.effective_tokens_in_hourly_window(5 * 3600, now_fn=lambda: now))
+
+    def test_partial_row_from_a_device_that_reported_clean_since_does_not_suppress(self):
+        # Task lg backfill round 2: a partial=1 row (here, simulating a
+        # migration backfill or an earlier finished catch-up) whose owner
+        # device's LATEST report says usage_partial=False is trusted --
+        # whatever produced the flag is no longer an active process.
+        now = 5 * 3600.0
+        self.store.upsert_device({"id": "local", "name": "hub", "role": "full",
+                                   "version": "1", "claude_version": "1",
+                                   "usage_partial": False})
+        for h in range(5):
+            self._hour(h * 3600.0, 10, partial=True)
+        result = self.store.effective_tokens_in_hourly_window(5 * 3600, now_fn=lambda: now)
+        self.assertEqual(result, 50)
+
+    def test_partial_row_from_an_offline_device_does_not_suppress(self):
+        # Task lg backfill round 2 (the live bug): a device that has gone
+        # unreachable freezes its rows exactly as they are -- nothing can
+        # revise them further while it stays dark, regardless of what its
+        # last reported usage_partial happened to be.
+        now = 5 * 3600.0
+        self.store.upsert_device({"id": "local", "name": "hub", "role": "full",
+                                   "version": "1", "claude_version": "1",
+                                   "usage_partial": True})
+        self.store.mark_device_offline("local")
+        for h in range(5):
+            self._hour(h * 3600.0, 10, partial=True)
+        result = self.store.effective_tokens_in_hourly_window(5 * 3600, now_fn=lambda: now)
+        self.assertEqual(result, 50)
+
+    def test_partial_row_outside_the_window_does_not_suppress(self):
+        now = 10 * 3600.0
+        self.store.upsert_device({"id": "local", "name": "hub", "role": "full",
+                                   "version": "1", "claude_version": "1",
+                                   "usage_partial": True})
+        # A partial row well before the trailing 5-hour window (hour 0)
+        # coexists with clean rows actually inside it (hours 6-9).
+        self._hour(0.0, 999, partial=True)
+        for h in range(6, 10):
+            self._hour(h * 3600.0, 10, partial=False)
+        result = self.store.effective_tokens_in_hourly_window(5 * 3600, now_fn=lambda: now)
+        self.assertEqual(result, 40)
+
+    def test_partial_row_from_an_unknown_device_suppresses(self):
+        # No devices row at all for the writer -- no evidence it has
+        # moved on, so this stays unsettled rather than guessed clean.
+        now = 5 * 3600.0
+        for h in range(5):
+            self._hour(h * 3600.0, 10, device_id="ghost", partial=(h == 4))
+        self.assertIsNone(
+            self.store.effective_tokens_in_hourly_window(5 * 3600, now_fn=lambda: now))
+
 
 def _day_str(epoch):
     return time.strftime("%Y-%m-%d", time.gmtime(epoch))
@@ -2577,11 +2642,11 @@ class EffectiveTokensInDailyWindowTest(unittest.TestCase):
         self.store.close()
         self.tmp.cleanup()
 
-    def _day(self, epoch, effective, device_id="local"):
+    def _day(self, epoch, effective, device_id="local", partial=False):
         self.store.upsert_cost_daily(device_id, [
             {"day": _day_str(epoch), "project": "", "input": 0, "cache_read": 0,
              "cache_write": 0, "output": 0, "effective": effective},
-        ])
+        ], partial=partial)
 
     def test_no_rows_at_all_returns_none(self):
         self.assertIsNone(self.store.effective_tokens_in_daily_window(7 * 86400))
@@ -2654,6 +2719,76 @@ class EffectiveTokensInDailyWindowTest(unittest.TestCase):
             except Exception as e:  # pragma: no cover - failure path
                 self.fail(f"effective_tokens_in_daily_window raised {e!r}")
         self.assertIsNone(result)
+
+    def test_partial_row_from_an_active_online_device_suppresses(self):
+        DAY = 86400.0
+        now = 7 * DAY
+        self.store.upsert_device({"id": "local", "name": "hub", "role": "full",
+                                   "version": "1", "claude_version": "1",
+                                   "usage_partial": True})
+        for d in range(7):
+            self._day(d * DAY, 10, partial=(d == 6))
+        self.assertIsNone(
+            self.store.effective_tokens_in_daily_window(7 * DAY, now_fn=lambda: now))
+
+    def test_partial_row_from_a_device_that_reported_clean_since_does_not_suppress(self):
+        # Task lg backfill round 2 -- this is the exact live bug: rows
+        # backfilled to partial=1 on migration (or from an earlier,
+        # finished catch-up) must not stay suppressed just because the
+        # flag on the row itself never got a fresh, non-partial write --
+        # cost_daily's sparse reporting means a settled device may simply
+        # never revisit an old day again. The device's own current
+        # usage_partial=False is enough evidence on its own.
+        DAY = 86400.0
+        now = 7 * DAY
+        self.store.upsert_device({"id": "local", "name": "hub", "role": "full",
+                                   "version": "1", "claude_version": "1",
+                                   "usage_partial": False})
+        for d in range(7):
+            self._day(d * DAY, 10, partial=True)
+        result = self.store.effective_tokens_in_daily_window(7 * DAY, now_fn=lambda: now)
+        self.assertEqual(result, 70)
+
+    def test_partial_row_from_an_offline_device_does_not_suppress(self):
+        # The reported live bug: a device asleep/unreachable for hours
+        # freezes its cost_daily rows at whatever partial value they last
+        # carried, however that happened (a genuine catch-up, or a
+        # migration backfill), and only a poll FROM that device could
+        # ever rewrite them -- which cannot happen while it stays dark.
+        # devices.online (already set on the very next failed poll
+        # attempt) is direct evidence of exactly that, independent of
+        # whatever usage_partial value the device's last report happened
+        # to leave behind.
+        DAY = 86400.0
+        now = 7 * DAY
+        self.store.upsert_device({"id": "mac", "name": "mac", "role": "full",
+                                   "version": "1", "claude_version": "1",
+                                   "usage_partial": True})
+        self.store.mark_device_offline("mac")
+        for d in range(7):
+            self._day(d * DAY, 10, device_id="mac", partial=True)
+        result = self.store.effective_tokens_in_daily_window(7 * DAY, now_fn=lambda: now)
+        self.assertEqual(result, 70)
+
+    def test_partial_row_outside_the_window_does_not_suppress(self):
+        DAY = 86400.0
+        now = 10 * DAY
+        self.store.upsert_device({"id": "local", "name": "hub", "role": "full",
+                                   "version": "1", "claude_version": "1",
+                                   "usage_partial": True})
+        self._day(0.0, 999, partial=True)  # well before the trailing 7-day window
+        for d in range(3, 10):
+            self._day(d * DAY, 10, partial=False)
+        result = self.store.effective_tokens_in_daily_window(7 * DAY, now_fn=lambda: now)
+        self.assertEqual(result, 70)
+
+    def test_partial_row_from_an_unknown_device_suppresses(self):
+        DAY = 86400.0
+        now = 7 * DAY
+        for d in range(7):
+            self._day(d * DAY, 10, device_id="ghost", partial=(d == 6))
+        self.assertIsNone(
+            self.store.effective_tokens_in_daily_window(7 * DAY, now_fn=lambda: now))
 
 
 class AnyDeviceUsagePartialTest(unittest.TestCase):
