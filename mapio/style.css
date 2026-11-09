@@ -1,0 +1,94 @@
+:root {
+  --bg: #0b0d10;
+  --panel: rgba(20, 23, 28, 0.94);
+  --line: #2a2f37;
+  --text: #f2f4f7;
+  --muted: #9aa3ae;
+  --accent: #3e8bff;
+  --danger: #ff5d5d;
+  --hit: 72px;            /* big touch targets for the car screen */
+  --r: 18px;
+  --font: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+[hidden] { display: none !important; }
+html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font-family: var(--font); overflow: hidden; }
+#map { position: fixed; inset: 0; background: var(--bg); }
+.leaflet-container { background: var(--bg); font-family: var(--font); }
+.leaflet-control-attribution { background: rgba(0,0,0,.5) !important; color: #aaa !important; font-size: 11px; }
+.leaflet-control-attribution a { color: #ccc !important; }
+
+button { font: inherit; color: inherit; cursor: pointer; }
+.btn {
+  min-width: var(--hit); height: var(--hit);
+  border: 1px solid var(--line); border-radius: var(--r);
+  background: var(--panel); color: var(--text);
+  font-size: 30px; line-height: 1;
+  display: grid; place-items: center;
+  box-shadow: 0 6px 20px rgba(0,0,0,.35);
+}
+.btn:active { transform: scale(.96); background: #232830; }
+.btn.primary { background: var(--accent); border-color: var(--accent); font-size: 22px; font-weight: 600; padding: 0 28px; }
+.btn.on { background: var(--accent); border-color: var(--accent); }
+.ghost { background: none; border: 0; color: var(--muted); font-size: 26px; width: 56px; height: 56px; }
+
+/* Search */
+#top { position: fixed; top: 20px; left: 50%; transform: translateX(-50%); width: min(720px, calc(100% - 200px)); z-index: 1000; }
+#search-form { display: flex; align-items: center; background: var(--panel); border: 1px solid var(--line); border-radius: var(--r); box-shadow: 0 6px 20px rgba(0,0,0,.35); }
+#q { flex: 1; height: var(--hit); padding: 0 24px; border: 0; background: none; color: var(--text); font-size: 24px; outline: none; }
+#q::placeholder { color: var(--muted); }
+#q::-webkit-search-cancel-button { display: none; }
+#results { list-style: none; margin: 8px 0 0; padding: 6px; background: var(--panel); border: 1px solid var(--line); border-radius: var(--r); max-height: 60vh; overflow-y: auto; }
+#results li { padding: 18px 20px; border-radius: 12px; font-size: 21px; cursor: pointer; }
+#results li small { display: block; color: var(--muted); font-size: 16px; margin-top: 4px; }
+#results li:active { background: #232830; }
+
+/* Speed */
+#hud { position: fixed; left: 20px; bottom: 30px; z-index: 1000; }
+#speed { width: 120px; height: 120px; border-radius: 50%; background: var(--panel); border: 1px solid var(--line); display: grid; place-content: center; text-align: center; box-shadow: 0 6px 20px rgba(0,0,0,.35); }
+#speed-val { font-size: 46px; font-weight: 700; font-variant-numeric: tabular-nums; }
+#speed small { color: var(--muted); font-size: 15px; }
+
+/* Controls */
+#controls { position: fixed; right: 20px; top: 50%; transform: translateY(-50%); display: flex; flex-direction: column; gap: 14px; z-index: 1000; }
+#layer-menu { position: fixed; right: 108px; top: 50%; transform: translateY(20px); display: grid; gap: 8px; padding: 8px; background: var(--panel); border: 1px solid var(--line); border-radius: var(--r); z-index: 1000; }
+#layer-menu .opt { height: 60px; padding: 0 28px; border: 0; border-radius: 12px; background: none; font-size: 20px; text-align: left; }
+#layer-menu .opt.on { background: var(--accent); }
+
+/* Route panel */
+#route-panel { position: fixed; left: 20px; top: 20px; bottom: 170px; width: 380px; z-index: 1001; background: var(--panel); border: 1px solid var(--line); border-radius: var(--r); display: flex; flex-direction: column; overflow: hidden; }
+.rp-head { display: flex; justify-content: space-between; gap: 12px; padding: 18px; border-bottom: 1px solid var(--line); }
+.rp-dest { font-size: 22px; font-weight: 600; }
+.rp-sum { color: var(--muted); font-size: 18px; margin-top: 6px; }
+.rp-next { padding: 18px; font-size: 24px; font-weight: 600; border-bottom: 1px solid var(--line); }
+#rp-steps { list-style: none; margin: 0; padding: 0; overflow-y: auto; flex: 1; }
+#rp-steps li { padding: 16px 18px; border-bottom: 1px solid var(--line); font-size: 18px; display: flex; justify-content: space-between; gap: 12px; }
+#rp-steps li span { color: var(--muted); white-space: nowrap; }
+body.routing #top { left: calc(50% + 200px); width: min(600px, calc(100% - 640px)); }
+
+/* Place sheet */
+#place { position: fixed; left: 50%; bottom: 30px; transform: translateX(-50%); width: min(760px, calc(100% - 340px)); display: flex; align-items: center; gap: 14px; padding: 16px; background: var(--panel); border: 1px solid var(--line); border-radius: var(--r); z-index: 1000; box-shadow: 0 6px 20px rgba(0,0,0,.35); }
+.pl-text { flex: 1; min-width: 0; }
+.pl-name { font-size: 24px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pl-addr { color: var(--muted); font-size: 17px; margin-top: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+#toast { position: fixed; top: 110px; left: 50%; transform: translateX(-50%); padding: 14px 22px; background: var(--panel); border: 1px solid var(--line); border-radius: 14px; font-size: 18px; z-index: 1100; }
+
+/* My-position marker */
+.me { width: 30px; height: 30px; border-radius: 50%; background: var(--accent); border: 4px solid #fff; box-shadow: 0 0 0 10px rgba(62,139,255,.25); }
+.pin { width: 26px; height: 26px; border-radius: 50% 50% 50% 0; background: var(--danger); border: 3px solid #fff; transform: rotate(-45deg); }
+
+/* Narrow screens (phones) */
+@media (max-width: 800px) {
+  :root { --hit: 60px; }
+  #top { width: calc(100% - 32px); top: 16px; }
+  #controls { right: 16px; top: auto; bottom: 120px; transform: none; }
+  #layer-menu { right: 90px; top: auto; bottom: 120px; transform: none; }
+  #hud { left: 16px; bottom: 16px; }
+  #speed { width: 90px; height: 90px; }
+  #speed-val { font-size: 32px; }
+  #place { width: calc(100% - 32px); bottom: 120px; }
+  #route-panel { left: 16px; right: 16px; width: auto; top: auto; bottom: 120px; height: 40vh; }
+  body.routing #top { left: 50%; width: calc(100% - 32px); }
+}
