@@ -367,8 +367,10 @@ export function Navigator(props: NavigatorProps) {
   );
 
   const nextStep = prog?.nextStepIndex != null && route ? route.route.steps[prog.nextStepIndex] : route?.route.steps[0];
-  const remainingS = navigating && prog ? prog.remainingS : (route?.route.durationS ?? 0);
-  const remainingM = navigating && prog ? prog.remainingM : (route?.route.distanceM ?? 0);
+  // Live progress only with a fresh fix; otherwise show the route totals.
+  const live = navigating && canGuide && prog;
+  const remainingS = live ? prog.remainingS : (route?.route.durationS ?? 0);
+  const remainingM = live ? prog.remainingM : (route?.route.distanceM ?? 0);
   const eta = new Date(now + remainingS * 1000);
   const demoNotice = config.notice;
 

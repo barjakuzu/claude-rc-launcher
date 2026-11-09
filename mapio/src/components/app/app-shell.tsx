@@ -32,10 +32,10 @@ export async function AppShell({ children }: { children: React.ReactNode }) {
         <Link href="/app" className="glass !rounded-full px-5 py-2.5" aria-label="MAPIO dashboard">
           <Logo />
         </Link>
-        <Link href="/app/map" className="glass hidden min-h-12 flex-1 items-center gap-3 !rounded-full px-5 text-muted md:flex">
-          <Search className="h-5 w-5" aria-hidden /> {t["search.placeholder"]}
+        <Link href="/app/map" className="glass hidden min-h-12 min-w-0 flex-1 items-center gap-3 !rounded-full px-5 text-muted lg:flex">
+          <Search className="h-5 w-5 shrink-0" aria-hidden /> <span className="truncate">{t["search.placeholder"]}</span>
         </Link>
-        <div className="ml-auto flex items-center gap-2 md:ml-0">
+        <div className="ml-auto flex shrink-0 items-center gap-2 lg:ml-0">
           {ctx.entitlement.hasAccess && <TopChips flags={ctx.flags} units={ctx.units} currency={ctx.profile.currency} />}
           <Link href="/app/inbox" className="glass relative grid h-12 w-12 place-items-center !rounded-full" aria-label={`${t["nav.inbox"]}${unread ? ` (${unread})` : ""}`}>
             <Bell className="h-5 w-5" aria-hidden />

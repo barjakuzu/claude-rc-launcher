@@ -31,7 +31,7 @@ export function TopChips({ flags, units, currency }: { flags: { weather: boolean
   const rate = fx?.fx.rates.find((r) => r.code === target);
 
   return (
-    <div className="hidden items-center gap-2 sm:flex">
+    <div className="hidden items-center gap-2 whitespace-nowrap md:flex">
       {w && (
         <span className="glass flex min-h-12 items-center gap-2 !rounded-full px-4 font-semibold" title={`${w.meta.attribution}${w.meta.mode === "demo" ? " — demo data" : ""}`}>
           <CloudSun className="h-6 w-6 text-[#ffd36b]" aria-hidden /> {formatTemp(w.weather.tempC, units.temperature)}
