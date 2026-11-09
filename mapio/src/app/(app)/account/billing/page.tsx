@@ -1,13 +1,26 @@
 import type { Metadata } from "next";
-import { CalendarClock, CreditCard, Receipt, RefreshCw, ShieldCheck } from "lucide-react";
+import { CalendarClock, CreditCard, Receipt, RefreshCw, Wallet } from "lucide-react";
 import { getAppContext } from "@/lib/app-context";
-import { Card, PageTitle, StatusPill } from "@/components/app/card";
+import { PageTitle, StatusPill } from "@/components/app/card";
+import { GlassPanel } from "@/components/ui/glass";
 import { AwaitEntitlement, CancelControls, CheckoutButton, PortalButton } from "@/components/billing/billing-controls";
 import { formatDate, formatMoney } from "@/lib/format";
 import { sp, type SearchParams } from "@/lib/page";
 import { LogoMark } from "@/components/ui/logo";
 
-export const metadata: Metadata = { title: "Billing" };
+export const metadata: Metadata = { title: "Your Subscription" };
+
+function Fact({ icon: I, label, value, note, wide }: { icon: typeof Receipt; label: string; value: string; note?: string; wide?: boolean }) {
+  return (
+    <div className={`min-w-0 rounded-2xl border border-line bg-white/[0.035] px-3.5 py-3 ${wide ? "col-span-2" : ""}`}>
+      <dt className="flex items-center gap-1.5 text-xs text-muted">
+        <I className="h-3.5 w-3.5 shrink-0" aria-hidden /> {label}
+      </dt>
+      <dd className="mt-1 font-semibold leading-snug">{value}</dd>
+      {note && <dd className="mt-0.5 text-xs leading-snug text-faint">{note}</dd>}
+    </div>
+  );
+}
 
 export default async function BillingPage({ searchParams }: { searchParams: SearchParams }) {
   const ctx = await getAppContext();
@@ -17,103 +30,109 @@ export default async function BillingPage({ searchParams }: { searchParams: Sear
   const price = billing.displayPrice;
   const statusLabel = t[`plan.${entitlement.status}` as keyof typeof t] ?? entitlement.status;
   const waiting = sp(q.checkout) === "complete" && !entitlement.hasAccess;
-  const amount = sub?.unit_price_amount != null && sub.currency_code ? formatMoney(Number(sub.unit_price_amount), sub.currency_code) : null;
+  const amount =
+    sub?.unit_price_amount != null && sub.currency_code
+      ? formatMoney(Number(sub.unit_price_amount), sub.currency_code)
+      : formatMoney(price.amountMinor, price.currency);
+  const live = !!sub && ["trialing", "active", "past_due", "scheduled_cancel"].includes(entitlement.status);
+  const canSubscribe = (!sub || !entitlement.hasAccess) && entitlement.status !== "past_due" && !waiting;
 
   return (
-    <>
-      <PageTitle title={t["nav.billing"]} sub="Your MAPIO Premium subscription, managed securely by Paddle." />
+    <div className="grid max-w-3xl grid-cols-[minmax(0,1fr)] gap-4">
+      <PageTitle title="Your Subscription" sub="MAPIO Premium, billed securely by Paddle." />
+
       {billing.mode === "demo" && (
-        <p className="mb-5 rounded-2xl border border-warn/50 bg-warn/10 px-4 py-3 text-sm text-warn">
-          Development billing simulator — Paddle is not configured. No real payments are taken; states are driven by signed
-          simulated webhooks.
+        <p className="rounded-2xl border border-warn/40 bg-warn/10 px-4 py-2.5 text-sm text-warn">
+          <b>Development simulator.</b> Paddle isn&apos;t configured, so no real payments are taken.
         </p>
       )}
       {billing.environment === "sandbox" && billing.mode === "live" && (
-        <p className="mb-5 rounded-2xl border border-warn/50 bg-warn/10 px-4 py-3 text-sm text-warn">Paddle sandbox — use Paddle test cards only.</p>
+        <p className="rounded-2xl border border-warn/40 bg-warn/10 px-4 py-2.5 text-sm text-warn">Paddle sandbox: use Paddle test cards only.</p>
       )}
-      {waiting && <div className="mb-5"><AwaitEntitlement /></div>}
-      {sp(q.checkout) === "activated" && <p className="mb-5 rounded-2xl border border-ok/40 bg-ok/10 px-4 py-3 text-sm text-ok">Your subscription is active. Enjoy MAPIO!</p>}
+      {waiting && <AwaitEntitlement />}
+      {sp(q.checkout) === "activated" && (
+        <p className="rounded-2xl border border-ok/40 bg-ok/10 px-4 py-2.5 text-sm text-ok">Your subscription is active. Enjoy MAPIO!</p>
+      )}
 
-      <div className="grid gap-5 xl:grid-cols-[1.4fr_1fr]">
-        <Card>
-          <div className="flex flex-wrap items-center gap-4">
-            <span className="grid h-16 w-16 place-items-center rounded-2xl border border-line-strong bg-gradient-to-br from-[#163a73] to-[#071a3a]">
-              <LogoMark size={38} />
-            </span>
-            <div className="flex-1">
-              <h2 className="text-xl font-bold">MAPIO Premium</h2>
-              <p className="text-muted">{amount ? `${amount} / month` : `${formatMoney(price.amountMinor, price.currency)} / month`}</p>
+      <GlassPanel as="section" tier="elevated" accent={live} className="rise-2 !rounded-[26px] p-5 sm:p-6" aria-label="Plan">
+        <div className="flex items-center gap-4">
+          <span className="grid h-14 w-14 shrink-0 place-items-center rounded-[18px] border border-line-strong bg-gradient-to-br from-[#1d4c8f] to-[#081a3a] shadow-[inset_0_1px_0_rgba(255,255,255,0.2)]">
+            <LogoMark size={32} />
+          </span>
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+              <h2 className="text-xl font-semibold tracking-tight">MAPIO Premium</h2>
+              <StatusPill status={entitlement.status} label={statusLabel} />
             </div>
-            <StatusPill status={entitlement.status} label={statusLabel} />
+            <p className="text-muted">{amount} / month</p>
           </div>
+        </div>
 
-          {sub ? (
-            <dl className="mt-6 grid gap-3 text-[15px]">
-              {sub.trial_end && entitlement.status !== "canceled" && (
-                <Row icon={CalendarClock} k="Trial ends" v={formatDate(sub.trial_end)} />
-              )}
-              {entitlement.status === "scheduled_cancel" ? (
-                <Row icon={CalendarClock} k="Access until" v={formatDate(entitlement.accessUntil)} note="No further charges." />
-              ) : sub.next_billed_at && entitlement.status !== "canceled" ? (
-                <Row icon={RefreshCw} k="Next charge" v={`${formatDate(sub.next_billed_at)}${amount ? ` · ${amount}` : ""}`} note="Plus any applicable taxes, as shown by Paddle." />
-              ) : null}
-              {sub.current_period_end && entitlement.status === "active" && <Row icon={Receipt} k="Current period ends" v={formatDate(sub.current_period_end)} />}
-              {entitlement.status === "past_due" && (
-                <Row icon={CreditCard} k="Payment" v="Last renewal failed" note={`Access continues until ${formatDate(entitlement.accessUntil)} while payment is retried.`} />
-              )}
-              {sub.canceled_at && entitlement.status === "canceled" && <Row icon={CalendarClock} k="Ended" v={formatDate(sub.canceled_at)} />}
-              <Row icon={ShieldCheck} k="Payment method" v="Stored securely by Paddle" />
-            </dl>
-          ) : (
-            <p className="mt-6 text-muted">You don&apos;t have a subscription yet.</p>
-          )}
-
-          <div className="mt-6 flex flex-wrap gap-3">
-            {(!sub || entitlement.status === "canceled" || entitlement.status === "paused" || !entitlement.hasAccess) && entitlement.status !== "past_due" && !waiting && (
-              <CheckoutButton label={billing.trialEligible ? `Start ${billing.trialDays}-day free trial` : "Subscribe"} />
+        {sub ? (
+          <dl className="mt-5 grid grid-cols-2 gap-2.5">
+            {entitlement.status === "trialing" && sub.trial_end && <Fact icon={CalendarClock} label="Trial ends" value={formatDate(sub.trial_end)} />}
+            {entitlement.status === "scheduled_cancel" && (
+              <Fact icon={CalendarClock} label="Access until" value={formatDate(entitlement.accessUntil)} note="No further charges" />
             )}
-            {sub && <PortalButton label={entitlement.status === "past_due" ? "Update payment method" : "Payment method & invoices"} />}
-          </div>
-          {sub && ["trialing", "active", "past_due", "scheduled_cancel"].includes(entitlement.status) && (
-            <div className="mt-4">
-              <CancelControls scheduled={entitlement.status === "scheduled_cancel"} accessUntilLabel={formatDate(sub.trial_end && entitlement.status === "trialing" ? sub.trial_end : sub.current_period_end)} />
+            {entitlement.status === "past_due" && (
+              <Fact icon={CreditCard} label="Payment" value="Renewal failed" note={`Access until ${formatDate(entitlement.accessUntil)}`} />
+            )}
+            {entitlement.status === "canceled" && sub.canceled_at && <Fact icon={CalendarClock} label="Ended" value={formatDate(sub.canceled_at)} />}
+            {sub.next_billed_at && !["canceled", "scheduled_cancel"].includes(entitlement.status) && (
+              <Fact icon={RefreshCw} label="Next billing" value={formatDate(sub.next_billed_at)} note={`${amount} plus any tax`} />
+            )}
+            {entitlement.status === "active" && sub.current_period_end && <Fact icon={Receipt} label="Period ends" value={formatDate(sub.current_period_end)} />}
+            <Fact icon={Wallet} label="Payment method" value="Held securely by Paddle" note="MAPIO never stores card details" wide />
+          </dl>
+        ) : (
+          <p className="mt-5 text-muted">
+            You don&apos;t have a subscription yet.{" "}
+            {billing.trialEligible ? `Start with ${billing.trialDays} days free, then ${amount}/month.` : `Subscribe for ${amount}/month.`}
+          </p>
+        )}
+
+        <div className="mt-5 grid gap-2.5 sm:grid-cols-2">
+          {canSubscribe && (
+            <div className="sm:col-span-2">
+              <CheckoutButton label={billing.trialEligible ? `Start ${billing.trialDays}-day free trial` : "Subscribe"} className="w-full !min-h-[3.25rem] !text-base" />
             </div>
           )}
-        </Card>
+          {sub && (
+            <PortalButton
+              variant={entitlement.status === "past_due" ? "primary" : "ghost"}
+              label={entitlement.status === "past_due" ? "Update payment method" : "Manage subscription"}
+              className="sm:col-span-2"
+            />
+          )}
+          {sub && entitlement.status !== "past_due" && (
+            <>
+              <PortalButton label="Billing history" icon={<Receipt className="h-4 w-4" aria-hidden />} />
+              <PortalButton label="Change payment method" icon={<CreditCard className="h-4 w-4" aria-hidden />} />
+            </>
+          )}
+          {live && (
+            <div className="sm:col-span-2">
+              <CancelControls
+                scheduled={entitlement.status === "scheduled_cancel"}
+                accessUntilLabel={formatDate(sub!.trial_end && entitlement.status === "trialing" ? sub!.trial_end : sub!.current_period_end)}
+              />
+            </div>
+          )}
+        </div>
+      </GlassPanel>
 
-        <Card title="How billing works">
-          <ul className="grid gap-3 text-sm text-muted">
-            <li>
-              <b className="text-text">Trial:</b> {billing.trialDays} days free with a payment method. You&apos;re charged when the trial ends unless you cancel before then.
-            </li>
-            <li>
-              <b className="text-text">Renewal:</b> monthly at the price shown at checkout until you cancel.
-            </li>
-            <li>
-              <b className="text-text">Cancel anytime:</b> cancellation applies at the end of your trial or billing period; you keep access until then and can undo it.
-            </li>
-            <li>
-              <b className="text-text">Invoices &amp; payment method:</b> managed in the Paddle customer portal. MAPIO never stores card details.
-            </li>
-            <li>
-              <b className="text-text">One trial per customer.</b>
-            </li>
-          </ul>
-        </Card>
-      </div>
-    </>
-  );
-}
-
-function Row({ icon: I, k, v, note }: { icon: typeof Receipt; k: string; v: string; note?: string }) {
-  return (
-    <div className="flex items-start gap-3">
-      <I className="mt-0.5 h-5 w-5 text-muted" aria-hidden />
-      <dt className="text-muted">{k}</dt>
-      <dd className="ml-auto text-right">
-        {v}
-        {note && <span className="block text-xs text-faint">{note}</span>}
-      </dd>
+      <details className="glass group !rounded-[22px] px-5 py-4 [&_summary::-webkit-details-marker]:hidden">
+        <summary className="flex cursor-pointer list-none items-center justify-between font-semibold">
+          How billing works
+          <span aria-hidden className="text-xl text-accent-2 transition-transform group-open:rotate-45">+</span>
+        </summary>
+        <ul className="mt-3 grid gap-2 text-sm text-muted">
+          <li><b className="text-text">Trial:</b> {billing.trialDays} days free with a payment method; charged when the trial ends unless you cancel.</li>
+          <li><b className="text-text">Renewal:</b> monthly at the price shown at checkout, until you cancel.</li>
+          <li><b className="text-text">Cancel anytime:</b> takes effect at the end of the trial or billing period; you keep access until then and can undo it.</li>
+          <li><b className="text-text">Invoices and payment method:</b> in the Paddle customer portal. One free trial per customer.</li>
+        </ul>
+      </details>
     </div>
   );
 }

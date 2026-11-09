@@ -6,8 +6,8 @@ test.describe("public marketing pages", () => {
     await expect(page.getByRole("heading", { level: 1 })).toContainText("3D navigation for your");
     await expect(page.getByRole("link", { name: /Start 7-day free trial/ }).first()).toBeVisible();
     await expect(page.getByText("Cancel anytime").first()).toBeVisible();
-    for (const f of ["3D Maps", "Send to Car", "Chargers", "Weather & Currency", "Saved Places", "Subscription Management"]) {
-      await expect(page.getByRole("heading", { name: f })).toBeVisible();
+    for (const f of ["3D Navigation", "Send to Car", "Charging Stations", "Weather & Currency", "Saved Places", "Subscription Management"]) {
+      await expect(page.getByRole("heading", { name: f, exact: true })).toBeVisible();
     }
     await expect(page.getByRole("heading", { name: "MAPIO Premium" })).toBeVisible();
     await expect(page.getByText("not affiliated with Tesla").first()).toBeVisible();

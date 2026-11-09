@@ -1,4 +1,5 @@
 import type { Metadata, Viewport } from "next";
+import "@fontsource-variable/inter";
 import "./globals.css";
 
 const APP_URL = process.env.APP_URL ?? "http://localhost:3000";
@@ -19,9 +20,10 @@ export const metadata: Metadata = {
 };
 
 export const viewport: Viewport = {
-  themeColor: "#040a17",
+  themeColor: "#050b1a",
   width: "device-width",
   initialScale: 1,
+  viewportFit: "cover", // enables env(safe-area-inset-*) on iOS
 };
 
 // Applies theme + performance mode before first paint (keeps pages statically renderable).
@@ -45,7 +47,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       <head>
         <script dangerouslySetInnerHTML={{ __html: bootScript }} />
       </head>
-      <body className="min-h-dvh antialiased">{children}</body>
+      <body className="min-h-dvh antialiased [font-feature-settings:'cv11','ss01']">{children}</body>
     </html>
   );
 }

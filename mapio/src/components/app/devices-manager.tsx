@@ -83,7 +83,7 @@ export function PairThisBrowser({ alreadyPaired }: { alreadyPaired: boolean }) {
             : "Open this page in your car's browser, then scan the QR code with your phone while signed in to the same MAPIO account."}
         </p>
         {status === "idle" || status === "expired" || status === "error" ? (
-          <div className="mt-4 flex flex-wrap items-end gap-2">
+          <div className="mt-4 flex flex-col gap-2 sm:flex-row sm:items-end">
             <label className="grid flex-1 gap-1 text-sm font-medium">
               Device name
               <input className="field" value={name} maxLength={60} onChange={(e) => setName(e.target.value)} />
@@ -127,8 +127,11 @@ export function DeviceList({ devices, currentId }: { devices: Device[]; currentI
         const online = !revoked && d.online;
         const I = d.device_type === "phone" ? Smartphone : Car;
         return (
-          <li key={d.id} className={`flex flex-wrap items-center gap-3 rounded-2xl border border-line p-4 ${revoked ? "opacity-60" : ""}`}>
-            <I className="h-6 w-6 text-accent-2" aria-hidden />
+          <li key={d.id} className={`flex flex-wrap items-center gap-3 rounded-[20px] border border-line bg-white/[0.03] p-3.5 ${revoked ? "opacity-60" : ""}`}>
+            <span className="relative grid h-11 w-11 shrink-0 place-items-center rounded-2xl bg-gradient-to-br from-[#8ccfff] to-[#3a7bff] text-white">
+              <I className="h-5 w-5" aria-hidden />
+              {online && <span className="absolute -right-0.5 -top-0.5 h-3 w-3 rounded-full border-2 border-[#0c1a33] bg-ok" aria-label="online" />}
+            </span>
             <div className="min-w-0 flex-1">
               {editing === d.id ? (
                 <form

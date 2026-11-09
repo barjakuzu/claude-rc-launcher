@@ -34,6 +34,8 @@ interface Props {
   onUserPan?: () => void;
   onChargerClick?: (id: string) => void;
   onUnavailable?: (reason: string) => void;
+  /** true while style/tile requests keep failing (provider down or key rejected); false once tiles load again. */
+  onProviderError?: (down: boolean) => void;
   className?: string;
   ariaLabel?: string;
 }
@@ -87,18 +89,30 @@ function addOverlays(map: MlMap) {
   if (!map.getSource(ROUTE_SRC)) {
     map.addSource(ROUTE_SRC, { type: "geojson", data: { type: "FeatureCollection", features: [] } });
     map.addLayer({
+      id: "mapio-route-glow",
+      type: "line",
+      source: ROUTE_SRC,
+      layout: { "line-cap": "round", "line-join": "round" },
+      paint: {
+        "line-color": "#4aa8ff",
+        "line-opacity": 0.45,
+        "line-blur": 8,
+        "line-width": ["interpolate", ["linear"], ["zoom"], 10, 14, 18, 44],
+      },
+    });
+    map.addLayer({
       id: "mapio-route-casing",
       type: "line",
       source: ROUTE_SRC,
       layout: { "line-cap": "round", "line-join": "round" },
-      paint: { "line-color": "#0a3d91", "line-width": ["interpolate", ["linear"], ["zoom"], 10, 7, 18, 26] },
+      paint: { "line-color": "#0b4fc4", "line-width": ["interpolate", ["linear"], ["zoom"], 10, 8, 18, 30] },
     });
     map.addLayer({
       id: "mapio-route-line",
       type: "line",
       source: ROUTE_SRC,
       layout: { "line-cap": "round", "line-join": "round" },
-      paint: { "line-color": "#2f8cff", "line-width": ["interpolate", ["linear"], ["zoom"], 10, 4.5, 18, 17] },
+      paint: { "line-color": "#2f8cff", "line-width": ["interpolate", ["linear"], ["zoom"], 10, 5.5, 18, 21] },
     });
   }
   if (!map.getSource(CHG_SRC)) {
@@ -165,9 +179,17 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(props, 
         interactive: props.interactive !== false,
       });
       mapRef.current = map;
+      let failures = 0;
       map.on("error", (e) => {
-        // tile/network errors are non-fatal; log for diagnostics
+        // tile/network errors are non-fatal; surface a banner if they keep happening
         console.warn("[map]", e.error?.message ?? e);
+        if (++failures >= 3) cbs.current.onProviderError?.(true);
+      });
+      map.on("data", (e) => {
+        if (failures && (e as { dataType?: string }).dataType === "source" && map.areTilesLoaded()) {
+          failures = 0;
+          cbs.current.onProviderError?.(false);
+        }
       });
       map.on("style.load", () => {
         ensureBuildings(map, theme);

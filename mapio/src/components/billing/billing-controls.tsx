@@ -3,6 +3,7 @@
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { ExternalLink, Loader2, RotateCcw } from "lucide-react";
+import { Modal } from "@/components/ui/overlay";
 
 async function post<T>(url: string): Promise<T> {
   const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
@@ -62,13 +63,24 @@ export function CheckoutButton({ label, className = "" }: { label: string; class
   );
 }
 
-export function PortalButton({ label = "Manage payment & invoices" }: { label?: string }) {
+/** Opens the Paddle customer portal (payment method, invoices, cancellation) via a server-created session. */
+export function PortalButton({
+  label = "Manage subscription",
+  variant = "ghost",
+  icon,
+  className = "",
+}: {
+  label?: string;
+  variant?: "primary" | "ghost";
+  icon?: React.ReactNode;
+  className?: string;
+}) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   return (
-    <div className="grid gap-1">
+    <div className={`grid gap-1 ${className}`}>
       <button
-        className="btn btn-ghost"
+        className={`btn btn-${variant} w-full`}
         disabled={busy}
         onClick={async () => {
           setBusy(true);
@@ -82,13 +94,14 @@ export function PortalButton({ label = "Manage payment & invoices" }: { label?: 
           }
         }}
       >
-        {busy ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : <ExternalLink className="h-4 w-4" aria-hidden />} {label}
+        {busy ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : (icon ?? <ExternalLink className="h-4 w-4" aria-hidden />)} {label}
       </button>
       {err && <p role="alert" className="text-sm text-bad">{err}</p>}
     </div>
   );
 }
 
+/** Cancel at period end (confirmation modal) or undo a scheduled cancellation. */
 export function CancelControls({ scheduled, accessUntilLabel }: { scheduled: boolean; accessUntilLabel: string }) {
   const router = useRouter();
   const [confirming, setConfirming] = useState(false);
@@ -112,34 +125,40 @@ export function CancelControls({ scheduled, accessUntilLabel }: { scheduled: boo
   if (scheduled) {
     return (
       <div className="grid gap-1">
-        <button className="btn btn-ghost" disabled={busy} onClick={() => run("/api/billing/undo-cancel")}>
+        <button className="btn btn-primary w-full" disabled={busy} onClick={() => run("/api/billing/undo-cancel")}>
           {busy ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : <RotateCcw className="h-4 w-4" aria-hidden />} Keep my subscription
         </button>
         {err && <p role="alert" className="text-sm text-bad">{err}</p>}
       </div>
     );
   }
-  if (!confirming) {
-    return (
-      <button className="btn btn-danger" onClick={() => setConfirming(true)}>
+  return (
+    <>
+      <button className="btn btn-danger w-full" onClick={() => setConfirming(true)}>
         Cancel subscription
       </button>
-    );
-  }
-  return (
-    <div role="alertdialog" aria-labelledby="cancel-title" className="rounded-2xl border border-bad/40 bg-bad/10 p-4">
-      <p id="cancel-title" className="font-semibold">Cancel MAPIO Premium?</p>
-      <p className="mt-1 text-sm text-muted">
-        You keep access until <b className="text-text">{accessUntilLabel}</b>. You won&apos;t be charged again, and you can undo this before then.
-      </p>
-      <div className="mt-3 flex flex-wrap gap-2">
-        <button className="btn btn-danger" disabled={busy} onClick={() => run("/api/billing/cancel")}>
-          {busy && <Loader2 className="h-4 w-4 animate-spin" aria-hidden />} Yes, cancel at period end
-        </button>
-        <button className="btn btn-ghost" onClick={() => setConfirming(false)}>Keep subscription</button>
-      </div>
-      {err && <p role="alert" className="mt-2 text-sm text-bad">{err}</p>}
-    </div>
+      <Modal
+        open={confirming}
+        onClose={() => setConfirming(false)}
+        title="Cancel MAPIO Premium?"
+        footer={
+          <>
+            <button className="btn btn-ghost" onClick={() => setConfirming(false)}>
+              Keep subscription
+            </button>
+            <button className="btn btn-danger" disabled={busy} onClick={() => run("/api/billing/cancel")}>
+              {busy && <Loader2 className="h-4 w-4 animate-spin" aria-hidden />} Yes, cancel at period end
+            </button>
+          </>
+        }
+      >
+        <p>
+          You keep access until <b className="text-text">{accessUntilLabel}</b>. You won&apos;t be charged again, and you can undo
+          this any time before then.
+        </p>
+        {err && <p role="alert" className="mt-3 text-sm text-bad">{err}</p>}
+      </Modal>
+    </>
   );
 }
 

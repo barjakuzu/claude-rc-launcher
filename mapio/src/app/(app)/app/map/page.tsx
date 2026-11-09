@@ -13,7 +13,8 @@ export default async function MapPage({ searchParams }: { searchParams: SearchPa
   const q = await searchParams;
   const data = await getMapPageData(ctx.user.id);
   return (
-    <div className="h-[calc(100dvh-10rem)] min-h-[520px] lg:h-[calc(100dvh-7.5rem)]">
+    // Phones: full-bleed map between the header and the dock. Desktop: fills the workspace.
+    <div className="-mx-4 -mt-2 h-[calc(100dvh-5.5rem-var(--dock-h)-2rem-env(safe-area-inset-top)-env(safe-area-inset-bottom))] min-h-[420px] sm:mx-0 sm:mt-0 lg:h-[calc(100dvh-7.5rem-env(safe-area-inset-top))] lg:min-h-[560px]">
       <Navigator
         variant="app"
         config={data.mapConfig}
@@ -25,6 +26,7 @@ export default async function MapPage({ searchParams }: { searchParams: SearchPa
         flags={ctx.flags}
         initialDestination={parseDestination(q)}
         initialChargers={sp(q.chargers) === "1"}
+        focusSearch={sp(q.focus) === "search"}
       />
     </div>
   );

@@ -86,25 +86,25 @@ export function fixtureStyle(theme: "dark" | "light"): StyleSpecification {
       river: { type: "geojson", data: { type: "FeatureCollection", features: [cache.river] } },
     },
     layers: [
-      { id: "bg", type: "background", paint: { "background-color": dark ? "#0d1626" : "#e9eef5" } },
+      { id: "bg", type: "background", paint: { "background-color": dark ? "#0d1626" : "#cfdcec" } },
       {
         id: "river",
         type: "line",
         source: "river",
-        paint: { "line-color": dark ? "#123456" : "#a9c8ee", "line-width": ["interpolate", ["linear"], ["zoom"], 12, 6, 17, 40] },
+        paint: { "line-color": dark ? "#123456" : "#9fc0e8", "line-width": ["interpolate", ["linear"], ["zoom"], 12, 6, 17, 40] },
       },
       {
         id: "roads-casing",
         type: "line",
         source: "roads",
-        paint: { "line-color": dark ? "#0a1120" : "#cfd8e3", "line-width": ["interpolate", ["linear"], ["zoom"], 12, 2, 17, 18] },
+        paint: { "line-color": dark ? "#0a1120" : "#b9cbe0", "line-width": ["interpolate", ["linear"], ["zoom"], 12, 2, 17, 18] },
       },
       {
         id: "roads",
         type: "line",
         source: "roads",
         paint: {
-          "line-color": dark ? ["case", ["get", "major"], "#3a4b66", "#26344a"] : ["case", ["get", "major"], "#ffffff", "#f6f8fb"],
+          "line-color": dark ? ["case", ["get", "major"], "#3a4b66", "#26344a"] : ["case", ["get", "major"], "#f4f8fd", "#e4edf7"],
           "line-width": ["interpolate", ["linear"], ["zoom"], 12, ["case", ["get", "major"], 1.6, 0.8], 17, ["case", ["get", "major"], 14, 9]],
         },
       },
@@ -114,7 +114,7 @@ export function fixtureStyle(theme: "dark" | "light"): StyleSpecification {
         source: "buildings",
         minzoom: 13,
         paint: {
-          "fill-extrusion-color": dark ? "#c9d6e8" : "#f4f6fa",
+          "fill-extrusion-color": dark ? "#c9d6e8" : "#fbfcfe",
           "fill-extrusion-height": ["get", "height"],
           "fill-extrusion-base": 0,
           "fill-extrusion-opacity": 0.92,

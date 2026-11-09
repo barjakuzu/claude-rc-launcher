@@ -1,8 +1,9 @@
 import Link from "next/link";
 import { Bell, Navigation, Search } from "lucide-react";
 import { Logo } from "@/components/ui/logo";
-import { NavLinks, type NavItem } from "./nav-links";
+import { BottomNavigation, NavLinks, type NavItem } from "./nav-links";
 import { TopChips } from "./top-chips";
+import { SearchShortcut } from "./search-shortcut";
 import { signOutAction } from "@/app/(auth)/actions";
 import { getAppContext, getUnread } from "@/lib/app-context";
 import { listDevices, withPresence } from "@/lib/repos/devices";
@@ -23,50 +24,67 @@ export async function AppShell({ children }: { children: React.ReactNode }) {
     { href: "/account", label: t["nav.account"], icon: "UserRound" },
     ...(ctx.isAdmin ? [{ href: "/admin", label: t["nav.admin"], icon: "Shield" as const }] : []),
   ];
+  const dock = [items[0], items[1], items[4], items[5], items[7]];
   const initials = (ctx.profile.display_name || ctx.user.email).slice(0, 1).toUpperCase();
 
   return (
-    <div className="aurora min-h-dvh" lang={ctx.profile.locale}>
-      <a href="#main" className="sr-only focus:not-sr-only focus:fixed focus:left-4 focus:top-4 focus:z-50 btn btn-primary">Skip to content</a>
-      <header className="mx-auto flex max-w-[1600px] items-center gap-3 px-4 pt-4">
-        <Link href="/app" className="glass !rounded-full px-5 py-2.5" aria-label="MAPIO dashboard">
+    <div className="aurora min-h-dvh pt-[env(safe-area-inset-top)]" lang={ctx.profile.locale}>
+      <a href="#main" className="btn btn-primary sr-only focus:not-sr-only focus:fixed focus:left-4 focus:top-4 focus:z-50">
+        Skip to content
+      </a>
+      <SearchShortcut />
+      <header className="mx-auto flex max-w-[1680px] items-center gap-3 px-4 pt-4 sm:px-5">
+        <Link href="/app" className="glass flex h-14 items-center !rounded-full px-5" aria-label="MAPIO dashboard">
           <Logo />
         </Link>
-        <Link href="/app/map" className="glass hidden min-h-12 min-w-0 flex-1 items-center gap-3 !rounded-full px-5 text-muted lg:flex">
-          <Search className="h-5 w-5 shrink-0" aria-hidden /> <span className="truncate">{t["search.placeholder"]}</span>
+        <Link
+          href="/app/map?focus=search"
+          className="glass hidden h-14 min-w-0 flex-1 items-center gap-3 !rounded-full px-5 text-muted transition-colors hover:text-text lg:flex"
+        >
+          <Search className="h-5 w-5 shrink-0" aria-hidden />
+          <span className="truncate">{t["search.placeholder"]}</span>
+          <kbd className="ml-auto hidden rounded-lg border border-line px-2 py-0.5 font-sans text-xs text-faint xl:inline">⌘ K</kbd>
         </Link>
         <div className="ml-auto flex shrink-0 items-center gap-2 lg:ml-0">
           {ctx.entitlement.hasAccess && <TopChips flags={ctx.flags} units={ctx.units} currency={ctx.profile.currency} />}
-          <Link href="/app/inbox" className="glass relative grid h-12 w-12 place-items-center !rounded-full" aria-label={`${t["nav.inbox"]}${unread ? ` (${unread})` : ""}`}>
+          <Link
+            href="/app/inbox"
+            className="glass relative grid h-12 w-12 place-items-center !rounded-full"
+            aria-label={`${t["nav.inbox"]}${unread ? ` (${unread} new)` : ""}`}
+          >
             <Bell className="h-5 w-5" aria-hidden />
-            {unread > 0 && <span className="absolute right-2.5 top-2.5 h-2.5 w-2.5 rounded-full bg-accent-2" />}
+            {unread > 0 && <span className="absolute right-3 top-3 h-2.5 w-2.5 rounded-full bg-accent-2 shadow-[0_0_8px_var(--accent-2)]" />}
           </Link>
-          <Link href="/account" className="grid h-12 w-12 place-items-center rounded-full border-2 border-line-strong bg-gradient-to-br from-[#2a4a86] to-[#0e1f40] text-lg font-bold" aria-label={t["nav.account"]}>
+          <Link
+            href="/account"
+            className="grid h-12 w-12 place-items-center rounded-full border border-line-strong bg-gradient-to-br from-[#2d5aa6] to-[#0e1f40] text-lg font-semibold shadow-[inset_0_1px_0_rgba(255,255,255,0.2)]"
+            aria-label={t["nav.account"]}
+          >
             {initials}
           </Link>
         </div>
       </header>
 
-      <div className="mx-auto grid max-w-[1600px] gap-5 px-4 pb-28 pt-5 lg:grid-cols-[250px_1fr] lg:pb-8">
+      <div className="dock-clearance mx-auto grid max-w-[1680px] grid-cols-[minmax(0,1fr)] gap-5 px-4 pt-5 sm:px-5 lg:grid-cols-[228px_minmax(0,1fr)]">
         <aside className="hidden lg:block">
-          <nav aria-label="App" className="glass sticky top-5 p-3">
-            <NavLinks items={items} variant="side" />
-            <div className="mt-4 border-t border-line pt-4">
+          <nav aria-label="App" className="glass sticky top-5 !rounded-[26px] p-2.5">
+            <NavLinks items={items} />
+            <div className="mt-3 border-t border-line px-1 pt-3">
               <Link href="/drive" className="btn btn-primary w-full">
                 <Navigation className="h-5 w-5" aria-hidden /> {t["nav.drive"]}
               </Link>
-              <form action={signOutAction} className="mt-2">
-                <button className="w-full rounded-xl px-4 py-2 text-left text-sm text-muted hover:text-text">{t["nav.signout"]}</button>
+              <form action={signOutAction} className="mt-1">
+                <button className="w-full rounded-xl px-3 py-2 text-left text-sm text-muted transition-colors hover:text-text">{t["nav.signout"]}</button>
               </form>
             </div>
           </nav>
         </aside>
-        <main id="main" className="min-w-0">{children}</main>
+        <main id="main" className="min-w-0">
+          {children}
+        </main>
       </div>
 
-      <nav aria-label="App" className="glass-strong fixed inset-x-2 bottom-2 z-40 !rounded-2xl lg:hidden">
-        <NavLinks items={[items[0], items[1], items[4], items[5], items[7]]} variant="bottom" />
-      </nav>
+      <BottomNavigation items={dock} />
     </div>
   );
 }

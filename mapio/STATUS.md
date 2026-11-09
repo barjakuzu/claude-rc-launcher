@@ -1,6 +1,6 @@
 # MAPIO status
 
-_Last updated: 2026-11-09._
+_Last updated: 2026-11-09 (UI redesign)._
 
 ## Verified in this environment
 | Check | Result |
@@ -12,6 +12,14 @@ _Last updated: 2026-11-09._
 | `npm run test:e2e` | ✅ 19 tests on desktop, 1280×800 landscape, and phone (Pixel 7). Covers the full vertical slice, pairing + Send to Car + reconnect replay + revoke, API protection (401 / 402 / 403 / CSRF / open-redirect / webhook signature), and the no-GPS behaviour |
 
 E2E runs in **demo mode**: fixture map/search/routing, billing simulator, local auth, and PGlite.
+
+## UI redesign (premium glass)
+- Applied across the landing page, auth pages, dashboard, map and drive mode, billing, devices and inbox. See docs/design-system.md.
+- Visually checked with `scripts/visual-snapshots.mjs` at 1440×900, 1280×800, 1920×1200, 390×844 and 375×667:
+  - no horizontal overflow
+  - no phone touch targets under 40 px
+  - the mobile dock clears content and the iOS safe area
+- Not verified on a physical iPhone or Tesla screen. Real backdrop-blur performance on car hardware is unknown; "Reduce effects" exists for that.
 
 ## Implemented but NOT verified against real services
 These adapters follow the providers' documented request and response shapes, and their parsers are unit-tested against fixture payloads. This sandbox could not reach the providers, so none has run against a live service yet:

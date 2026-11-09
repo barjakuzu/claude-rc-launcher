@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { MapPin, Send } from "lucide-react";
+import { IconTile } from "@/components/ui/glass";
 import { getAppContext } from "@/lib/app-context";
 import { listAllInbox } from "@/lib/repos/inbox";
 import { Paywall } from "@/components/app/paywall";
@@ -35,10 +36,12 @@ export default async function InboxPage() {
             Nothing sent yet. <Link href="/app/devices" className="font-semibold text-accent-2 underline">Pair a car browser</Link>, then use “Send to Car” on any place.
           </p>
         ) : (
-          <ul className="divide-y divide-line">
+          <ul className="-mx-2 grid gap-1">
             {items.map((i) => (
-              <li key={i.id} className="flex flex-wrap items-center gap-3 py-3">
-                <MapPin className="h-5 w-5 text-accent-2" aria-hidden />
+              <li key={i.id} className={`flex flex-wrap items-center gap-3 rounded-2xl px-2 py-2.5 transition-colors hover:bg-white/[0.04] ${i.state === "dismissed" ? "opacity-60" : ""}`}>
+                <IconTile size="sm" tint={i.state === "sent" ? "from-[#ffd36b] to-[#f59e0b]" : "from-[#63e0ff] to-[#2f6bff]"}>
+                  <MapPin className="h-5 w-5" aria-hidden />
+                </IconTile>
                 <div className="min-w-0 flex-1">
                   <p className="truncate font-semibold">{i.name}</p>
                   <p className="text-sm text-muted">

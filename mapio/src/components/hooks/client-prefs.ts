@@ -29,6 +29,16 @@ export function setDomTheme(theme: "dark" | "light") {
   } catch {}
 }
 
+/** In-app "Reduce effects" switch: persists and applies data-perf=low immediately. */
+export function setLowPerfMode(on: boolean) {
+  const d = document.documentElement;
+  if (on) d.dataset.perf = "low";
+  else delete d.dataset.perf;
+  try {
+    localStorage.setItem("mapio_perf", on ? "low" : "auto");
+  } catch {}
+}
+
 export function useLowPerf(): boolean {
   return useSyncExternalStore(subscribeDom, () => document.documentElement.dataset.perf === "low", () => false);
 }

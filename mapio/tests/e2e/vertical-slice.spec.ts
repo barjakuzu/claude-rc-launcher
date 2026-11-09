@@ -28,7 +28,7 @@ test("full vertical slice", async ({ page, context }) => {
 
   await startTrial(page);
   await expect(page.getByText("Trial ends").first()).toBeVisible();
-  await expect(page.getByText(/Development billing simulator/)).toBeVisible();
+  await expect(page.getByText(/Development simulator/)).toBeVisible();
 
   // search → place → route
   await page.goto("/app/map");
@@ -81,7 +81,7 @@ test("without GPS: route starts from the previous map view and guidance waits fo
   await page.getByRole("option", { name: /Holy Trinity Cathedral/ }).click();
   await page.getByRole("button", { name: "Directions" }).click();
   const preview = page.getByRole("region", { name: "Route preview" });
-  await expect(preview).toContainText("From Map center");
+  await expect(preview).toContainText("Map center");
   await expect(preview).toContainText("km"); // a real distance, not a zero-length route
   await page.getByRole("button", { name: "Start" }).click();
   await expect(page.getByText("Waiting for GPS…")).toBeVisible();

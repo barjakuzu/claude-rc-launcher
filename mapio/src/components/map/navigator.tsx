@@ -35,11 +35,17 @@ import type { Charger, LngLat, Place, ProviderMeta, Route, Weather } from "@/lib
 import { distM, isOffRoute, prepareRoute, progress, type PreparedRoute } from "@/lib/nav";
 import { formatClock, formatDistance, formatDuration, formatTemp, relativeTime, type Units } from "@/lib/format";
 import type { DictKey } from "@/lib/i18n";
-import { setDomTheme, useDomTheme, useLocalJson, useLocalPref, useLowPerf, useNow } from "@/components/hooks/client-prefs";
+import { setDomTheme, setLowPerfMode, useDomTheme, useLocalJson, useLocalPref, useLowPerf, useNow } from "@/components/hooks/client-prefs";
 
 const MapView = dynamic(() => import("./map-view").then((m) => m.MapView), {
   ssr: false,
-  loading: () => <div className="absolute inset-0 grid place-items-center bg-bg-2 text-muted">Loading map…</div>,
+  loading: () => (
+    <div role="status" className="absolute inset-0 grid place-items-center bg-[radial-gradient(60%_60%_at_50%_45%,#10264a,#060f22)]">
+      <span className="glass-strong flex items-center gap-3 !rounded-full px-5 py-3 text-sm text-muted">
+        <Loader2 className="h-4 w-4 animate-spin text-accent-2" aria-hidden /> Loading map…
+      </span>
+    </div>
+  ),
 });
 
 export interface NavigatorProps {
@@ -53,6 +59,7 @@ export interface NavigatorProps {
   flags: { chargers: boolean; weather: boolean; send_to_car: boolean };
   initialDestination?: { name: string; address: string; lat: number; lon: number; inboxId?: string } | null;
   initialChargers?: boolean;
+  focusSearch?: boolean;
 }
 
 type Selected = { kind: "place"; place: Place } | { kind: "charger"; charger: Charger } | null;
@@ -86,6 +93,11 @@ export function Navigator(props: NavigatorProps) {
   const now = useNow(15_000);
   const [layersOpen, setLayersOpen] = useState(false);
   const [mapBroken, setMapBroken] = useState(false);
+  const [tilesDown, setTilesDown] = useState(false);
+  const searchInput = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (props.focusSearch) searchInput.current?.focus();
+  }, [props.focusSearch]);
 
   // search
   const [q, setQ] = useState("");
@@ -374,10 +386,10 @@ export function Navigator(props: NavigatorProps) {
   const eta = new Date(now + remainingS * 1000);
   const demoNotice = config.notice;
 
-  const toolbarBtn = "grid h-14 w-14 place-items-center rounded-2xl border border-line-strong bg-panel-strong text-text shadow-lg active:scale-95";
+  const panelOpen = !!selected || (!!route && !navigating) || (searchOpen && q.trim().length >= 2);
 
   return (
-    <div className={`relative h-full w-full overflow-hidden ${drive ? "" : "rounded-[var(--radius)] border border-line"}`}>
+    <div className={`relative h-full w-full overflow-hidden ${drive ? "" : "sm:rounded-[28px] sm:border sm:border-line sm:shadow-[var(--shadow)]"}`}>
       {!mapBroken && (
         <MapView
           ref={map}
@@ -396,9 +408,22 @@ export function Navigator(props: NavigatorProps) {
             if (c) setSelected({ kind: "charger", charger: c });
           }}
           onUnavailable={() => setMapBroken(true)}
+          onProviderError={setTilesDown}
         />
       )}
-      {mapBroken && <div className="absolute inset-0 bg-bg-2" />}
+      {mapBroken && (
+        <div role="status" className="absolute inset-0 grid place-items-center bg-[radial-gradient(60%_60%_at_50%_45%,#10264a,#060f22)] p-6 text-center">
+          <div className="glass-strong max-w-sm p-6">
+            <p className="font-semibold">The map can&apos;t be displayed in this browser</p>
+            <p className="mt-2 text-sm text-muted">Search, route preview and turn-by-turn steps still work. Try 2D mode or reduce effects in the layers menu.</p>
+          </div>
+        </div>
+      )}
+      {tilesDown && !mapBroken && (
+        <p role="status" className="chip absolute left-1/2 top-[5.5rem] z-30 -translate-x-1/2 !border-warn/50 bg-panel-strong text-warn sm:top-4">
+          Map provider unavailable. Retrying…
+        </p>
+      )}
 
       {/* top-left: back (drive) + search OR turn card */}
       <div className="absolute left-4 top-4 z-20 flex w-[min(460px,calc(100%-2rem))] flex-col gap-3 sm:w-[min(460px,calc(100%-16rem))]">
@@ -425,21 +450,21 @@ export function Navigator(props: NavigatorProps) {
             </div>
           </section>
         ) : guiding && nextStep ? (
-          <section aria-live="polite" className="rounded-3xl bg-gradient-to-b from-[#2f8cff] to-[#1366ea] p-4 text-white shadow-[0_14px_40px_-10px_rgba(40,130,255,0.9)]">
-            <div className="flex items-center gap-3">
+          <section aria-live="polite" className="rounded-[26px] border border-white/25 bg-gradient-to-b from-[#3d93ff] to-[#1260e6] p-4 text-white shadow-[0_18px_40px_-12px_rgba(30,110,255,0.9),inset_0_1px_0_rgba(255,255,255,0.35)] sm:p-5">
+            <div className="flex items-center gap-4">
               <ManeuverIcon maneuver={nextStep.maneuver} className="h-12 w-12 shrink-0" strokeWidth={2.75} />
-              <div>
-                <div className="text-4xl font-bold leading-none">
+              <div className="min-w-0">
+                <div className="text-4xl font-semibold leading-none tracking-tight">
                   {prog?.distanceToNextM != null ? formatDistance(prog.distanceToNextM, units.distance) : "—"}
                 </div>
-                <div className="mt-1 text-lg font-semibold leading-tight">{nextStep.instruction || "Continue"}</div>
+                <div className="mt-1.5 text-lg font-medium leading-snug">{nextStep.instruction || "Continue"}</div>
               </div>
             </div>
             {geo.stale && <p className="mt-2 rounded-xl bg-black/25 px-3 py-1.5 text-sm">{t["gps.stale"]}</p>}
           </section>
         ) : (
           <div className="relative">
-            <div className="glass-strong flex items-center gap-2 !rounded-2xl px-2 focus-within:ring-2 focus-within:ring-accent-2">
+            <div className="glass-strong flex items-center gap-2 !rounded-[20px] px-2 transition-shadow focus-within:shadow-[0_0_0_2px_var(--accent-2),var(--shadow-sm)]">
               {drive && (
                 <Link href="/app" aria-label="Back to dashboard" className="grid h-12 w-12 place-items-center rounded-xl text-muted hover:text-text">
                   <ArrowLeft className="h-6 w-6" />
@@ -447,6 +472,7 @@ export function Navigator(props: NavigatorProps) {
               )}
               <Search className={`h-6 w-6 shrink-0 text-muted ${drive ? "" : "ml-2"}`} aria-hidden />
               <input
+                ref={searchInput}
                 value={q}
                 onChange={(e) => {
                   setQ(e.target.value);
@@ -455,7 +481,7 @@ export function Navigator(props: NavigatorProps) {
                 onFocus={() => setSearchOpen(true)}
                 placeholder={t["search.placeholder"]}
                 aria-label={t["search.placeholder"]}
-                className="h-14 min-w-0 flex-1 bg-transparent text-lg text-text outline-none placeholder:text-faint focus-visible:outline-none"
+                className="h-14 min-w-0 flex-1 bg-transparent text-[17px] text-text outline-none placeholder:text-faint focus-visible:outline-none"
                 enterKeyHint="search"
                 autoComplete="off"
               />
@@ -467,7 +493,7 @@ export function Navigator(props: NavigatorProps) {
               )}
             </div>
             {searchOpen && (q.trim().length >= 2 || recentSearches.length > 0) && (
-              <div className="glass-strong mt-2 max-h-[60vh] overflow-y-auto !rounded-2xl p-2" role="listbox" aria-label="Search results">
+              <div className="glass-strong rise mt-2 max-h-[55vh] overflow-y-auto !rounded-[20px] p-2" role="listbox" aria-label="Search results">
                 {q.trim().length < 2 && <p className="px-3 pb-1 pt-2 text-xs font-semibold uppercase tracking-wide text-faint">{t["search.recent"]}</p>}
                 {(q.trim().length >= 2 ? results : recentSearches).map((p) => (
                   <button
@@ -475,15 +501,20 @@ export function Navigator(props: NavigatorProps) {
                     role="option"
                     aria-selected={false}
                     onClick={() => choosePlace(p)}
-                    className="flex w-full items-center gap-3 rounded-xl px-3 py-3 text-left hover:bg-white/5"
+                    className="flex w-full items-center gap-3 rounded-2xl px-3 py-3 text-left transition-colors hover:bg-white/[0.06]"
                   >
-                    <MapPin className="h-5 w-5 shrink-0 text-accent-2" aria-hidden />
+                    <span className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-accent/15 text-accent-2">
+                      <MapPin className="h-5 w-5" aria-hidden />
+                    </span>
                     <span className="min-w-0">
                       <span className="block truncate text-[17px] font-semibold">{p.name}</span>
                       <span className="block truncate text-sm text-muted">{p.address}</span>
                     </span>
                   </button>
                 ))}
+                {q.trim().length >= 2 && searching && results.length === 0 && (
+                  <p className="flex items-center gap-2 px-3 py-3 text-muted"><Loader2 className="h-4 w-4 animate-spin" aria-hidden /> Searching…</p>
+                )}
                 {q.trim().length >= 2 && !searching && results.length === 0 && <p className="px-3 py-3 text-muted">{t["search.none"]}</p>}
                 {searchMeta && q.trim().length >= 2 && (
                   <p className="px-3 pb-1 pt-2 text-[11px] text-faint">
@@ -498,20 +529,31 @@ export function Navigator(props: NavigatorProps) {
 
         {/* route preview card */}
         {route && !navigating && (
-          <section className="glass-strong !rounded-2xl p-4" aria-label={t["route.preview"]}>
+          <section className="glass-strong rise !rounded-[24px] p-4 sm:p-5" aria-label={t["route.preview"]}>
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0">
-                <p className="text-sm text-muted">{t["route.preview"]}</p>
-                <h2 className="truncate text-xl font-bold">{route.dest.name}</h2>
-                <p className="mt-1 text-lg">
-                  <b>{formatDuration(route.route.durationS)}</b>
-                  <span className="text-muted"> · {formatDistance(route.route.distanceM, units.distance)} · {t["route.from"]} {route.originLabel}</span>
-                </p>
+                <p className="eyebrow">{t["route.preview"]}</p>
+                <h2 className="mt-1 truncate text-xl font-semibold tracking-tight">{route.dest.name}</h2>
+                {route.dest.address && <p className="truncate text-sm text-muted">{route.dest.address}</p>}
               </div>
-              <button onClick={endRoute} aria-label={t["route.end"]} className="grid h-11 w-11 shrink-0 place-items-center rounded-xl border border-line-strong">
+              <button onClick={endRoute} aria-label={t["route.end"]} className="ctl !h-10 !w-10 shrink-0 !rounded-xl">
                 <X className="h-5 w-5" />
               </button>
             </div>
+            <dl className="mt-4 grid grid-cols-3 gap-2 text-center">
+              <div className="rounded-2xl bg-white/[0.05] px-2 py-2.5">
+                <dt className="text-[11px] uppercase tracking-wide text-faint">Time</dt>
+                <dd className="text-lg font-semibold">{formatDuration(route.route.durationS)}</dd>
+              </div>
+              <div className="rounded-2xl bg-white/[0.05] px-2 py-2.5">
+                <dt className="text-[11px] uppercase tracking-wide text-faint">Distance</dt>
+                <dd className="text-lg font-semibold">{formatDistance(route.route.distanceM, units.distance)}</dd>
+              </div>
+              <div className="rounded-2xl bg-white/[0.05] px-2 py-2.5">
+                <dt className="text-[11px] uppercase tracking-wide text-faint">{t["route.from"]}</dt>
+                <dd className="truncate pt-1 text-sm font-semibold">{route.originLabel}</dd>
+              </div>
+            </dl>
             {route.meta.notice && (
               <p className={`mt-3 rounded-xl px-3 py-2 text-sm ${route.meta.mode === "demo" ? "border border-warn/50 bg-warn/10 text-warn" : "bg-white/5 text-muted"}`}>
                 {route.meta.notice}
@@ -519,7 +561,7 @@ export function Navigator(props: NavigatorProps) {
             )}
             {!canGuide && <p className="mt-3 rounded-xl bg-white/5 px-3 py-2 text-sm text-muted">{t["route.noGps"]}</p>}
             <div className="mt-3 flex gap-2">
-              <button onClick={startGuidance} className="btn btn-primary flex-1 !min-h-14 text-lg">
+              <button onClick={startGuidance} className="btn btn-primary flex-1 !min-h-[3.25rem] text-[17px]">
                 <Navigation2 className="h-5 w-5" aria-hidden /> {t["route.start"]}
               </button>
             </div>
@@ -542,7 +584,7 @@ export function Navigator(props: NavigatorProps) {
         )}
 
         {error && (
-          <p role="alert" className="flex items-start gap-2 rounded-2xl border border-bad/50 bg-[#2a0f14]/90 px-4 py-3 text-sm text-[#ffd0d0]">
+          <p role="alert" className="flex items-start gap-2 rounded-[18px] border border-bad/50 bg-[#2a0f14]/92 px-4 py-3 text-sm text-[#ffd0d0] shadow-[var(--shadow-sm)]">
             <span className="flex-1">{error}</span>
             <button aria-label="Dismiss error" onClick={() => setError(null)}>
               <X className="h-4 w-4" />
@@ -552,14 +594,14 @@ export function Navigator(props: NavigatorProps) {
       </div>
 
       {/* top-right chips */}
-      <div className="absolute right-4 top-24 z-20 flex items-center gap-2 sm:top-4">
+      <div className={`absolute right-4 top-[5.25rem] z-20 items-center gap-2 sm:top-4 sm:flex ${panelOpen || navigating ? "hidden" : "flex"}`}>
         {!inbox.online && (
-          <span className="chip border-warn/50 bg-[#2a2108]/90 text-warn">
+          <span className="glass-strong inline-flex items-center gap-1.5 whitespace-nowrap !rounded-full px-3 py-1.5 text-sm font-semibold sm:px-3.5 sm:py-2 sm:text-[15px] !border-warn/50 text-warn">
             <WifiOff className="h-4 w-4" aria-hidden /> Offline
           </span>
         )}
         {weather && !navigating && (
-          <span className="chip hidden bg-panel-strong text-base sm:inline-flex" title={`${weather.meta.attribution} · observed ${relativeTime(weather.weather.observedAt)}`}>
+          <span className="glass-strong inline-flex items-center gap-1.5 whitespace-nowrap !rounded-full px-3 py-1.5 text-sm font-semibold sm:px-3.5 sm:py-2 sm:text-[15px]" title={`${weather.meta.attribution} · observed ${relativeTime(weather.weather.observedAt)}`}>
             <CloudSun className="h-5 w-5 text-[#ffd36b]" aria-hidden />
             {formatTemp(weather.weather.tempC, units.temperature)}
             {weather.meta.mode === "demo" && <span className="text-[10px] font-bold uppercase text-warn">demo</span>}
@@ -567,7 +609,7 @@ export function Navigator(props: NavigatorProps) {
           </span>
         )}
         {inbox.paired && (
-          <button onClick={() => setInboxOpen((v) => !v)} className="chip relative bg-panel-strong text-base" aria-label={t["inbox.title"]}>
+          <button onClick={() => setInboxOpen((v) => !v)} className="glass-strong inline-flex items-center gap-1.5 whitespace-nowrap !rounded-full px-3 py-1.5 text-sm font-semibold sm:px-3.5 sm:py-2 sm:text-[15px] relative" aria-label={t["inbox.title"]}>
             <Inbox className="h-5 w-5" aria-hidden />
             {inbox.items.filter((i) => i.state === "received" || i.state === "sent").length > 0 && (
               <span className="grid h-6 min-w-6 place-items-center rounded-full bg-accent px-1.5 text-xs font-bold text-white">
@@ -579,9 +621,13 @@ export function Navigator(props: NavigatorProps) {
       </div>
 
       {/* right toolbar (single, compact) */}
-      <div className={`absolute right-4 top-1/2 z-20 -translate-y-1/2 flex-col gap-3 ${(route && !navigating) || selected || (searchOpen && q.trim().length >= 2) ? "hidden sm:flex" : "flex"}`} role="toolbar" aria-label="Map controls">
+      <div
+        className={`glass-strong absolute right-3 top-1/2 z-20 -translate-y-1/2 flex-col gap-1.5 !rounded-[22px] p-1.5 sm:right-4 ${panelOpen ? "hidden sm:flex" : "flex"}`}
+        role="toolbar"
+        aria-label="Map controls"
+      >
         <button
-          className={toolbarBtn}
+          className="ctl !border-transparent !bg-transparent !shadow-none hover:!bg-white/[0.08]"
           aria-label={is3D ? t["map.2d"] : t["map.3d"]}
           title={is3D ? "Switch to 2D" : "Switch to 3D"}
           onClick={() => {
@@ -594,7 +640,7 @@ export function Navigator(props: NavigatorProps) {
           <span className="sr-only">{is3D ? "2D" : "3D"}</span>
         </button>
         <button
-          className={`${toolbarBtn} ${follow ? "!bg-accent !text-white" : ""}`}
+          className={`ctl !border-transparent !shadow-none ${follow ? "" : "!bg-transparent hover:!bg-white/[0.08]"}`}
           aria-label={t["map.recenter"]}
           aria-pressed={follow}
           onClick={() => {
@@ -605,11 +651,16 @@ export function Navigator(props: NavigatorProps) {
         >
           <LocateFixed className="h-6 w-6" aria-hidden />
         </button>
-        <button className={toolbarBtn} aria-label={t["map.layers"]} aria-expanded={layersOpen} onClick={() => setLayersOpen((v) => !v)}>
+        <button
+          className={`ctl !border-transparent !shadow-none ${layersOpen ? "!bg-white/[0.12]" : "!bg-transparent hover:!bg-white/[0.08]"}`}
+          aria-label={t["map.layers"]}
+          aria-expanded={layersOpen}
+          onClick={() => setLayersOpen((v) => !v)}
+        >
           <Layers3 className="h-6 w-6" aria-hidden />
         </button>
         <button
-          className={toolbarBtn}
+          className="ctl !border-transparent !bg-transparent !shadow-none hover:!bg-white/[0.08]"
           aria-label={muted ? t["map.unmute"] : t["map.mute"]}
           onClick={() => {
             const m = !muted;
@@ -622,22 +673,35 @@ export function Navigator(props: NavigatorProps) {
       </div>
 
       {layersOpen && (
-        <div className="glass-strong absolute right-[5.5rem] top-1/2 z-30 w-64 -translate-y-1/2 !rounded-2xl p-3">
-          <p className="px-2 pb-2 text-sm font-semibold text-muted">{t["map.layers"]}</p>
+        <div className="glass-strong rise absolute right-[5rem] top-1/2 z-30 w-[min(17rem,calc(100%-6rem))] -translate-y-1/2 !rounded-[22px] p-3 sm:right-[5.5rem]">
+          <p className="eyebrow px-2 pb-2">{t["map.layers"]}</p>
           <div className="grid grid-cols-2 gap-2">
             {(["dark", "light"] as const).map((th) => (
               <button
                 key={th}
                 onClick={() => setDomTheme(th)}
-                className={`rounded-xl border px-3 py-3 text-sm font-semibold capitalize ${theme === th ? "border-accent bg-accent/20" : "border-line"}`}
+                aria-pressed={theme === th}
+                className={`rounded-xl border px-3 py-3 text-sm font-semibold capitalize transition-colors ${theme === th ? "border-accent bg-accent/20" : "border-line hover:bg-white/[0.05]"}`}
               >
                 {th}
               </button>
             ))}
           </div>
+          <label className="mt-3 flex items-center justify-between gap-3 rounded-xl px-2 py-2 text-[15px]">
+            <span>
+              Reduce effects
+              <span className="block text-xs text-faint">For slower car computers</span>
+            </span>
+            <input
+              type="checkbox"
+              className="h-6 w-6 shrink-0 accent-[var(--accent)]"
+              checked={lowPerf}
+              onChange={(e) => setLowPerfMode(e.target.checked)}
+            />
+          </label>
           {props.flags.chargers && (
             <>
-              <label className="mt-3 flex items-center justify-between rounded-xl px-2 py-2 text-[15px]">
+              <label className="mt-1 flex items-center justify-between rounded-xl px-2 py-2 text-[15px]">
                 <span className="flex items-center gap-2">
                   <Zap className="h-5 w-5 text-[#9b8cff]" aria-hidden /> Chargers
                 </span>
@@ -672,35 +736,42 @@ export function Navigator(props: NavigatorProps) {
       {/* bottom: place sheet / charger sheet / navigation bar */}
       <div className="absolute inset-x-4 bottom-4 z-20 flex justify-center">
         {guiding && route ? (
-          <section className="glass-strong flex w-full max-w-[820px] items-center gap-4 !rounded-3xl px-5 py-3" aria-label="Trip progress">
-            <Car className="h-8 w-8 text-accent-2" aria-hidden />
-            <div className="flex-1">
-              <div className="text-2xl font-bold">{formatDuration(remainingS)}</div>
-              <div className="text-muted">
-                {formatDistance(remainingM, units.distance)} · {formatClock(eta, units.time, locale)}
+          <section className="glass-strong rise flex w-full max-w-[820px] items-center gap-3 !rounded-[26px] px-4 py-3 sm:gap-4 sm:px-5" aria-label="Trip progress">
+            <span className="hidden h-12 w-12 shrink-0 place-items-center rounded-2xl bg-accent/15 text-accent-2 sm:grid">
+              <Car className="h-6 w-6" aria-hidden />
+            </span>
+            <div className="min-w-0 flex-1">
+              <div className="text-2xl font-semibold tracking-tight">{formatDuration(remainingS)}</div>
+              <div className="truncate text-sm text-muted sm:text-base">
+                {formatDistance(remainingM, units.distance)} · arrive {formatClock(eta, units.time, locale)}
               </div>
             </div>
-            <button onClick={endRoute} className="btn btn-danger !min-h-14 px-6 text-lg">
+            <button onClick={() => setNavigating(false)} className="btn btn-ghost !min-h-12 !px-4">
+              Pause
+            </button>
+            <button onClick={endRoute} className="btn btn-danger !min-h-12 !px-4 sm:!px-6">
               {t["route.end"]}
             </button>
           </section>
         ) : selected?.kind === "place" ? (
-          <section className="glass-strong w-full max-w-[820px] !rounded-3xl p-4" aria-label="Selected place">
+          <section className="glass-strong rise w-full max-w-[820px] !rounded-[24px] p-4 sm:p-5" aria-label="Selected place">
             <div className="flex items-start gap-3">
-              <MapPin className="mt-1 h-7 w-7 shrink-0 text-bad" aria-hidden />
+              <span className="grid h-11 w-11 shrink-0 place-items-center rounded-2xl bg-gradient-to-b from-[#ff6b6b] to-[#e5484d] text-white shadow-[0_8px_20px_-8px_rgba(229,72,77,0.8)]">
+                <MapPin className="h-5 w-5" aria-hidden />
+              </span>
               <div className="min-w-0 flex-1">
-                <h2 className="truncate text-xl font-bold">{selected.place.name}</h2>
+                <h2 className="truncate text-xl font-semibold tracking-tight">{selected.place.name}</h2>
                 <p className="truncate text-muted">{selected.place.address}</p>
               </div>
-              <button aria-label={t["common.close"]} onClick={() => { setSelected(null); map.current?.setDestination(null); }} className="grid h-11 w-11 place-items-center rounded-xl border border-line-strong">
+              <button aria-label={t["common.close"]} onClick={() => { setSelected(null); map.current?.setDestination(null); }} className="ctl !h-10 !w-10 shrink-0 !rounded-xl">
                 <X className="h-5 w-5" />
               </button>
             </div>
             <div className="mt-4 flex flex-wrap gap-2">
-              <button onClick={() => requestRoute(selected.place)} disabled={routing} className="btn btn-primary !min-h-14 flex-1 text-lg">
+              <button onClick={() => requestRoute(selected.place)} disabled={routing} className="btn btn-primary !min-h-[3.25rem] flex-1 text-[17px]">
                 {routing ? <Loader2 className="h-5 w-5 animate-spin" aria-hidden /> : <Navigation2 className="h-5 w-5" aria-hidden />} {t["route.directions"]}
               </button>
-              <button onClick={() => savePlace(selected.place)} className="btn btn-ghost !min-h-14">
+              <button onClick={() => savePlace(selected.place)} className="btn btn-ghost !min-h-[3.25rem]">
                 <Star className="h-5 w-5" aria-hidden /> {t["place.save"]}
               </button>
               {props.flags.send_to_car && props.devices.filter((d) => d.id !== inbox.deviceId).length > 0 && (
@@ -786,13 +857,13 @@ export function Navigator(props: NavigatorProps) {
         {demoNotice && !navigating && !selected && <p className="chip bg-panel-strong text-xs text-muted">{demoNotice}</p>}
       </div>
       {(geo.status === "idle" || geo.status === "prompt") && !navigating && !selected && !route && (
-        <button onClick={geo.start} className="btn btn-ghost absolute bottom-4 right-4 z-20 !min-h-12 bg-panel-strong">
+        <button onClick={geo.start} className="btn btn-ghost glass-strong absolute bottom-4 right-4 z-20 !min-h-12">
           <LocateFixed className="h-5 w-5" aria-hidden /> Use my location
         </button>
       )}
 
       {toast && (
-        <div role="status" className="absolute bottom-28 left-1/2 z-40 -translate-x-1/2 rounded-full bg-[#0b1830]/95 px-5 py-3 text-white shadow-lg">
+        <div role="status" className="glass-strong rise absolute bottom-28 left-1/2 z-40 -translate-x-1/2 !rounded-full px-5 py-3 text-[15px] font-medium">
           {toast}
         </div>
       )}

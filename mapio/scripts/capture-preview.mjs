@@ -8,6 +8,7 @@ const ctx = await browser.newContext({ viewport: { width: 1600, height: 1000 }, 
 await ctx.grantPermissions(["geolocation"], { origin: BASE });
 // Origin and destination sit on intersections of the synthetic fixture grid so the demo route follows streets.
 await ctx.setGeolocation({ latitude: 41.6934, longitude: 44.8015 });
+await ctx.addInitScript((theme) => { try { localStorage.setItem("mapio_theme", theme); } catch {} }, process.env.PREVIEW_THEME ?? "light");
 const page = await ctx.newPage();
 const email = `preview-${Date.now()}@mapio.test`;
 await page.goto(`${BASE}/signup`);
