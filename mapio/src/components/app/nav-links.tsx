@@ -5,7 +5,7 @@ import { usePathname } from "next/navigation";
 import { Car, CreditCard, Inbox, LayoutGrid, Navigation, Shield, Star, UserRound, Zap } from "lucide-react";
 
 const ICONS = { LayoutGrid, Navigation, Zap, Star, Car, Inbox, CreditCard, UserRound, Shield } as const;
-export type NavItem = { href: string; label: string; icon: keyof typeof ICONS; badge?: number; dot?: boolean };
+export type NavItem = { href: string; label: string; short?: string; icon: keyof typeof ICONS; badge?: number; dot?: boolean };
 
 export function NavLinks({ items, variant }: { items: NavItem[]; variant: "side" | "bottom" }) {
   const path = usePathname();
@@ -26,7 +26,7 @@ export function NavLinks({ items, variant }: { items: NavItem[]; variant: "side"
                   <I className="h-6 w-6" aria-hidden />
                   {!!it.badge && <span className="absolute -right-2 -top-1 grid h-4 min-w-4 place-items-center rounded-full bg-accent px-1 text-[10px] text-white">{it.badge}</span>}
                 </span>
-                {it.label}
+                {it.short ?? it.label}
               </Link>
             </li>
           );

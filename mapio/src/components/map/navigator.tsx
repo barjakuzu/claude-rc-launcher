@@ -437,7 +437,7 @@ export function Navigator(props: NavigatorProps) {
           </section>
         ) : (
           <div className="relative">
-            <div className="glass-strong flex items-center gap-2 !rounded-2xl px-2">
+            <div className="glass-strong flex items-center gap-2 !rounded-2xl px-2 focus-within:ring-2 focus-within:ring-accent-2">
               {drive && (
                 <Link href="/app" aria-label="Back to dashboard" className="grid h-12 w-12 place-items-center rounded-xl text-muted hover:text-text">
                   <ArrowLeft className="h-6 w-6" />
@@ -453,7 +453,7 @@ export function Navigator(props: NavigatorProps) {
                 onFocus={() => setSearchOpen(true)}
                 placeholder={t["search.placeholder"]}
                 aria-label={t["search.placeholder"]}
-                className="h-14 min-w-0 flex-1 bg-transparent text-lg text-text outline-none placeholder:text-faint"
+                className="h-14 min-w-0 flex-1 bg-transparent text-lg text-text outline-none placeholder:text-faint focus-visible:outline-none"
                 enterKeyHint="search"
                 autoComplete="off"
               />
@@ -557,7 +557,7 @@ export function Navigator(props: NavigatorProps) {
           </span>
         )}
         {weather && !navigating && (
-          <span className="chip bg-panel-strong text-base" title={`${weather.meta.attribution} · observed ${relativeTime(weather.weather.observedAt)}`}>
+          <span className="chip hidden bg-panel-strong text-base sm:inline-flex" title={`${weather.meta.attribution} · observed ${relativeTime(weather.weather.observedAt)}`}>
             <CloudSun className="h-5 w-5 text-[#ffd36b]" aria-hidden />
             {formatTemp(weather.weather.tempC, units.temperature)}
             {weather.meta.mode === "demo" && <span className="text-[10px] font-bold uppercase text-warn">demo</span>}
@@ -577,7 +577,7 @@ export function Navigator(props: NavigatorProps) {
       </div>
 
       {/* right toolbar (single, compact) */}
-      <div className="absolute right-4 top-1/2 z-20 flex -translate-y-1/2 flex-col gap-3" role="toolbar" aria-label="Map controls">
+      <div className={`absolute right-4 top-1/2 z-20 -translate-y-1/2 flex-col gap-3 ${(route && !navigating) || selected || (searchOpen && q.trim().length >= 2) ? "hidden sm:flex" : "flex"}`} role="toolbar" aria-label="Map controls">
         <button
           className={toolbarBtn}
           aria-label={is3D ? t["map.2d"] : t["map.3d"]}

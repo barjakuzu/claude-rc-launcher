@@ -18,7 +18,7 @@ export async function AppShell({ children }: { children: React.ReactNode }) {
     { href: "/app/chargers", label: t["nav.chargers"], icon: "Zap" },
     { href: "/app/saved", label: t["nav.saved"], icon: "Star" },
     { href: "/app/devices", label: t["nav.devices"], icon: "Car", dot: connected },
-    { href: "/app/inbox", label: t["nav.inbox"], icon: "Inbox", badge: unread || undefined },
+    { href: "/app/inbox", label: t["nav.inbox"], short: "Inbox", icon: "Inbox", badge: unread || undefined },
     { href: "/account/billing", label: t["nav.billing"], icon: "CreditCard" },
     { href: "/account", label: t["nav.account"], icon: "UserRound" },
     ...(ctx.isAdmin ? [{ href: "/admin", label: t["nav.admin"], icon: "Shield" as const }] : []),
