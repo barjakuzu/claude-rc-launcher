@@ -173,3 +173,11 @@ export function revokeDevice(userId: string, id: string) {
     tx.query(`update public.paired_devices set revoked_at = now() where id = $1 and revoked_at is null returning id`, [id]),
   );
 }
+
+/** Marks devices seen in the last 10 minutes as online (presence is approximate). */
+export function withPresence<T extends { last_seen_at: string | null; revoked_at: string | null }>(devices: T[], now = Date.now()) {
+  return devices.map((d) => ({
+    ...d,
+    online: !d.revoked_at && !!d.last_seen_at && now - new Date(d.last_seen_at).getTime() < 10 * 60_000,
+  }));
+}

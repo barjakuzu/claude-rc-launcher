@@ -1,26 +1,223 @@
 @import "tailwindcss";
 
+/* ── MAPIO design tokens ─────────────────────────────────────────────────────
+   Dark midnight glass (default) + clean light mode. Glass/blur is reserved for
+   the shell and marketing; map text and driving guidance stay high-contrast. */
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --bg: #040a17;
+  --bg-2: #071228;
+  --panel: rgba(14, 28, 54, 0.62);
+  --panel-strong: rgba(10, 22, 44, 0.86);
+  --panel-solid: #0c1a33;
+  --line: rgba(126, 178, 255, 0.16);
+  --line-strong: rgba(126, 178, 255, 0.32);
+  --text: #f4f8ff;
+  --muted: #9db0cc;
+  --faint: #6c809f;
+  --accent: #1f7bff;
+  --accent-2: #38c6ff;
+  --accent-ink: #ffffff;
+  --glow: rgba(56, 160, 255, 0.45);
+  --ok: #34d399;
+  --warn: #fbbf24;
+  --bad: #f87171;
+  --radius: 22px;
+  --radius-sm: 14px;
+  --shadow: 0 18px 50px rgba(0, 6, 20, 0.55);
+  --blur: 18px;
+  color-scheme: dark;
+}
+[data-theme="light"] {
+  --bg: #eef3fa;
+  --bg-2: #e3ebf6;
+  --panel: rgba(255, 255, 255, 0.72);
+  --panel-strong: rgba(255, 255, 255, 0.92);
+  --panel-solid: #ffffff;
+  --line: rgba(20, 60, 120, 0.12);
+  --line-strong: rgba(20, 60, 120, 0.24);
+  --text: #0b1830;
+  --muted: #4b5d78;
+  --faint: #73839b;
+  --accent: #0f6bf0;
+  --accent-2: #0aa5e0;
+  --glow: rgba(15, 107, 240, 0.25);
+  --shadow: 0 14px 40px rgba(20, 40, 80, 0.14);
+  color-scheme: light;
+}
+/* Constrained devices / reduced motion: no blur, no animation. */
+[data-perf="low"] {
+  --blur: 0px;
 }
 
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --color-bg: var(--bg);
+  --color-bg-2: var(--bg-2);
+  --color-panel: var(--panel);
+  --color-panel-strong: var(--panel-strong);
+  --color-panel-solid: var(--panel-solid);
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+  --color-text: var(--text);
+  --color-muted: var(--muted);
+  --color-faint: var(--faint);
+  --color-accent: var(--accent);
+  --color-accent-2: var(--accent-2);
+  --color-ok: var(--ok);
+  --color-warn: var(--warn);
+  --color-bad: var(--bad);
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans Georgian", "Helvetica Neue", Arial, sans-serif;
+  --radius-glass: var(--radius);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+html,
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+body {
+  min-height: 100dvh;
+}
+
+/* Aurora backdrop for marketing + account shell (never behind the live map). */
+.aurora {
+  background:
+    radial-gradient(60% 50% at 18% 0%, rgba(32, 210, 200, 0.18), transparent 60%),
+    radial-gradient(50% 40% at 70% 5%, rgba(40, 120, 255, 0.22), transparent 60%),
+    radial-gradient(70% 60% at 50% 110%, rgba(30, 90, 220, 0.18), transparent 60%),
+    linear-gradient(180deg, var(--bg) 0%, var(--bg-2) 100%);
+}
+[data-theme="light"] .aurora {
+  background:
+    radial-gradient(60% 50% at 18% 0%, rgba(32, 190, 200, 0.14), transparent 60%),
+    radial-gradient(50% 40% at 70% 5%, rgba(40, 120, 255, 0.12), transparent 60%),
+    linear-gradient(180deg, var(--bg) 0%, var(--bg-2) 100%);
+}
+
+@layer components {
+  .glass {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+    backdrop-filter: blur(var(--blur)) saturate(140%);
+    -webkit-backdrop-filter: blur(var(--blur)) saturate(140%);
+  }
+  .glass-strong {
+    background: var(--panel-strong);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+  }
+  .glow-edge {
+    box-shadow: var(--shadow), 0 0 0 1px var(--line-strong), 0 0 40px -8px var(--glow);
+  }
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    min-height: 48px;
+    padding: 0 1.25rem;
+    border-radius: 999px;
+    font-weight: 600;
+    transition:
+      transform 0.12s ease,
+      background-color 0.15s ease,
+      box-shadow 0.15s ease;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .btn:active {
+    transform: scale(0.98);
+  }
+  .btn-primary {
+    background: linear-gradient(180deg, #3b8cff 0%, var(--accent) 100%);
+    color: var(--accent-ink);
+    box-shadow: 0 8px 24px -6px var(--glow), inset 0 1px 0 rgba(255, 255, 255, 0.25);
+  }
+  .btn-primary:hover {
+    box-shadow: 0 10px 30px -4px var(--glow), inset 0 1px 0 rgba(255, 255, 255, 0.3);
+  }
+  .btn-ghost {
+    background: var(--panel);
+    border: 1px solid var(--line-strong);
+    color: var(--text);
+  }
+  .btn-ghost:hover {
+    background: var(--panel-strong);
+  }
+  .btn-danger {
+    background: transparent;
+    border: 1px solid color-mix(in srgb, var(--bad) 55%, transparent);
+    color: var(--bad);
+  }
+  .btn[disabled] {
+    opacity: 0.55;
+    pointer-events: none;
+  }
+  .field {
+    width: 100%;
+    min-height: 48px;
+    padding: 0 1rem;
+    border-radius: var(--radius-sm);
+    background: color-mix(in srgb, var(--panel-solid) 70%, transparent);
+    border: 1px solid var(--line-strong);
+    color: var(--text);
+    outline: none;
+  }
+  .field:focus {
+    border-color: var(--accent-2);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent-2) 30%, transparent);
+  }
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.3rem 0.75rem;
+    border-radius: 999px;
+    font-size: 0.8rem;
+    font-weight: 600;
+    border: 1px solid var(--line);
+    background: var(--panel);
+  }
+  .text-gradient {
+    background: linear-gradient(90deg, #39d0ff, #2f86ff 70%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
   }
 }
 
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+/* Visible keyboard focus everywhere */
+:focus-visible {
+  outline: 3px solid var(--accent-2);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* MapLibre controls restyled to match */
+.maplibregl-ctrl-attrib {
+  background: rgba(4, 10, 23, 0.6) !important;
+  color: #c6d4ea !important;
+  font-size: 11px;
+}
+.maplibregl-ctrl-attrib a {
+  color: #e2ebf8 !important;
+}
+[data-theme="light"] .maplibregl-ctrl-attrib {
+  background: rgba(255, 255, 255, 0.75) !important;
+  color: #334 !important;
+}
+[data-theme="light"] .maplibregl-ctrl-attrib a {
+  color: #123 !important;
 }

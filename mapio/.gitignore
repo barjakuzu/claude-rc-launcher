@@ -40,8 +40,10 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 !.env.example
+!.env.e2e
 
 # local dev database (PGlite) and test output
 /.data/
 /test-results/
 /playwright-report/
+/public/vendor/

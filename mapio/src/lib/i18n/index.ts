@@ -1,0 +1,123 @@
+/**
+ * Lightweight i18n (en, ka). Marketing long-form copy is English-first; product UI
+ * strings are translated. Add a locale by adding a dictionary with the same keys.
+ * Georgian strings should be reviewed by a native speaker before launch.
+ */
+export const LOCALES = ["en", "ka"] as const;
+export type Locale = (typeof LOCALES)[number];
+
+const en = {
+  "nav.dashboard": "Dashboard",
+  "nav.map": "Map",
+  "nav.drive": "Drive mode",
+  "nav.chargers": "Chargers",
+  "nav.saved": "Saved places",
+  "nav.devices": "Devices",
+  "nav.inbox": "Send to Car inbox",
+  "nav.account": "Account",
+  "nav.billing": "Billing",
+  "nav.admin": "Admin",
+  "nav.signout": "Sign out",
+  "search.placeholder": "Search destinations, places, or addresses",
+  "search.none": "No results",
+  "search.recent": "Recent",
+  "route.directions": "Directions",
+  "route.start": "Start",
+  "route.end": "End route",
+  "route.preview": "Route preview",
+  "route.noGps": "Live location unavailable — showing route preview only.",
+  "route.from": "From",
+  "route.myLocation": "My location",
+  "route.mapCenter": "Map center",
+  "place.save": "Save",
+  "place.sendToCar": "Send to Car",
+  "map.recenter": "Recenter",
+  "map.layers": "Map style",
+  "map.2d": "2D",
+  "map.3d": "3D",
+  "map.mute": "Mute voice",
+  "map.unmute": "Unmute voice",
+  "gps.denied": "Location permission denied. Search or tap the map to choose a starting point.",
+  "gps.stale": "GPS signal is stale",
+  "gps.unavailable": "Location unavailable",
+  "inbox.title": "Sent to this browser",
+  "inbox.empty": "Nothing here yet. Send a destination from your phone.",
+  "inbox.navigate": "Navigate",
+  "inbox.dismiss": "Dismiss",
+  "common.save": "Save",
+  "common.cancel": "Cancel",
+  "common.delete": "Delete",
+  "common.close": "Close",
+  "common.loading": "Loading…",
+  "common.demo": "Demo data",
+  "plan.trialing": "Free trial",
+  "plan.active": "Active",
+  "plan.past_due": "Payment issue",
+  "plan.paused": "Paused",
+  "plan.canceled": "Canceled",
+  "plan.scheduled_cancel": "Cancels at period end",
+  "plan.none": "No plan",
+};
+export type DictKey = keyof typeof en;
+
+const ka: Record<DictKey, string> = {
+  "nav.dashboard": "მთავარი",
+  "nav.map": "რუკა",
+  "nav.drive": "მართვის რეჟიმი",
+  "nav.chargers": "დამტენები",
+  "nav.saved": "შენახული ადგილები",
+  "nav.devices": "მოწყობილობები",
+  "nav.inbox": "მანქანაში გაგზავნილი",
+  "nav.account": "ანგარიში",
+  "nav.billing": "გადახდები",
+  "nav.admin": "ადმინი",
+  "nav.signout": "გასვლა",
+  "search.placeholder": "მოძებნე ადგილი ან მისამართი",
+  "search.none": "შედეგი არ მოიძებნა",
+  "search.recent": "ბოლოს ნანახი",
+  "route.directions": "მარშრუტი",
+  "route.start": "დაწყება",
+  "route.end": "მარშრუტის დასრულება",
+  "route.preview": "მარშრუტის გადახედვა",
+  "route.noGps": "მდებარეობა მიუწვდომელია — ნაჩვენებია მხოლოდ მარშრუტის გადახედვა.",
+  "route.from": "საიდან",
+  "route.myLocation": "ჩემი მდებარეობა",
+  "route.mapCenter": "რუკის ცენტრი",
+  "place.save": "შენახვა",
+  "place.sendToCar": "მანქანაში გაგზავნა",
+  "map.recenter": "ცენტრირება",
+  "map.layers": "რუკის სტილი",
+  "map.2d": "2D",
+  "map.3d": "3D",
+  "map.mute": "ხმის გამორთვა",
+  "map.unmute": "ხმის ჩართვა",
+  "gps.denied": "მდებარეობაზე წვდომა უარყოფილია. მოძებნე ან შეეხე რუკას საწყისი წერტილის ასარჩევად.",
+  "gps.stale": "GPS სიგნალი მოძველებულია",
+  "gps.unavailable": "მდებარეობა მიუწვდომელია",
+  "inbox.title": "ამ ბრაუზერში გამოგზავნილი",
+  "inbox.empty": "ჯერ ცარიელია. გამოგზავნე დანიშნულების ადგილი ტელეფონიდან.",
+  "inbox.navigate": "წასვლა",
+  "inbox.dismiss": "დამალვა",
+  "common.save": "შენახვა",
+  "common.cancel": "გაუქმება",
+  "common.delete": "წაშლა",
+  "common.close": "დახურვა",
+  "common.loading": "იტვირთება…",
+  "common.demo": "სადემონსტრაციო მონაცემები",
+  "plan.trialing": "უფასო საცდელი",
+  "plan.active": "აქტიური",
+  "plan.past_due": "გადახდის პრობლემა",
+  "plan.paused": "შეჩერებული",
+  "plan.canceled": "გაუქმებული",
+  "plan.scheduled_cancel": "გაუქმდება პერიოდის ბოლოს",
+  "plan.none": "გეგმა არ არის",
+};
+
+const dicts: Record<Locale, Record<DictKey, string>> = { en, ka };
+
+export function dict(locale: Locale) {
+  return dicts[locale] ?? en;
+}
+export function isLocale(v: unknown): v is Locale {
+  return v === "en" || v === "ka";
+}

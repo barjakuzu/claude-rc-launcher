@@ -77,7 +77,7 @@ export async function handleWebhook(
   provider: "paddle" | "dev",
 ): Promise<{ status: number; outcome?: ApplyOutcome; error?: string }> {
   const secret = provider === "paddle" ? env().PADDLE_WEBHOOK_SECRET : env().DEV_BILLING_WEBHOOK_SECRET;
-  if (!secret) return { status: 500, error: "webhook secret not configured" };
+  if (!secret) return { status: 503, error: "webhook secret not configured" };
   if (!verifySignature(secret, rawBody, signature)) return { status: 401, error: "invalid signature" };
   let json: unknown;
   try {
@@ -91,6 +91,62 @@ export async function handleWebhook(
     applyBillingEvent(tx, parsed.data, { provider, customDataSecret: customDataSecret() }),
   );
   return { status: 200, outcome };
+}
+
+export interface PublicPrice {
+  amountMinor: number;
+  currency: string;
+  trialDays: number;
+  interval: string;
+  source: "provider" | "configured";
+}
+let priceCache: { value: PublicPrice; at: number } | null = null;
+
+/**
+ * Price shown on marketing pages. Live: read from the Paddle price object (authoritative,
+ * cached 1h). Demo or provider failure: configured display values, labelled as such.
+ * Paddle checkout always shows the final localized price and taxes.
+ */
+export async function getPublicPrice(): Promise<PublicPrice> {
+  const e = env();
+  const configured: PublicPrice = {
+    amountMinor: e.DISPLAY_PRICE_AMOUNT_MINOR,
+    currency: e.DISPLAY_PRICE_CURRENCY,
+    trialDays: e.TRIAL_DAYS,
+    interval: "month",
+    source: "configured",
+  };
+  let mode: "live" | "demo";
+  try {
+    mode = billingMode();
+  } catch {
+    return configured;
+  }
+  if (mode !== "live") return configured;
+  if (priceCache && Date.now() - priceCache.at < 3_600_000) return priceCache.value;
+  try {
+    const p = await paddle<{
+      unit_price: { amount: string; currency_code: string };
+      trial_period: { interval: string; frequency: number } | null;
+      billing_cycle: { interval: string; frequency: number } | null;
+    }>("GET", `/prices/${encodeURIComponent(e.PADDLE_PRICE_ID!)}`);
+    const trialDays = p.trial_period
+      ? p.trial_period.interval === "day"
+        ? p.trial_period.frequency
+        : p.trial_period.frequency * (p.trial_period.interval === "week" ? 7 : 30)
+      : 0;
+    const value: PublicPrice = {
+      amountMinor: Number(p.unit_price.amount),
+      currency: p.unit_price.currency_code,
+      trialDays,
+      interval: p.billing_cycle?.interval ?? "month",
+      source: "provider",
+    };
+    priceCache = { value, at: Date.now() };
+    return value;
+  } catch {
+    return configured;
+  }
 }
 
 /* ───────────────────────────── Paddle (live) ───────────────────────────── */

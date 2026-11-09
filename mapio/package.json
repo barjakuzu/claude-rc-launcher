@@ -3,10 +3,18 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
+    "predev": "node scripts/copy-maplibre-worker.mjs",
     "dev": "next dev",
+    "prebuild": "node scripts/copy-maplibre-worker.mjs",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint src tests",
+    "typecheck": "tsc --noEmit",
+    "format": "prettier --write \"src/**/*.{ts,tsx,css}\" \"tests/**/*.ts\"",
+    "test": "vitest run",
+    "test:e2e": "playwright test --trace off",
+    "check": "npm run typecheck && npm run lint && npm test && npm run build",
+    "preview:capture": "node scripts/capture-preview.mjs"
   },
   "dependencies": {
     "@electric-sql/pglite": "^0.5.16",

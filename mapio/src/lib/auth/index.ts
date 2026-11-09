@@ -50,6 +50,9 @@ async function setDevSession(user: SessionUser) {
 
 // ── Public API ─────────────────────────────────────────────────────────────
 export async function getSessionUser(): Promise<SessionUser | null> {
+  // Touch request cookies first: marks every caller as request-time (never prerendered)
+  // before any configuration check can run at build time.
+  const jar = await cookies();
   if (authMode() === "live") {
     const sb = await supabaseServer();
     const { data, error } = await sb.auth.getClaims();
@@ -57,7 +60,7 @@ export async function getSessionUser(): Promise<SessionUser | null> {
     if (error || !claims?.sub) return null;
     return { id: String(claims.sub), email: String(claims.email ?? "") };
   }
-  const s = verifyPayload<DevSession>(sessionSecret(), (await cookies()).get(DEV_SESSION_COOKIE)?.value);
+  const s = verifyPayload<DevSession>(sessionSecret(), jar.get(DEV_SESSION_COOKIE)?.value);
   if (!s || s.exp < Date.now() / 1000) return null;
   // Make sure the account still exists (deleted accounts lose access immediately).
   const rows = await withService((tx) => tx.query(`select id from auth.users where id = $1`, [s.uid]));
