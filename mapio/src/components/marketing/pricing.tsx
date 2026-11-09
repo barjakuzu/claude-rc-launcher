@@ -15,19 +15,17 @@ export function PriceTag({ price }: { price: PublicPrice }) {
 
 export function PricingCard({ price }: { price: PublicPrice }) {
   return (
-    <section aria-labelledby="pricing-title" className="glass glow-edge relative grid gap-6 overflow-hidden p-6 md:grid-cols-[180px_1fr_auto] md:items-center md:p-8">
-      <div className="mx-auto grid h-36 w-36 place-items-center rounded-[32px] border border-line-strong bg-gradient-to-br from-[#163a73]/80 to-[#071a3a]/80 shadow-[0_30px_60px_-20px_var(--glow)] [transform:perspective(600px)_rotateX(12deg)_rotateY(-14deg)]">
-        <LogoMark size={84} />
+    <section aria-labelledby="pricing-title" className="glass glow-edge relative grid gap-6 overflow-hidden p-6 sm:grid-cols-[150px_1fr] sm:items-start md:p-8">
+      <div className="mx-auto grid h-32 w-32 place-items-center sm:mt-6 rounded-[32px] border border-line-strong bg-gradient-to-br from-[#163a73]/80 to-[#071a3a]/80 shadow-[0_30px_60px_-20px_var(--glow)] [transform:perspective(600px)_rotateX(12deg)_rotateY(-14deg)]">
+        <LogoMark size={74} />
       </div>
       <div>
         <h2 id="pricing-title" className="text-2xl font-bold">MAPIO Premium</h2>
-        <p className="mt-2 text-4xl font-bold md:text-5xl">
+        <p className="mt-2 flex flex-wrap items-baseline gap-x-3 text-4xl font-bold md:text-5xl">
           <PriceTag price={price} />
-          {price.trialDays > 0 && (
-            <span className="ml-3 align-middle text-base font-medium text-muted">after {price.trialDays}-day free trial</span>
-          )}
+          {price.trialDays > 0 && <span className="text-base font-medium text-muted">after {price.trialDays}-day free trial</span>}
         </p>
-        <ul className="mt-4 grid gap-2 text-[15px]">
+        <ul className="mt-4 grid gap-2 text-[15px] lg:grid-cols-2 lg:gap-x-6 xl:grid-cols-1 2xl:grid-cols-2">
           {[
             "Full access to all MAPIO features",
             "3D maps and turn-by-turn route guidance (provider-sourced)",
@@ -40,8 +38,8 @@ export function PricingCard({ price }: { price: PublicPrice }) {
           ))}
         </ul>
       </div>
-      <div className="flex flex-col items-stretch gap-3 text-center md:min-w-[260px]">
-        <Link href="/signup?plan=premium" className="btn btn-primary !min-h-14 text-lg">
+      <div className="flex flex-col items-stretch gap-2 text-center sm:col-start-2 sm:items-start sm:text-left">
+        <Link href="/signup?plan=premium" className="btn btn-primary !min-h-14 px-7 text-lg">
           Start {price.trialDays}-day free trial <ArrowRight className="h-5 w-5" aria-hidden />
         </Link>
         <p className="text-sm text-muted">

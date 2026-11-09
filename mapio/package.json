@@ -14,7 +14,8 @@
     "test": "vitest run",
     "test:e2e": "playwright test --trace off",
     "check": "npm run typecheck && npm run lint && npm test && npm run build",
-    "preview:capture": "node scripts/capture-preview.mjs"
+    "preview:capture": "node scripts/capture-preview.mjs",
+    "tunnel": "bash scripts/tunnel.sh"
   },
   "dependencies": {
     "@electric-sql/pglite": "^0.5.16",

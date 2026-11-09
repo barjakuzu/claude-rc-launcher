@@ -32,7 +32,7 @@ import type { MapViewHandle } from "./map-view";
 import { useDebounced, useGeolocation, useInbox, type InboxItemDTO } from "./hooks";
 import type { MapClientConfig } from "@/lib/map/config";
 import type { Charger, LngLat, Place, ProviderMeta, Route, Weather } from "@/lib/providers/types";
-import { isOffRoute, prepareRoute, progress, type PreparedRoute } from "@/lib/nav";
+import { distM, isOffRoute, prepareRoute, progress, type PreparedRoute } from "@/lib/nav";
 import { formatClock, formatDistance, formatDuration, formatTemp, relativeTime, type Units } from "@/lib/format";
 import type { DictKey } from "@/lib/i18n";
 import { setDomTheme, useDomTheme, useLocalJson, useLocalPref, useLowPerf, useNow } from "@/components/hooks/client-prefs";
@@ -151,7 +151,11 @@ export function Navigator(props: NavigatorProps) {
     recentSearchesRef.current = recentSearches;
   }, [recentSearches]);
 
+  // Where the map was before we flew to a chosen place: the fallback start when GPS is unavailable.
+  const startCandidate = useRef<LngLat | null>(null);
+
   const choosePlace = useCallback((p: Place) => {
+    startCandidate.current = map.current?.getCenter() ?? null;
     setSelected({ kind: "place", place: p });
     setSearchOpen(false);
     setQ("");
@@ -164,14 +168,22 @@ export function Navigator(props: NavigatorProps) {
   /* ── routing ── */
   const origin = useCallback((): { ll: LngLat; label: string } => {
     if (geo.fix && !geo.stale) return { ll: geo.fix.lngLat, label: t["route.myLocation"] };
-    return { ll: map.current?.getCenter() ?? props.initialCenter, label: t["route.mapCenter"] };
+    return { ll: startCandidate.current ?? map.current?.getCenter() ?? props.initialCenter, label: t["route.mapCenter"] };
   }, [geo.fix, geo.stale, props.initialCenter, t]);
 
   const requestRoute = useCallback(
     async (dest: Place, opts: { reroute?: boolean } = {}) => {
+      const o = origin();
+      if (distM(o.ll, [dest.lon, dest.lat]) < 30) {
+        setError(
+          geo.fix && !geo.stale
+            ? "You're already at this place."
+            : "No starting point yet. Allow location access, or close this place, move the map to where you're starting, and choose it again.",
+        );
+        return;
+      }
       setRouting(true);
       setError(null);
-      const o = origin();
       try {
         const d = await api<{ route: Route; meta: ProviderMeta }>("/api/geo/route", {
           method: "POST",
@@ -192,7 +204,7 @@ export function Navigator(props: NavigatorProps) {
         setRouting(false);
       }
     },
-    [origin, locale, drive],
+    [origin, locale, drive, geo.fix, geo.stale],
   );
 
   const endRoute = useCallback(() => {
@@ -204,21 +216,19 @@ export function Navigator(props: NavigatorProps) {
 
   const canGuide = geo.status === "watching" && !geo.stale;
 
+  // Guidance can be requested before GPS is ready; it activates once a fresh fix arrives.
   const startGuidance = useCallback(() => {
-    if (!canGuide) {
-      geo.start();
-      flash(t["route.noGps"]);
-      return;
-    }
+    if (!canGuide) geo.start();
     setNavigating(true);
     setFollow(true);
-  }, [canGuide, geo, flash, t]);
+  }, [canGuide, geo]);
 
   /* ── live position → puck, follow, progress, reroute ── */
   const prepared = useMemo<PreparedRoute | null>(() => (route ? prepareRoute(route.route) : null), [route]);
   const prog = useMemo(() => (prepared && geo.fix ? progress(prepared, geo.fix.lngLat) : null), [prepared, geo.fix]);
-  const arrived = navigating && !!prog?.arrived;
+  const arrived = navigating && canGuide && !!prog?.arrived;
   const guiding = navigating && !arrived;
+  const waitingForGps = guiding && !canGuide;
 
   useEffect(() => {
     map.current?.setPuck(geo.fix?.lngLat ?? null, geo.fix?.heading ?? null, geo.stale);
@@ -398,6 +408,19 @@ export function Navigator(props: NavigatorProps) {
               <div className="text-white/85">{route?.dest.name}</div>
             </div>
             <button onClick={endRoute} className="btn bg-white/20 !min-h-12">Done</button>
+          </section>
+        ) : waitingForGps ? (
+          <section role="status" className="glass-strong !rounded-3xl p-4">
+            <div className="flex items-center gap-3">
+              <Loader2 className="h-8 w-8 animate-spin text-accent-2" aria-hidden />
+              <div className="flex-1">
+                <div className="text-xl font-bold">Waiting for GPS…</div>
+                <div className="text-sm text-muted">
+                  {geo.status === "denied" ? t["gps.denied"] : "Guidance starts when your browser reports a current position."}
+                </div>
+              </div>
+              <button onClick={() => setNavigating(false)} className="btn btn-ghost !min-h-11">{t["common.cancel"]}</button>
+            </div>
           </section>
         ) : guiding && nextStep ? (
           <section aria-live="polite" className="rounded-3xl bg-gradient-to-b from-[#2f8cff] to-[#1366ea] p-4 text-white shadow-[0_14px_40px_-10px_rgba(40,130,255,0.9)]">

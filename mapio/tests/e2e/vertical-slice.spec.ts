@@ -72,3 +72,17 @@ test("full vertical slice", async ({ page, context }) => {
   await expect(page.getByRole("heading", { name: /part of MAPIO Premium/ })).toBeVisible();
   await expect(page.getByText(/Resubscribe/)).toBeVisible();
 });
+
+test("without GPS: route starts from the previous map view and guidance waits for a fix", async ({ page }) => {
+  await (await import("./helpers")).signUp(page, uniqueEmail("nogps"));
+  await startTrial(page);
+  await page.goto("/drive");
+  await page.getByRole("textbox", { name: /Search destinations/ }).fill("Holy Trinity");
+  await page.getByRole("option", { name: /Holy Trinity Cathedral/ }).click();
+  await page.getByRole("button", { name: "Directions" }).click();
+  const preview = page.getByRole("region", { name: "Route preview" });
+  await expect(preview).toContainText("From Map center");
+  await expect(preview).toContainText("km"); // a real distance, not a zero-length route
+  await page.getByRole("button", { name: "Start" }).click();
+  await expect(page.getByText("Waiting for GPS…")).toBeVisible();
+});

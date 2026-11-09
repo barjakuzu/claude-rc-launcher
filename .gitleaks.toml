@@ -1,0 +1,12 @@
+# Extends the default gitleaks rules. The allowlisted paths contain only
+# documented, non-secret placeholder values used by local demos and tests.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "MAPIO demo/test placeholders (not real credentials)"
+paths = [
+  '''mapio/\.env\.e2e''',
+  '''mapio/\.env\.example''',
+  '''mapio/tests/.*''',
+]
